@@ -2,11 +2,12 @@
 Defines the ShardedModel class for distributing MLX models across multiple devices.
 """
 
-from typing import Any, Optional, Type
+from typing import Any, List, Optional, Type
 
 import mlx.core as mx
-from mlx import nn  # R0402
+from mlx import nn
 from mlx_lm.models.base import BaseModelArgs, create_attention_mask
+from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 
 class ShardedModel(nn.Module):
@@ -21,6 +22,8 @@ class ShardedModel(nn.Module):
         block_class: Type[nn.Module],
         *,
         has_norm_in: bool = False,
+        tokenizer: Optional[TokenizerWrapper] = None,
+        dtype: mx.Dtype = mx.bfloat16,
     ):
         super().__init__()
         self.config = config
@@ -37,9 +40,12 @@ class ShardedModel(nn.Module):
         # Determine the roles of this shard
         self.is_first_shard = start_layer == 0
         self.is_last_shard = end_layer == self.num_hidden_layers
+        self.dtype = dtype
 
         # Instantiate modules based on the shard's role
         if self.is_first_shard:
+            assert tokenizer is not None
+            self.tokenizer = tokenizer
             self.embed_tokens = nn.Embedding(self.vocab_size, self.hidden_size)
             if has_norm_in:
                 self.norm_in = nn.RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
@@ -59,17 +65,25 @@ class ShardedModel(nn.Module):
 
     def __call__(
         self,
-        x: mx.array,
+        x: mx.array | List[str],
         cache: Optional[Any] = None,
         mask: Optional[mx.array] = None,
     ) -> mx.array:
-        if self.is_first_shard and self.embed_tokens:
-            h = self.embed_tokens(x)
+        if self.is_first_shard:
+            if isinstance(x, list):
+                h = self.tokenizer.encode(
+                    x,
+                    padding=True,
+                    return_tensors="mlx",
+                )
+            if self.embed_tokens:
+                h = self.embed_tokens(h)
+                print(f"h shape after embedding: {h.shape}")
+            if self.has_norm_in and self.norm_in:
+                h = self.norm_in(h)
         else:
+            assert isinstance(x, mx.array), "Input must be an mx.array for subsequent shards"
             h = x
-
-        if self.is_first_shard and self.has_norm_in and self.norm_in:
-            h = self.norm_in(h)
 
         if mask is None:
             # Assuming x (or h) is the input to the first layer of this shard

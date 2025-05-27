@@ -8,7 +8,9 @@ import logging
 from typing import Any, Dict, Optional, Tuple, Type
 
 import mlx.core as mx
-from mlx import nn  # R0402
+import safetensors
+from mlx import nn
+from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import get_model_path, load_config
 
 from .model import ShardedModel
@@ -50,112 +52,136 @@ class MLXModelLoader:
     ) -> Tuple[nn.Module, Dict[str, Any]]:
         # pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
         """
-        Loads the specified model shard.
+        Loads the specified model shard by loading only the necessary weights
+        from the safetensor files, saving significant memory.
 
         Args:
             lazy (bool): If False, evaluates model parameters to ensure they are loaded
-                         into memory before returning. Otherwise, they are loaded on demand.
-                         Defaults to False.
-            strict (bool): If True, raises an exception if weights in checkpoint files
-                           do not match the model structure. Defaults to True.
-            block_class (Type[nn.Module]): The class to use for instantiating transformer blocks
-                                          (e.g., a specific AttentionBlock or DecoderLayer).
+                         into memory. Defaults to False.
+            strict (bool): If True, raises an exception if weights do not match.
+                           Defaults to True.
+            block_class (Type[nn.Module]): The class to use for instantiating transformer blocks.
 
         Returns:
-            Tuple[nn.Module, dict]: A tuple containing the loaded sharded MLX model
-                                    and its configuration dictionary.
-
-        Raises:
-            FileNotFoundError: If no .safetensors weight files are found in the model path
-                               and strict mode is enabled.
-            ValueError: If the model type specified in the config is not found in mlx_lm.models.
+            A tuple containing the loaded sharded MLX model and its configuration dictionary.
         """
         model_path = get_model_path(self.model_path_str)
         config = load_config(model_path)
+        tokenizer = None
+        if self.start_layer == 0:
+            tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
 
         num_hidden_layers = config.get("num_hidden_layers", 0)
-        # Resolve start and end layers if they are None
         current_start_layer = self.start_layer if self.start_layer is not None else 0
         current_end_layer = self.end_layer if self.end_layer is not None else num_hidden_layers
+
+        # We need the model object to know its structure and which layers it owns.
+        # This part mirrors the logic from the provided utils.py to get model_args.
+        model_type = config.get("model_type")
+        if not model_type:
+            raise ValueError("model_type not found in config.json")
+        try:
+            arch_module = importlib.import_module(f"mlx_lm.models.{model_type}")
+            model_args_class = getattr(arch_module, "ModelArgs")
+            model_args = model_args_class.from_dict(config)
+        except (ImportError, AttributeError) as e:
+            raise ValueError(f"Failed to load architecture for model_type '{model_type}'.") from e
+
+        dtype = getattr(mx, config.get("torch_dtype"))
+        model_shard = ShardedModel(
+            config=model_args,
+            start_layer=current_start_layer,
+            end_layer=current_end_layer,
+            block_class=block_class,
+            tokenizer=tokenizer,
+            dtype=dtype,
+        )
 
         weight_files = glob.glob(str(model_path / "model*.safetensors"))
         if not weight_files:
             weight_files = glob.glob(str(model_path / "weight*.safetensors"))
 
         if not weight_files and strict:
-            msg = f"No safetensors found in {model_path}"
-            logger.error(msg)
-            raise FileNotFoundError(msg)
+            raise FileNotFoundError(f"No safetensors found in {model_path}")
 
-        model_type = config.get("model_type")
-        if not model_type:
-            msg = "model_type not found in config.json"
-            logger.error(msg)
-            raise ValueError(msg)
-
-        try:
-            arch_module = importlib.import_module(f"mlx_lm.models.{model_type}")
-        except ImportError as e:  # W0707
-            msg = f"Model type '{model_type}' not found in mlx_lm.models."
-            logger.error(msg)  # W1203: Keep f-string for error message clarity
-            raise ValueError(msg) from e
-
-        model_args_class = getattr(arch_module, "ModelArgs", None)
-        if not model_args_class:
-            msg = f"ModelArgs class not found in mlx_lm.models.{model_type}"
-            logger.error(msg)  # W1203
-            raise ValueError(msg)
-
-        # Assuming ShardedModel __init__ is compatible with model_args_class instance or config dict
-        # And that block_class is the actual nn.Module for layers, not ModelArgs
-        model_shard = ShardedModel(
-            config=model_args_class.from_dict(config),  # Pass ModelArgs instance
-            start_layer=current_start_layer,
-            end_layer=current_end_layer,
-            block_class=block_class,
-        )
-
-        all_weights = {}
-        for wf in weight_files:
-            all_weights.update(mx.load(wf))
-
+        # Instead of loading all weights, we iterate through files and keys,
+        # loading only what we need.
         shard_weights = {}
         layer_key_prefix = "model.layers"  # Common prefix
 
-        for key, value in all_weights.items():
-            if model_shard.is_first_shard and "embed_tokens" in key and key.startswith("model."):
-                shard_weights[key.replace("model.", "", 1)] = value
-            elif model_shard.is_last_shard and "model.norm" in key:
-                shard_weights[key.replace("model.", "", 1)] = value
-            elif (
-                model_shard.is_last_shard and "lm_head" in key
-            ):  # lm_head usually doesn't have "model."
-                shard_weights[key] = value
-            elif layer_key_prefix in key:
-                try:
-                    # e.g. model.layers.15.self_attn.q_proj.weight
-                    parts = key.split(".")
-                    layer_idx_str = parts[2]  # "15"
-                    layer_idx = int(layer_idx_str)
+        for wf in weight_files:
+            # For bf16 models, we need torch tensors as a bridge
+            with safetensors.safe_open(wf, framework="pt") as f:
+                for key in f.keys():
+                    is_needed = False
+                    remapped_key = None
 
-                    if current_start_layer <= layer_idx < current_end_layer:
-                        local_layer_idx = layer_idx - current_start_layer
-                        # Reconstruct: layers.{local_idx}.self_attn.q_proj.weight
-                        remapped_key = f"layers.{local_layer_idx}.{'.'.join(parts[3:])}"
-                        shard_weights[remapped_key] = value
-                except (ValueError, IndexError):
-                    logger.warning("Could not parse layer index from key: %s", key)  # W1203
-                    continue
+                    # Check if the key belongs to the shard and remap it
+                    if (
+                        model_shard.is_first_shard
+                        and "embed_tokens" in key
+                        and key.startswith("model.")
+                    ):
+                        is_needed = True
+                        remapped_key = key.replace("model.", "", 1)
+                    elif model_shard.is_last_shard:
+                        if "model.norm" in key:
+                            is_needed = True
+                            remapped_key = key.replace("model.", "", 1)
+                        if "lm_head" in key:
+                            is_needed = True
+                            remapped_key = key
+                        elif (
+                            config.get("tie_word_embedding", True)
+                            and "embed" in key
+                            and key.startswith("model.embed_tokens")
+                        ):
+                            print(key)
+                            is_needed = True
+                            remapped_key = "lm_head.weight"
+                            print(remapped_key)
+                    if layer_key_prefix in key:
+                        try:
+                            parts = key.split(".")
+                            layer_idx = int(parts[2])
+                            if current_start_layer <= layer_idx < current_end_layer:
+                                is_needed = True
+                                local_layer_idx = layer_idx - current_start_layer
+                                remapped_key = f"layers.{local_layer_idx}.{'.'.join(parts[3:])}"
+                        except (ValueError, IndexError):
+                            continue
+
+                    # If the key is needed, load only that tensor from the file
+                    if is_needed:
+                        shard_weights[remapped_key] = mx.array(f.get_tensor(key))
+
+        if (quantization := config.get("quantization", None)) is not None:
+            logger.info("Model is quantized. Applying quantization parameters...")
+
+            def class_predicate(p, m):
+                # Handle custom per-layer quantizations from the config
+                if p in config["quantization"]:
+                    return config["quantization"][p]
+                if not hasattr(m, "to_quantized"):
+                    return False
+                # Handle legacy models by checking if quantized weights exist
+                return f"{p}.scales" in shard_weights
+
+            nn.quantize(
+                model_shard,
+                group_size=quantization["group_size"],
+                bits=quantization["bits"],
+                class_predicate=class_predicate,
+            )
 
         model_shard.load_weights(list(shard_weights.items()), strict=strict)
 
         if not lazy:
             mx.eval(model_shard.parameters())
-
         model_shard.eval()
         logger.info(
-            "Successfully loaded model shard (layers %d-%d)",  # W1203
+            "Successfully loaded model shard (layers [%d-%d))",
             current_start_layer,
-            current_end_layer - 1,
+            current_end_layer,
         )
         return model_shard, config
