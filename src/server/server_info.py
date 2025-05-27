@@ -9,6 +9,11 @@ import subprocess
 from dataclasses import asdict, dataclass
 from typing import Any, ClassVar, Dict
 
+import mlx.core as mx
+from mlx import nn
+from mlx.utils import tree_reduce
+from mlx_lm.tuner.utils import nparams
+
 try:
     import psutil
 except ImportError:
@@ -72,7 +77,6 @@ class AppleSiliconHardwareInfo(HardwareInfo):
             ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
         ).strip()
 
-        # Use rsplit with maxsplit=1 for C0207
         short_name = chip.rsplit("Apple ", maxsplit=1)[-1]
         try:
             flops = cls._APPLE_PEAK_FP16[short_name]
@@ -83,3 +87,52 @@ class AppleSiliconHardwareInfo(HardwareInfo):
             ) from e
 
         return cls(total_ram_gb=round(total_gb, 1), chip=chip, tflops_fp16=flops)
+
+
+@dataclass
+class ShardedModelInfo:
+    """
+    Detailed information about the specific model shard hosted by a server.
+    """
+
+    model_name: str
+    start_layer: int
+    end_layer: int
+    parameter_count: int
+    memory_consumption_mb: float
+
+    def dumps(self) -> Dict[str, Any]:
+        """Serializes the HardwareInfo object to a dictionary."""
+        data = asdict(self)
+        return data
+
+    @classmethod
+    def loads(cls, data: Dict[str, Any]) -> "ShardedModelInfo":
+        """Deserializes a dictionary into a HardwareInfo object."""
+        return cls(**data)
+
+    @classmethod
+    def from_sharded_model(
+        cls, sharded_model_instance: nn.Module  # Instance of your ShardedModel
+    ) -> "ShardedModelInfo":
+        """
+        Constructs ShardedModelInfo from a loaded ShardedModel instance.
+        Assumes sharded_model_instance has start_layer, end_layer, and model_id_original attributes.
+        """
+        # Calculate parameter count
+        count = nparams(sharded_model_instance)
+
+        model_bytes = tree_reduce(
+            lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,
+            sharded_model_instance.parameters(),
+            0,
+        )
+        memory_mb = round(model_bytes / (1024 * 1024), 2)
+
+        return cls(
+            model_name=sharded_model_instance.model_id,  # Use the cleaned name
+            start_layer=sharded_model_instance.start_layer,
+            end_layer=sharded_model_instance.end_layer,
+            parameter_count=count,
+            memory_consumption_mb=memory_mb,
+        )

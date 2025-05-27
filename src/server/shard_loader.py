@@ -5,6 +5,7 @@ Loads sharded MLX models from Hugging Face Hub or local paths.
 import glob
 import importlib
 import logging
+import pathlib
 from typing import Any, Dict, Optional, Tuple, Type
 
 import mlx.core as mx
@@ -88,8 +89,16 @@ class MLXModelLoader:
             raise ValueError(f"Failed to load architecture for model_type '{model_type}'.") from e
 
         dtype = getattr(mx, config.get("torch_dtype"))
+
+        # Extract the base model name from model_id_original if it's a repo ID
+        model_id = self.model_path_str
+        if "/" in model_id:
+            model_id = model_id.split("/")[-1]
+        else:  # If it's already a clean name or a local path (take basename)
+            model_id = pathlib.Path(model_id).name
         model_shard = ShardedModel(
             config=model_args,
+            model_id=model_id,
             start_layer=current_start_layer,
             end_layer=current_end_layer,
             block_class=block_class,

@@ -11,26 +11,29 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 
 class ShardedModel(nn.Module):
-    # pylint: disable=too-many-instance-attributes, too-many-arguments
+    # pylint: disable=too-many-instance-attributes, too-many-arguments, too-many-positional-arguments
     """A general class for MLX sharded model."""
 
     def __init__(
         self,
         config: BaseModelArgs,
+        model_id: str,
         start_layer: int,
         end_layer: int,
         block_class: Type[nn.Module],
         *,
         has_norm_in: bool = False,
         tokenizer: Optional[TokenizerWrapper] = None,
-        dtype: mx.Dtype = mx.bfloat16,
+        dtype: Optional[mx.Dtype] = None,
     ):
         super().__init__()
         self.config = config
+        self.model_id = model_id
         self.start_layer = start_layer
         self.end_layer = end_layer
-        self.block_class = block_class  # Store for reference if needed
-        self.has_norm_in = has_norm_in  # Store for reference
+        self.block_class = block_class
+        self.has_norm_in = has_norm_in
+        self.dtype = dtype
 
         # Get essential model parameters from the config
         self.hidden_size = config.hidden_size
@@ -40,7 +43,6 @@ class ShardedModel(nn.Module):
         # Determine the roles of this shard
         self.is_first_shard = start_layer == 0
         self.is_last_shard = end_layer == self.num_hidden_layers
-        self.dtype = dtype
 
         # Instantiate modules based on the shard's role
         if self.is_first_shard:
@@ -78,7 +80,6 @@ class ShardedModel(nn.Module):
                 )
             if self.embed_tokens:
                 h = self.embed_tokens(h)
-                print(f"h shape after embedding: {h.shape}")
             if self.has_norm_in and self.norm_in:
                 h = self.norm_in(h)
         else:

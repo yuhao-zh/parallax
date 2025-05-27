@@ -14,6 +14,7 @@ from mlx_lm.models.qwen3 import TransformerBlock as Qwen3Block
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import get_model_path, load_model
 
+from server.server_info import ShardedModelInfo
 from server.shard_loader import MLXModelLoader
 
 REPO_ID = "mlx-community/Qwen3-0.6B-bf16"
@@ -37,16 +38,17 @@ def test_shard_forward(layers_config: List[Tuple[int, int]]) -> None:
 
     compare its forward pass with a full reference model.
     """
-    print(f"\nTesting with sharding configuration: {layers_config}")
     model_shards = []
-    for i, (layer_from, layer_to) in enumerate(layers_config):
-        print(f"  Loading shard {i+1}: layers {layer_from} to {layer_to-1}")
+    for layer_from, layer_to in layers_config:
         loader = MLXModelLoader(
             model_path_or_hf_repo=REPO_ID,
             start_layer=layer_from,
             end_layer=layer_to,
         )
         model_shard_instance, _ = loader.load(block_class=Qwen3Block)
+        model_info = ShardedModelInfo.from_sharded_model(model_shard_instance)
+        print(model_info)
+
         model_shards.append(model_shard_instance)
 
     assert len(model_shards) == len(layers_config), "Number of loaded shards should match config"
@@ -61,10 +63,9 @@ def test_shard_forward(layers_config: List[Tuple[int, int]]) -> None:
     )
 
     # Forward pass through the reference model
-    print("  Running forward pass on reference model...")
     ref_out = ref_model(tokenized_batch)
 
-    for i, shard in enumerate(model_shards):
+    for shard in model_shards:
         x = shard(x, cache=None, mask=None)
 
     assert mx.allclose(x, ref_out, atol=1e-3, rtol=1e-3)
