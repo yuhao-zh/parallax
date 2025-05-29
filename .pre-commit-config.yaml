@@ -27,4 +27,5 @@ repos:
         language: system
         types: [python]
         args:
+          - "--disable=fixme,logging-fstring-interpolation"
           - "--msg-template={abspath}:{line}: [{msg_id}({symbol}), {obj}] {msg}"

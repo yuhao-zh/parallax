@@ -145,10 +145,8 @@ class MLXModelLoader:
                             and "embed" in key
                             and key.startswith("model.embed_tokens")
                         ):
-                            print(key)
                             is_needed = True
                             remapped_key = "lm_head.weight"
-                            print(remapped_key)
                     if layer_key_prefix in key:
                         try:
                             parts = key.split(".")
