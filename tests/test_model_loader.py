@@ -14,8 +14,8 @@ from mlx_lm.models.qwen3 import TransformerBlock as Qwen3Block
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import get_model_path, load_model
 
-from server.server_info import ShardedModelInfo
-from server.shard_loader import MLXModelLoader
+from parallax.server.server_info import ShardedModelInfo
+from parallax.server.shard_loader import MLXModelLoader
 
 REPO_ID = "mlx-community/Qwen3-0.6B-bf16"
 TOTAL_LAYERS = 28

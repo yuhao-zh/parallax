@@ -1,4 +1,3 @@
-# pylint: disable=too-many-arguments
 """
 A minimum implementation of Request objects for managing inference requests.
 
@@ -61,7 +60,6 @@ TODO:
     3. Accepts more generation configs like repetition penalties.
 """
 
-import logging
 import uuid
 from dataclasses import dataclass
 from enum import Enum
@@ -69,7 +67,9 @@ from typing import List, Optional
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
+from parallax.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class RequestStatus(Enum):
@@ -188,9 +188,8 @@ class IntermediateRequest:
     """
 
     request_id: str
-    current_position: (
-        int  # Position of the *last token* for which these hidden_states were generated
-    )
+    # Position of the *last token* for which these hidden_states were generated
+    current_position: int
 
     # Hidden states from the previous peer's computation.
     # Shape:

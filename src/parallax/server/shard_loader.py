@@ -4,7 +4,6 @@ Loads sharded MLX models from Hugging Face Hub or local paths.
 
 import glob
 import importlib
-import logging
 import pathlib
 from typing import Any, Dict, Optional, Tuple, Type
 
@@ -14,9 +13,10 @@ from mlx import nn
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import get_model_path, load_config
 
-from .model import ShardedModel
+from parallax.logging_config import get_logger
+from parallax.server.model import ShardedModel
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class MLXModelLoader:
@@ -51,7 +51,7 @@ class MLXModelLoader:
     def load(
         self, lazy: bool = False, strict: bool = True, *, block_class: Type[nn.Module]
     ) -> Tuple[nn.Module, Dict[str, Any]]:
-        # pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
+        # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         """
         Loads the specified model shard by loading only the necessary weights
         from the safetensor files, saving significant memory.
@@ -145,6 +145,9 @@ class MLXModelLoader:
                             and "embed" in key
                             and key.startswith("model.embed_tokens")
                         ):
+                            # TODO: we don't need load lm_head in this case
+                            # as we will pass hidden_states to FirstPeer
+                            # see request.py for details
                             is_needed = True
                             remapped_key = "lm_head.weight"
                     if layer_key_prefix in key:

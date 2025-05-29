@@ -11,7 +11,6 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 
 class ShardedModel(nn.Module):
-    # pylint: disable=too-many-instance-attributes, too-many-arguments, too-many-positional-arguments
     """A general class for MLX sharded model."""
 
     def __init__(
@@ -38,11 +37,11 @@ class ShardedModel(nn.Module):
         # Get essential model parameters from the config
         self.hidden_size = config.hidden_size
         self.vocab_size = config.vocab_size
-        self.num_hidden_layers = config.num_hidden_layers
 
         # Determine the roles of this shard
         self.is_first_shard = start_layer == 0
-        self.is_last_shard = end_layer == self.num_hidden_layers
+        self.is_last_shard = end_layer == config.num_hidden_layers
+        self.n_layers = end_layer - start_layer
 
         # Instantiate modules based on the shard's role
         if self.is_first_shard:
