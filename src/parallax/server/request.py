@@ -61,13 +61,12 @@ TODO:
 """
 
 import uuid
-from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional
 
 import numpy as np
 
-from parallax.logging_config import get_logger
+from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -75,7 +74,6 @@ logger = get_logger(__name__)
 class RequestStatus(Enum):
     """Enumeration of possible request statuses for the First Peer."""
 
-    PENDING = "PENDING"
     PREFILLING = "PREFILLING"
     DECODING = "DECODING"
     FINISHED_EOS = "FINISHED_EOS"
@@ -84,7 +82,51 @@ class RequestStatus(Enum):
     CANCELLED = "CANCELLED"
 
 
-class InitialRequest:
+class Request:
+    """
+    Base class for requests in the Parallax server.
+    This is a placeholder and can be extended for specific request types.
+    """
+
+    def __init__(
+        self,
+        request_id: Optional[str] = None,
+        status: RequestStatus = RequestStatus.PREFILLING,
+        prompt_len: int = 0,
+    ):
+        self.request_id = request_id or str(uuid.uuid4())
+        self.status = status
+        self.prompt_length = prompt_len
+
+    @property
+    def is_finished(self) -> bool:
+        """Checks if the request has finished processing."""
+        return self.status in [
+            RequestStatus.FINISHED_EOS,
+            RequestStatus.FINISHED_MAX_LENGTH,
+            RequestStatus.ERROR,
+            RequestStatus.CANCELLED,
+        ]
+
+    @property
+    def is_prefill(self) -> bool:
+        """Checks if the request is in the prefill stage."""
+        return self.status == RequestStatus.PREFILLING
+
+    def update_status(self, new_status: RequestStatus = RequestStatus.DECODING):
+        """
+        Update the status of the request.
+        """
+        if self.is_finished:
+            logger.warning(
+                f"Request {self.request_id}: Attempted to update status of a finished request."
+            )
+            return
+        self.status = new_status
+        logger.debug(f"Request {self.request_id} status updated to {self.status}.")
+
+
+class InitialRequest(Request):
     """
     Represents the full state of a user's generation request, managed by the First Peer.
     """
@@ -97,12 +139,13 @@ class InitialRequest:
         output_ids: Optional[List[int]] = None,
         max_new_tokens: int = 512,
         max_total_length: int = 1024,
-        status: RequestStatus = RequestStatus.PENDING,
+        status: RequestStatus = RequestStatus.PREFILLING,
     ):
-        self.request_id: str = request_id or str(uuid.uuid4())
+        super().__init__(request_id=request_id, status=status, prompt_len=len(input_ids))
         if not input_ids:
             raise ValueError("input_ids (prompt) cannot be empty.")
         self.input_ids = input_ids
+        self.prompt_len = len(input_ids)
 
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be at least 1.")
@@ -115,14 +158,8 @@ class InitialRequest:
         self.eos_token_id = eos_token_id
         self.output_ids = output_ids or []
 
-        self.status = status
         if len(self.output_ids) > 0 and self.status == RequestStatus.PREFILLING:
             raise ValueError(f"Cannot initialize with output_ids given {self.status}.")
-
-    @property
-    def prompt_length(self) -> int:
-        """Length of the input prompt (input_ids)."""
-        return len(self.input_ids)
 
     @property
     def output_length(self) -> int:
@@ -132,17 +169,7 @@ class InitialRequest:
     @property
     def total_length(self) -> int:
         """Total length of the sequence (input + output)."""
-        return self.prompt_length + self.output_length
-
-    @property
-    def is_finished(self) -> bool:
-        """Checks if the request has finished processing."""
-        return self.status in [
-            RequestStatus.FINISHED_EOS,
-            RequestStatus.FINISHED_MAX_LENGTH,
-            RequestStatus.ERROR,
-            RequestStatus.CANCELLED,
-        ]
+        return self.prompt_len + self.output_length
 
     def get_model_input_for_first_peer(self) -> List[int]:
         """
@@ -180,21 +207,33 @@ class InitialRequest:
                 self.status = RequestStatus.DECODING
 
 
-@dataclass
-class IntermediateRequest:
+class IntermediateRequest(Request):
     """
     Lightweight data packet sent between intermediate peers in the pipeline.
     This is what gets packed and sent over the network.
-    """
-
-    request_id: str
-    # Position of the *last token* for which these hidden_states were generated
-    current_position: int
-
-    # Hidden states from the previous peer's computation.
-    # Shape:
-    #   prefill: (prompt_len, hidden_dim)
-    #   decode: (1, hidden_dim)
-    hidden_states: np.ndarray
 
     # TODO: add attention_mask, logits...
+    """
+
+    def __init__(
+        self,
+        request_id: str,
+        current_position: int,
+        hidden_states: np.ndarray,
+    ):
+        super().__init__(request_id=request_id, status=RequestStatus.PREFILLING)
+        # Hidden states from the previous peer's computation.
+        # Shape:
+        #   prefill: (prompt_len, hidden_dim)
+        #   decode: (1, hidden_dim)
+        if hidden_states.ndim != 2:
+            raise ValueError("hidden_states must be a 2D array.")
+        if self.status == RequestStatus.DECODING:
+            assert (
+                hidden_states.shape[0] == 1
+            ), f"Decoding state has target len 1, got {hidden_states.shape[0]}."
+        self.hidden_states = hidden_states
+        self.request_id = request_id
+        self.current_position = current_position
+
+    # TODO: construct from a InitialRequest

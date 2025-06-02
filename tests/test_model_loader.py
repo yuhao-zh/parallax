@@ -45,7 +45,7 @@ def test_shard_forward(layers_config: List[Tuple[int, int]]) -> None:
             start_layer=layer_from,
             end_layer=layer_to,
         )
-        model_shard_instance, _ = loader.load(block_class=Qwen3Block)
+        model_shard_instance, _, _ = loader.load(block_class=Qwen3Block)
         model_info = ShardedModelInfo.from_sharded_model(model_shard_instance)
         print(model_info)
 

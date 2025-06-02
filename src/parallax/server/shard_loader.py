@@ -13,8 +13,8 @@ from mlx import nn
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import get_model_path, load_config
 
-from parallax.logging_config import get_logger
 from parallax.server.model import ShardedModel
+from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -50,7 +50,7 @@ class MLXModelLoader:
 
     def load(
         self, lazy: bool = False, strict: bool = True, *, block_class: Type[nn.Module]
-    ) -> Tuple[nn.Module, Dict[str, Any]]:
+    ) -> Tuple[nn.Module, Dict[str, Any], Any]:
         # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         """
         Loads the specified model shard by loading only the necessary weights
@@ -194,4 +194,4 @@ class MLXModelLoader:
             current_start_layer,
             current_end_layer,
         )
-        return model_shard, config
+        return model_shard, config, tokenizer

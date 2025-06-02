@@ -17,6 +17,7 @@ dependencies = [
   "msgpack>=1.0.7",
   "safetensors>=0.5.1",
   "numpy>=1.26",
+  "pyzmq>=25.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,7 @@ dev = [
   "black>=24.3",
   "ruff>=0.4",
   "pytest>=8.2",
+  "pytest-mock>=3.14",
   "pre-commit>=3.2",
   "pylint>=3.2",
 ]
@@ -33,6 +35,9 @@ where = ["src"]                # put your code under ./src/dllm/…
 
 [tool.black]
 line-length = 100
+
+[tool.isort]
+profile = "black"
 
 [tool.ruff]
 ignore = ["E501"]              # line length handled by Black
