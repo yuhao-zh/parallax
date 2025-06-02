@@ -39,13 +39,16 @@ def test_shard_forward(layers_config: List[Tuple[int, int]]) -> None:
     compare its forward pass with a full reference model.
     """
     model_shards = []
+    tokenizer = None
     for layer_from, layer_to in layers_config:
         loader = MLXModelLoader(
             model_path_or_hf_repo=REPO_ID,
             start_layer=layer_from,
             end_layer=layer_to,
         )
-        model_shard_instance, _, _ = loader.load(block_class=Qwen3Block)
+        model_shard_instance, _, _tokenizer = loader.load(block_class=Qwen3Block)
+        if layer_from == 0:
+            tokenizer = _tokenizer
         model_info = ShardedModelInfo.from_sharded_model(model_shard_instance)
         print(model_info)
 
@@ -56,16 +59,24 @@ def test_shard_forward(layers_config: List[Tuple[int, int]]) -> None:
     x = ["This is a test.", "This is yet another test."]
     if ref_tokenizer.pad_token is None:
         ref_tokenizer.pad_token = ref_tokenizer.eos_token
-    tokenized_batch = ref_tokenizer.encode(
+    ref_tokenized_batch = ref_tokenizer.encode(
         x,
         padding=True,
         return_tensors="mlx",
     )
 
     # Forward pass through the reference model
-    ref_out = ref_model(tokenized_batch)
+    ref_out = ref_model(ref_tokenized_batch)
 
     for shard in model_shards:
-        x = shard(x, cache=None, mask=None)
+        if shard.start_layer == 0:
+            tokenized_batch = tokenizer.encode(
+                x,
+                padding=True,
+                return_tensors="mlx",
+            )
+            x = shard(tokenized_batch, cache=None, mask=None)
+        else:
+            x = shard(x, cache=None, mask=None)
 
     assert mx.allclose(x, ref_out, atol=1e-3, rtol=1e-3)

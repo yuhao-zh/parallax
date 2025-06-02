@@ -102,7 +102,6 @@ class MLXModelLoader:
             start_layer=current_start_layer,
             end_layer=current_end_layer,
             block_class=block_class,
-            tokenizer=tokenizer,
             dtype=dtype,
         )
 
