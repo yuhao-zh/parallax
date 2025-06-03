@@ -1,21 +1,19 @@
+# pylint: disable=too-many-locals
 """
-Smoke‑tests for the ShardedModel loader utilities.
-These tests download *only* the shards required for the given layer slices
-from `mlx-community/Qwen3-0.6B-bf16` and verify that a forward pass runs
-without errors.  They are intentionally lightweight so they can run on a
-laptop with limited RAM.
+Tests for the ShardedModel loader utilities.
 """
 
 from typing import List, Tuple
 
 import mlx.core as mx
 import pytest
-from mlx_lm.models.qwen3 import TransformerBlock as Qwen3Block
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import get_model_path, load_model
 
+from parallax.models.qwen3 import ParallaxQwen3Block as Qwen3Block
 from parallax.server.server_info import ShardedModelInfo
 from parallax.server.shard_loader import MLXModelLoader
+from parallax.utils.utils import batch_tokenize
 
 REPO_ID = "mlx-community/Qwen3-0.6B-bf16"
 TOTAL_LAYERS = 28
@@ -33,7 +31,7 @@ ref_tokenizer = load_tokenizer(model_path, eos_token_ids=ref_config.get("eos_tok
         [(0, 8), (8, 16), (16, TOTAL_LAYERS)],
     ],
 )
-def test_shard_forward(layers_config: List[Tuple[int, int]]) -> None:
+def test_shard_prefill(layers_config: List[Tuple[int, int]]) -> None:
     """Load sharded model based on layers_config and
 
     compare its forward pass with a full reference model.
@@ -56,27 +54,24 @@ def test_shard_forward(layers_config: List[Tuple[int, int]]) -> None:
 
     assert len(model_shards) == len(layers_config), "Number of loaded shards should match config"
 
-    x = ["This is a test.", "This is yet another test."]
-    if ref_tokenizer.pad_token is None:
-        ref_tokenizer.pad_token = ref_tokenizer.eos_token
-    ref_tokenized_batch = ref_tokenizer.encode(
-        x,
-        padding=True,
-        return_tensors="mlx",
-    )
+    texts = [
+        "This is a test.",
+        "This is yet another test.",
+        "what color is Mars",
+        "what color is Moon",
+    ]
+    ref_ids, ref_mask = batch_tokenize(ref_tokenizer, texts)
+    print(f"Reference IDs: {ref_ids.shape}, Mask: {ref_mask.shape}")
 
     # Forward pass through the reference model
-    ref_out = ref_model(ref_tokenized_batch)
+    ref_out = ref_model(ref_ids, mask=ref_mask)
 
+    mask = None
     for shard in model_shards:
         if shard.start_layer == 0:
-            tokenized_batch = tokenizer.encode(
-                x,
-                padding=True,
-                return_tensors="mlx",
-            )
-            x = shard(tokenized_batch, cache=None, mask=None)
+            ids, mask = batch_tokenize(tokenizer, texts)
+            x, _ = shard(ids, cache=None, mask=mask)
         else:
-            x = shard(x, cache=None, mask=None)
+            x, _ = shard(x, cache=None, mask=mask)
 
     assert mx.allclose(x, ref_out, atol=1e-3, rtol=1e-3)
