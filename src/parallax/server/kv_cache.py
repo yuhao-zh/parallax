@@ -399,7 +399,7 @@ class PagedKVCache:
         return locations
 
     def gather_kv_cache(
-        self, request_id: str, token_indices_in_sequence: List[int]
+        self, request_id: str, token_indices_in_sequence: Optional[List[int]] = None
     ) -> Tuple[Optional[mx.array], Optional[mx.array]]:
         # pylint: disable=too-many-locals
         """
@@ -414,9 +414,7 @@ class PagedKVCache:
 
         sequence = self._sequences[request_id]
         if not token_indices_in_sequence:
-            return mx.zeros(
-                (self.num_layers, 0, self.num_kv_heads, self.head_dim), dtype=self.dtype
-            ), mx.zeros((self.num_layers, 0, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+            token_indices_in_sequence = list(range(sequence.get_token_count()))
 
         try:
             physical_locations = self._get_physical_locations(sequence, token_indices_in_sequence)

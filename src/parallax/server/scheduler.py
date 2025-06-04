@@ -1,3 +1,4 @@
+# pylint: disable=too-many-function-args
 """
 Scheduling requests to form batches.
 
@@ -10,7 +11,7 @@ import heapq
 import time
 from typing import Dict, List, Literal, Tuple
 
-from parallax.server.request import Request, RequestStatus
+from parallax.server.request import InitialRequest, Request, RequestStatus
 from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -24,28 +25,35 @@ class Scheduler:
 
     def __init__(
         self,
-        pad_token_id: int,
         max_batch_size: int = 16,
         max_num_tokens: int = 1024,
         prefill_priority: Literal[0, 1] = 0,
         scheduler_wait_ms: int = 500,
         micro_batch_ratio: int = 2,
+        is_first_peer: bool = False,
+        **kwargs,
     ):
         """
         Args:
-            pad_token_id: The ID of the padding token used in the model;
             max_batch_size: Maximum number of running requests;
             max_num_tokens: Maxmimum number of prefill + decode tokens in a single batch;
             prefill_priority: Priority for prefill requests,
                 default 0 for prefill, 1 for decode, 0 for higher priority;
             scheduler_wait_ms: The minimum time to wait before dispatching a batch;
             micro_batch_ratio: micro_batch_size = max_batch_size // micro_batch_ratio
+            tokenizer: The tokenizer to use for the model.
         """
         self.max_batch_size = max_batch_size
         self.max_num_tokens = max_num_tokens
         self.micro_batch_size = self.max_batch_size // micro_batch_ratio
         self.scheduler_wait_ms = scheduler_wait_ms
-        self.pad_token_id = pad_token_id
+        self.is_first_peer = is_first_peer
+        if is_first_peer:
+            # Load configs for building InitialRequest
+            self.tokenizer = kwargs.get("tokenizer")
+            self.eos_token_id = self.tokenizer.eos_token_id
+            self.max_new_tokens = kwargs.get("max_new_tokens", 512)
+            self.max_total_length = kwargs.get("max_total_length", 1024)
 
         # Priority queue: (priority, arrival_time, request_id, request_object)
         self._request_queue: List[Tuple[int, float, str, Request]] = []
@@ -60,7 +68,7 @@ class Scheduler:
         self._last_dispatch_ts = time.time()
         logger.info(
             f"Scheduler initialized: max_batch_size={self.max_batch_size}, "
-            f"max_num_tokens={self.max_num_tokens}, pad_token_id={self.pad_token_id}"
+            f"max_num_tokens={self.max_num_tokens}"
         )
 
     @property
@@ -78,8 +86,19 @@ class Scheduler:
         """Check if there are any pending requests in the scheduler."""
         return len(self._request_queue) > 0
 
-    def enque_request(self, request: Request):
+    def _prompt_string_to_request(self, request_str: str) -> InitialRequest:
+        """Convert the prompt string to InitialRequest."""
+        assert self.is_first_peer, "Only first peer can enqueue InitialRequest."
+        input_ids = self.tokenizer.encode(request_str)
+        return InitialRequest.from_prompt_ids(
+            input_ids, self.eos_token_id, self.max_new_tokens, self.max_total_length
+        )
+
+    def enque_request(self, request: Request | str):
         """Add a request to the scheduler."""
+        if isinstance(request, str):
+            request = self._prompt_string_to_request(request)
+
         if request.is_finished:
             logger.warning(
                 f"Request {request.request_id} is already "

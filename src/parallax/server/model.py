@@ -161,12 +161,3 @@ class ShardedModel(nn.Module):
         stacked_v_updates = mx.stack(collected_v_updates, axis=0)
 
         return h, (stacked_k_updates, stacked_v_updates)
-
-    def forward(
-        self,
-        h_or_tokens: mx.array,
-        cache: Optional[Tuple[mx.array, mx.array]] = None,
-        cumulative_true_lengths: Optional[mx.array] = None,
-    ) -> Tuple[mx.array, Tuple[mx.array, mx.array]]:
-        """Alias for __call__."""
-        return self(h_or_tokens, cache, cumulative_true_lengths)

@@ -1,7 +1,7 @@
 """
 ServerInfo that will be announce to DHT and used for client's routing.
     HardwareInfo: Detects and summarizes hardware information, RAM and FLOPs
-    ShardedModelInfo:
+We haven't used other info, will wait until DHT implemented.
 """
 
 import platform
@@ -98,8 +98,8 @@ class ShardedModelInfo:
     model_name: str
     start_layer: int
     end_layer: int
-    parameter_count: int
-    memory_consumption_mb: float
+    parameter_count: int = 0
+    memory_consumption_mb: float = 0.0
 
     def dumps(self) -> Dict[str, Any]:
         """Serializes the HardwareInfo object to a dictionary."""

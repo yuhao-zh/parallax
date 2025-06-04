@@ -50,20 +50,13 @@ def get_zmq_socket(context: zmq.Context, socket_type: zmq.SocketType, endpoint: 
     return socket
 
 
-def batch_tokenize(tokenizer, list_of_strings: List[str]):
+def pad_inputs(pad_token_id: int, input_ids: List[int]):
     """
     Tokenize a list of strings and pad them to the same length.
     """
-    tokenized_sequences = [tokenizer.encode(text) for text in list_of_strings]
-    pad_token_id = tokenizer.pad_token_id
-    if pad_token_id is None:
-        pad_token_id = tokenizer.eos_token_id  # Common practice for many autoregressive LMs
-    if pad_token_id is None:
-        raise ValueError("Tokenizer does not have a pad_token_id or eos_token_id for padding.")
-
     max_len = 0
     actual_lengths = []
-    for tokens in tokenized_sequences:
+    for tokens in input_ids:
         current_length = len(tokens)
         actual_lengths.append(current_length)
         max_len = max(max_len, current_length)
@@ -71,7 +64,7 @@ def batch_tokenize(tokenizer, list_of_strings: List[str]):
     padded_input_ids = []
     attention_masks = []
 
-    for tokens in tokenized_sequences:
+    for tokens in input_ids:
         num_padding_tokens = max_len - len(tokens)
 
         # Padded sequence

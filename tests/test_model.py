@@ -13,7 +13,7 @@ from mlx_lm.utils import get_model_path, load_model
 from parallax.models.qwen3 import ParallaxQwen3Block as Qwen3Block
 from parallax.server.server_info import ShardedModelInfo
 from parallax.server.shard_loader import MLXModelLoader
-from parallax.utils.utils import batch_tokenize
+from parallax.utils.utils import pad_inputs
 
 REPO_ID = "mlx-community/Qwen3-0.6B-bf16"
 TOTAL_LAYERS = 28
@@ -60,7 +60,11 @@ def test_shard_prefill(layers_config: List[Tuple[int, int]]) -> None:
         "what color is Mars",
         "what color is Moon",
     ]
-    ref_ids, ref_mask = batch_tokenize(ref_tokenizer, texts)
+    ref_ids = [ref_tokenizer.encode(text) for text in texts]
+    ref_pad_token_id = ref_tokenizer.pad_token_id
+    if ref_pad_token_id is None:
+        ref_pad_token_id = ref_tokenizer.eos_token_id
+    ref_ids, ref_mask = pad_inputs(ref_pad_token_id, ref_ids)
     print(f"Reference IDs: {ref_ids.shape}, Mask: {ref_mask.shape}")
 
     # Forward pass through the reference model
@@ -69,7 +73,11 @@ def test_shard_prefill(layers_config: List[Tuple[int, int]]) -> None:
     mask = None
     for shard in model_shards:
         if shard.start_layer == 0:
-            ids, mask = batch_tokenize(tokenizer, texts)
+            pad_token_id = tokenizer.pad_token_id
+            if pad_token_id is None:
+                pad_token_id = tokenizer.eos_token_id
+            ids = [tokenizer.encode(text) for text in texts]
+            ids, mask = pad_inputs(pad_token_id, ids)
             x, _ = shard(ids, cache=None, mask=mask)
         else:
             x, _ = shard(x, cache=None, mask=mask)

@@ -96,7 +96,7 @@ class Request:
     ):
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
-        self.prompt_length = prompt_len
+        self.prompt_len = prompt_len
 
     @property
     def is_finished(self) -> bool:
@@ -112,6 +112,11 @@ class Request:
     def is_prefill(self) -> bool:
         """Checks if the request is in the prefill stage."""
         return self.status == RequestStatus.PREFILLING
+
+    @property
+    def is_decoding(self) -> bool:
+        """Checks if the request is in the decoding stage."""
+        return self.status == RequestStatus.DECODING
 
     def update_status(self, new_status: RequestStatus = RequestStatus.DECODING):
         """
@@ -140,6 +145,7 @@ class InitialRequest(Request):
         max_new_tokens: int = 512,
         max_total_length: int = 1024,
         status: RequestStatus = RequestStatus.PREFILLING,
+        hidden_states: Optional[np.ndarray] = None,
     ):
         super().__init__(request_id=request_id, status=status, prompt_len=len(input_ids))
         if not input_ids:
@@ -157,9 +163,15 @@ class InitialRequest(Request):
         self.max_total_length = max_total_length
         self.eos_token_id = eos_token_id
         self.output_ids = output_ids or []
+        self.hidden_states = hidden_states
 
         if len(self.output_ids) > 0 and self.status == RequestStatus.PREFILLING:
             raise ValueError(f"Cannot initialize with output_ids given {self.status}.")
+
+    @property
+    def input_length(self) -> int:
+        """Length of the input sequence (input_ids)."""
+        return len(self.input_ids)
 
     @property
     def output_length(self) -> int:
@@ -206,6 +218,17 @@ class InitialRequest(Request):
             if self.status == RequestStatus.PREFILLING:
                 self.status = RequestStatus.DECODING
 
+    def from_prompt_ids(self, prompt_ids: List[int]) -> "InitialRequest":
+        """
+        Convert a prompt string to an InitialRequest.
+        """
+        return InitialRequest(
+            prompt_ids,
+            eos_token_id=self.eos_token_id,
+            max_new_tokens=self.max_new_tokens,
+            max_total_length=self.max_total_length,
+        )
+
 
 class IntermediateRequest(Request):
     """
@@ -236,4 +259,27 @@ class IntermediateRequest(Request):
         self.request_id = request_id
         self.current_position = current_position
 
-    # TODO: construct from a InitialRequest
+    @property
+    def input_length(self) -> int:
+        """Length of the input sequence (hidden_states)."""
+        assert self.is_prefill
+        return self.current_position
+
+    @property
+    def total_length(self) -> int:
+        """Total length of the sequence (input + output)."""
+        return self.current_position
+
+    def from_initial_request(
+        self, initial_request: InitialRequest, hidden_states: np.ndarray
+    ) -> "IntermediateRequest":
+        """
+        Convert an InitialRequest to an IntermediateRequest.
+        """
+        if not initial_request.is_prefill:
+            raise ValueError("InitialRequest must be in PREFILLING state.")
+        return IntermediateRequest(
+            request_id=initial_request.request_id,
+            current_position=initial_request.input_length,
+            hidden_states=hidden_states,
+        )
