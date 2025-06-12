@@ -7,7 +7,7 @@ from typing import Optional, Tuple, Type
 
 import mlx.core as mx
 from mlx import nn
-from mlx_lm.models.base import BaseModelArgs, create_causal_mask
+from mlx_lm.models.base import BaseModelArgs  # , create_causal_mask
 
 
 class ShardedModel(nn.Module):
@@ -62,6 +62,34 @@ class ShardedModel(nn.Module):
             self.norm = None
             self.lm_head = None
 
+    def logits_to_tokens(self, logits: mx.array, lengths: Optional[mx.array] = None) -> mx.array:
+        """Convert logits to token IDs with greedy decoding.
+
+        Args:
+            logits: (batch, target_len_padded, vocab_size), logits from final lm_head
+            lengths: (batch,), int array of true lengths
+
+        Return:
+            Generated tokens of shape (batch,).
+        """
+        if logits.ndim != 3:
+            raise ValueError(f"Logits must be 3D, but got shape {logits.shape}")
+
+        if lengths is not None:
+            # To select the logit vector for the last valid token of each sequence,
+            # we need to provide indices for both the batch and sequence dimensions.
+            batch_indices = mx.arange(logits.shape[0])
+            last_token_indices = lengths - 1
+            last_token_logits = logits[batch_indices, last_token_indices, :]
+        else:
+            # If no lengths are provided, assume all sequences are of max length
+            # and we are interested in the very last token's logits.
+            last_token_logits = logits[:, -1, :]
+
+        # last_token_logits now has shape (batch_size, vocab_size)
+        next_token_ids = mx.argmax(last_token_logits, axis=-1)
+        return next_token_ids
+
     def __call__(
         self,
         h_or_tokens: mx.array,
@@ -109,7 +137,7 @@ class ShardedModel(nn.Module):
                 assert (
                     k_past_all_layers.ndim == 5
                 ), f"Unexpected k_past_all_layers ndim: {k_past_all_layers.ndim}"
-                source_len = k_past_all_layers.shape[3]
+                source_len = k_past_all_layers.shape[2]
 
         if lengths is None:
             lengths = mx.full((batch,), target_len + source_len, dtype=mx.int32)
@@ -119,16 +147,9 @@ class ShardedModel(nn.Module):
                 batch,
             ), f"lengths shape mismatch: expected ({batch},), got {lengths.shape}"
 
-        # Create causal mask if not provided
-        offset = source_len - 1 if target_len == 1 else 0
+        offset = source_len if target_len == 1 else 0
         if mask is None:
-            if target_len > 1:
-                mask = create_causal_mask(
-                    N=target_len,
-                    offset=offset,
-                    lengths=lengths,
-                    window_size=window_size,
-                )
+            raise ValueError("ShardedModel: mask cannot be None.")
 
         collected_k_updates = []
         collected_v_updates = []

@@ -1,6 +1,6 @@
 # pylint: disable=too-many-function-args
 """
-Scheduling requests to form batches.
+Scheduling requests to form batches.sche
 
 A scheduler will maintain a Priority Queue for request waiting pool.
 We support continuous batching, and similar to TensorRT-LLM,
@@ -9,7 +9,7 @@ We support continuous batching, and similar to TensorRT-LLM,
 
 import heapq
 import time
-from typing import Dict, List, Literal, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 from parallax.server.request import InitialRequest, Request, RequestStatus
 from parallax.utils.logging_config import get_logger
@@ -86,6 +86,10 @@ class Scheduler:
         """Check if there are any pending requests in the scheduler."""
         return len(self._request_queue) > 0
 
+    def get_running_request(self, request_id: str) -> Optional[Request]:
+        """Gets a request that is currently in the running state."""
+        return self._running_requests.get(request_id)
+
     def _prompt_string_to_request(self, request_str: str) -> InitialRequest:
         """Convert the prompt string to InitialRequest."""
         assert self.is_first_peer, "Only first peer can enqueue InitialRequest."
@@ -109,6 +113,47 @@ class Scheduler:
         priority = self.priority_map.get(request.status, 1)
         heapq.heappush(self._request_queue, (priority, arrival_time, request.request_id, request))
         logger.debug(f"Request {request.request_id} added to the scheduler.")
+
+    def evict_request(self, request_id: str, status: Optional[RequestStatus] = None):
+        """Removes a request from the scheduler's running queue."""
+        _ = status  # status is used by the first peer's logic but not here.
+        if request_id in self._running_requests:
+            req = self._running_requests.pop(request_id)
+            # Adjust inflight tokens
+            cost = req.prompt_len if req.is_prefill else 1
+            self._inflight_tokens -= cost
+            logger.info(f"Evicted request {request_id} from scheduler.")
+        else:
+            raise ValueError(f"Attempted to evict non-existent request {request_id}.")
+
+    def check_and_update_request_status(self, request: InitialRequest) -> bool:
+        """Checks if a request has met any finishing conditions and updates its status."""
+        assert self.is_first_peer, "Only first peer can check and update request status."
+        assert (
+            self.eos_token_id is not None
+        ), "EOS token ID must be set for request status checking."
+        if request.is_finished:
+            return True
+
+        finished = False
+        last_token_id = request.output_ids[-1] if request.output_ids else None
+
+        if last_token_id == self.eos_token_id:
+            request.update_status(RequestStatus.FINISHED_EOS)
+            finished = True
+        elif request.output_length >= request.max_new_tokens:
+            request.update_status(RequestStatus.FINISHED_MAX_LENGTH)
+            finished = True
+        elif request.total_length >= request.max_total_length:
+            request.update_status(RequestStatus.FINISHED_MAX_LENGTH)
+            finished = True
+
+        if finished:
+            logger.info(f"Request {request.request_id} finished with status {request.status}.")
+            # Remove from running requests. The executor will handle KV cache release.
+            self.evict_request(request.request_id)
+
+        return finished
 
     def should_dispatch(self) -> bool:
         """Helper check if the scheduler should dispatch a batch."""

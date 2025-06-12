@@ -65,7 +65,6 @@ def test_shard_prefill(layers_config: List[Tuple[int, int]]) -> None:
     if ref_pad_token_id is None:
         ref_pad_token_id = ref_tokenizer.eos_token_id
     ref_ids, ref_mask = pad_inputs(ref_pad_token_id, ref_ids)
-    print(f"Reference IDs: {ref_ids.shape}, Mask: {ref_mask.shape}")
 
     # Forward pass through the reference model
     ref_out = ref_model(ref_ids, mask=ref_mask)

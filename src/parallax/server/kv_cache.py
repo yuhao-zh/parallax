@@ -10,7 +10,7 @@ Core Components:
 
 PagedKVCache:
     - Initializes and manages the main KV cache memory pools (_k_cache_pool, _v_cache_pool).
-    - Handles allocation of cache space for new inference requests (`allocate_for_request`).
+    - Handles allocation of cache space for new inference requests (`add_request`).
     - Supports extending cache space for ongoing requests (`extend_for_request`).
     - Releases cache space when requests are completed (`release_request`).
     - Provides methods to retrieve KV tensors for specified token positions within a
@@ -231,7 +231,11 @@ class PagedKVCache:
         """Calculates how many blocks are needed for a given number of tokens."""
         return (num_tokens + self.block_size - 1) // self.block_size
 
-    def allocate_for_request(self, request: Request, num_initial_tokens: int) -> bool:
+    def has_request(self, request_id: str) -> bool:
+        """Checks if a request is in the cache."""
+        return request_id in self._sequences
+
+    def add_request(self, request: Request, num_initial_tokens: int) -> bool:
         """
         Allocates initial KV cache blocks for a new request in prefill state.
 
@@ -244,7 +248,7 @@ class PagedKVCache:
         """
         assert (
             request.status == RequestStatus.PREFILLING
-        ), "allocate_for_request can only be called in prefill state."
+        ), "add_request can only be called in prefill state."
         if request.request_id in self._sequences:
             logger.warning(f"Request {request.request_id} already has allocated cache.")
             # For now we don't handle re-allocation.
@@ -266,7 +270,6 @@ class PagedKVCache:
                     f"Block allocation failed mid-process for request"
                     f"{request.request_id}. Rolling back."
                 )
-                # Rollback allocations for this request
                 for bid in sequence_cache.get_block_ids():
                     self._block_manager.free_block(bid)
                 return False
@@ -279,6 +282,13 @@ class PagedKVCache:
             f"{num_initial_tokens} tokens for request {request.request_id}."
         )
         return True
+
+    def get_num_tokens_for_request(self, request_id: str) -> int:
+        """Returns the number of tokens stored for a request."""
+        if request_id not in self._sequences:
+            logger.error(f"Request {request_id} not found for getting token count.")
+            return 0
+        return self._sequences[request_id].get_token_count()
 
     def extend_for_request(self, request_id: str, num_additional_tokens: int) -> bool:
         """
@@ -323,11 +333,7 @@ class PagedKVCache:
                     f"Block allocation failed mid-extension for request "
                     f" {request_id}. Rolling back extension."
                 )
-                for (
-                    bid
-                ) in (
-                    newly_allocated_block_ids
-                ):  # Rollback newly allocated blocks for this extension
+                for bid in newly_allocated_block_ids:
                     self._block_manager.free_block(bid)
                 return False
             sequence_cache.add_block(block_id)
@@ -403,72 +409,88 @@ class PagedKVCache:
     ) -> Tuple[Optional[mx.array], Optional[mx.array]]:
         # pylint: disable=too-many-locals
         """
-        Retrieves K and V tensors for specified token positions within a sequence.
-        The returned tensors will be of shape
-        (num_layers, num_tokens_retrieved, num_kv_heads, head_dim).
-        Returns (None, None) if request_id is not found or an error occurs.
+        Gathers KV tensors for specified token indices within a sequence.
+
+        If token_indices_in_sequence is None, it gathers all tokens for the request.
+        If token_indices_in_sequence is an empty list, it returns empty tensors.
+
+        Args:
+            request_id: The ID of the request.
+            token_indices_in_sequence: A list of token indices to gather.
+
+        Returns:
+            A tuple (k_gathered, v_gathered) of the gathered KV tensors.
+            The shape of the returned tensors is
+            (num_layers, num_tokens_retrieved, num_kv_heads, head_dim).
+            Returns (None, None) if the request is not found.
         """
         if request_id not in self._sequences:
-            logger.error(f"Request {request_id} not found for gathering KV cache.")
+            logger.error(f"Request {request_id} not found in KV cache.")
             return None, None
 
         sequence = self._sequences[request_id]
-        if not token_indices_in_sequence:
-            token_indices_in_sequence = list(range(sequence.get_token_count()))
 
-        try:
-            physical_locations = self._get_physical_locations(sequence, token_indices_in_sequence)
-        except (IndexError, ValueError) as e:
-            logger.error(f"Error getting physical locations for request {request_id}: {e}")
-            return None, None
-
-        # Prepare lists to hold slices from the cache pools
-        k_slices_per_layer = [[] for _ in range(self.num_layers)]
-        v_slices_per_layer = [[] for _ in range(self.num_layers)]
-
-        for physical_block_id, offset_in_block in physical_locations:
-            for layer_idx in range(self.num_layers):
-                # Shape of self._k_cache_pool[layer_idx, physical_block_id, :, offset_in_block, :]
-                # is (num_kv_heads, head_dim)
-                # We want to add a new dimension for concatenation later:
-                # (1, num_kv_heads, head_dim)
-                k_slice = self._k_cache_pool[layer_idx, physical_block_id, :, offset_in_block, :][
-                    None, :, :
-                ]
-                v_slice = self._v_cache_pool[layer_idx, physical_block_id, :, offset_in_block, :][
-                    None, :, :
-                ]
-                k_slices_per_layer[layer_idx].append(k_slice)
-                v_slices_per_layer[layer_idx].append(v_slice)
-
-        # Concatenate slices for each layer
-        # Resulting shape for each layer: (num_tokens_retrieved, num_kv_heads, head_dim)
-        final_k_layers = []
-        final_v_layers = []
-
-        if not k_slices_per_layer[0]:  # no tokens were processed
-            return mx.zeros(
+        if token_indices_in_sequence == []:
+            k_empty = mx.zeros(
                 (self.num_layers, 0, self.num_kv_heads, self.head_dim), dtype=self.dtype
-            ), mx.zeros((self.num_layers, 0, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+            )
+            v_empty = mx.zeros(
+                (self.num_layers, 0, self.num_kv_heads, self.head_dim), dtype=self.dtype
+            )
+            return k_empty, v_empty
 
-        for layer_idx in range(self.num_layers):
-            if k_slices_per_layer[layer_idx]:
-                final_k_layers.append(mx.concatenate(k_slices_per_layer[layer_idx], axis=0))
-                final_v_layers.append(mx.concatenate(v_slices_per_layer[layer_idx], axis=0))
-            else:  # Should not happen if physical_locations is not empty
-                final_k_layers.append(
-                    mx.zeros((0, self.num_kv_heads, self.head_dim), dtype=self.dtype)
-                )
-                final_v_layers.append(
-                    mx.zeros((0, self.num_kv_heads, self.head_dim), dtype=self.dtype)
-                )
+        # If token_indices_in_sequence is None, gather all tokens.
+        if token_indices_in_sequence is None:
+            num_tokens = sequence.get_token_count()
+            indices_to_gather = list(range(num_tokens))
+        else:
+            indices_to_gather = token_indices_in_sequence
 
-        # Stack layers together
-        # Resulting shape: (num_layers, num_tokens_retrieved, num_kv_heads, head_dim)
-        gathered_k = mx.stack(final_k_layers, axis=0)
-        gathered_v = mx.stack(final_v_layers, axis=0)
+        if not indices_to_gather:
+            raise ValueError("token_indices_in_sequence cannot be empty for gather.")
 
-        return gathered_k, gathered_v
+        logger.debug(
+            f"Gathering KV cache for request {request_id} with indices: {indices_to_gather}"
+        )
+        physical_locations = self._get_physical_locations(sequence, indices_to_gather)
+
+        unique_block_ids = sorted(list({loc[0] for loc in physical_locations}))
+
+        # Pre-load required blocks from the main pool to avoid repeated large-scale indexing.
+        # This is more efficient as it performs fewer, larger data movements.
+        k_blocks_loaded = {
+            block_id: self._k_cache_pool[:, block_id, :, :, :] for block_id in unique_block_ids
+        }
+        v_blocks_loaded = {
+            block_id: self._v_cache_pool[:, block_id, :, :, :] for block_id in unique_block_ids
+        }
+
+        k_gathered_slices = []
+        v_gathered_slices = []
+
+        for block_id, offset_in_block in physical_locations:
+            # Shape of k_blocks_loaded[block_id] is (num_layers, num_kv_heads, block_size, head_dim)
+            # Each slice has shape (num_layers, num_kv_heads, head_dim)
+            k_slice = k_blocks_loaded[block_id][:, :, offset_in_block, :]
+            v_slice = v_blocks_loaded[block_id][:, :, offset_in_block, :]
+
+            k_gathered_slices.append(k_slice)
+            v_gathered_slices.append(v_slice)
+
+        if not k_gathered_slices:
+            k_empty = mx.zeros(
+                (self.num_layers, 0, self.num_kv_heads, self.head_dim), dtype=self.dtype
+            )
+            return k_empty, k_empty.copy()
+
+        k_stacked = mx.stack(k_gathered_slices, axis=0)
+        v_stacked = mx.stack(v_gathered_slices, axis=0)
+
+        # (num_layers, num_tokens_retrieved, num_kv_heads, head_dim)
+        k_final = k_stacked.transpose(1, 0, 2, 3)
+        v_final = v_stacked.transpose(1, 0, 2, 3)
+
+        return k_final, v_final
 
     def update_kv_cache(
         self,
@@ -489,32 +511,30 @@ class PagedKVCache:
                         (num_layers, num_tokens_to_update, num_kv_heads, head_dim)
         """
         if request_id not in self._sequences:
-            logger.error(f"Request {request_id} not found for updating KV cache.")
-            return
+            raise ValueError(f"Request {request_id} not found for updating KV cache.")
+        if not token_indices_in_sequence:
+            raise ValueError("token_indices_in_sequence cannot be empty for update.")
 
         sequence = self._sequences[request_id]
-
-        if not token_indices_in_sequence:
-            return
-
         if k_values.shape[1] != len(token_indices_in_sequence) or v_values.shape[1] != len(
             token_indices_in_sequence
         ):
-            logger.error(
+            raise ValueError(
                 f"Mismatch between number of token indices ({len(token_indices_in_sequence)}) and "
                 f"k_values/v_values shape ({k_values.shape[1]}/{v_values.shape[1]}) "
                 f"for request {request_id}."
             )
-            return
 
         if k_values.shape[0] != self.num_layers or v_values.shape[0] != self.num_layers:
-            logger.error(
+            raise ValueError(
                 f"Mismatch in num_layers. Expected {self.num_layers}, "
                 f"got k: {k_values.shape[0]}, v: {v_values.shape[0]}"
             )
-            return
 
         try:
+            logger.debug(
+                f"Updating KV cache for request {request_id} with ind: {token_indices_in_sequence}"
+            )
             physical_locations = self._get_physical_locations(sequence, token_indices_in_sequence)
         except (IndexError, ValueError) as e:
             logger.error(
@@ -533,8 +553,6 @@ class PagedKVCache:
             self._k_cache_pool[:, physical_block_id, :, offset_in_block, :] = k_values_for_token
             self._v_cache_pool[:, physical_block_id, :, offset_in_block, :] = v_values_for_token
 
-        # Ensure changes are materialized if necessary, though MLX typically handles this.
-        mx.eval(self._k_cache_pool, self._v_cache_pool)
         logger.debug(
             f"Updated KV cache for {len(token_indices_in_sequence)} "
             f"tokens for request {request_id}."

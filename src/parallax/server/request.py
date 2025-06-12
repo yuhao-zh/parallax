@@ -58,13 +58,14 @@ TODO:
         we need to add sampling sampling params and passing logits;
     2. Add support for multiple output_ids in a single step (e.g. beam width, top-k sampling, etc.);
     3. Accepts more generation configs like repetition penalties.
+    4. Decouple different HW: mx.array to np.ndarray.
 """
 
 import uuid
 from enum import Enum
 from typing import List, Optional
 
-import numpy as np
+import mlx.core as mx
 
 from parallax.utils.logging_config import get_logger
 
@@ -138,32 +139,28 @@ class InitialRequest(Request):
 
     def __init__(
         self,
-        *input_ids: List[int],
-        eos_token_id: int,
+        prompt: Optional[str] = None,
         request_id: Optional[str] = None,
         output_ids: Optional[List[int]] = None,
+        input_ids: Optional[List[int]] = None,
         max_new_tokens: int = 512,
         max_total_length: int = 1024,
         status: RequestStatus = RequestStatus.PREFILLING,
-        hidden_states: Optional[np.ndarray] = None,
     ):
-        super().__init__(request_id=request_id, status=status, prompt_len=len(input_ids))
-        if not input_ids:
-            raise ValueError("input_ids (prompt) cannot be empty.")
+        if not prompt and not input_ids:
+            raise ValueError("prompt or input_ids cannot be empty.")
+        super().__init__(
+            request_id=request_id, status=status, prompt_len=len(input_ids) if input_ids else 0
+        )
+        self.prompt = prompt
         self.input_ids = input_ids
-        self.prompt_len = len(input_ids)
 
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be at least 1.")
         self.max_new_tokens = max_new_tokens
-        if max_total_length < max_new_tokens + len(input_ids):
-            raise ValueError(
-                "max_total_length must be at least max_new_tokens + length of input_ids."
-            )
         self.max_total_length = max_total_length
-        self.eos_token_id = eos_token_id
         self.output_ids = output_ids or []
-        self.hidden_states = hidden_states
+        self.hidden_states = None
 
         if len(self.output_ids) > 0 and self.status == RequestStatus.PREFILLING:
             raise ValueError(f"Cannot initialize with output_ids given {self.status}.")
@@ -171,6 +168,8 @@ class InitialRequest(Request):
     @property
     def input_length(self) -> int:
         """Length of the input sequence (input_ids)."""
+        if self.input_ids is None:
+            raise ValueError("Cannot get input length before tokenization.")
         return len(self.input_ids)
 
     @property
@@ -187,6 +186,9 @@ class InitialRequest(Request):
         """
         Returns the token IDs the First Peer's model should process for the current step.
         """
+        if self.input_ids is None:
+            raise ValueError("Cannot get model input before tokenization.")
+
         if not self.output_ids:
             return self.input_ids
         return [self.output_ids[-1]]
@@ -204,29 +206,24 @@ class InitialRequest(Request):
 
         self.output_ids.append(token_id)
 
-        # Check finishing conditions
-        if self.eos_token_id is not None and token_id == self.eos_token_id:
-            self.status = RequestStatus.FINISHED_EOS
-            logger.info(f"Request {self.request_id} finished: EOS token received.")
-        elif self.output_length >= self.max_new_tokens:
-            self.status = RequestStatus.FINISHED_MAX_LENGTH
-            logger.info(f"Request {self.request_id} finished: Max new tokens generated.")
-        elif self.total_length >= self.max_total_length:
-            self.status = RequestStatus.FINISHED_MAX_LENGTH
-            logger.info(f"Request {self.request_id} finished: Max sequence length reached.")
-        else:
-            if self.status == RequestStatus.PREFILLING:
-                self.status = RequestStatus.DECODING
+        # Finishing condition checks are now handled by the Scheduler.
+        if self.status == RequestStatus.PREFILLING:
+            self.status = RequestStatus.DECODING
 
-    def from_prompt_ids(self, prompt_ids: List[int]) -> "InitialRequest":
+    @classmethod
+    def from_prompt_ids(
+        cls,
+        prompt_ids: List[int],
+        max_new_tokens: int,
+        max_total_length: int,
+    ) -> "InitialRequest":
         """
         Convert a prompt string to an InitialRequest.
         """
-        return InitialRequest(
-            prompt_ids,
-            eos_token_id=self.eos_token_id,
-            max_new_tokens=self.max_new_tokens,
-            max_total_length=self.max_total_length,
+        return cls(
+            input_ids=prompt_ids,
+            max_new_tokens=max_new_tokens,
+            max_total_length=max_total_length,
         )
 
 
@@ -242,19 +239,19 @@ class IntermediateRequest(Request):
         self,
         request_id: str,
         current_position: int,
-        hidden_states: np.ndarray,
+        status: RequestStatus = RequestStatus.PREFILLING,
+        hidden_states: Optional[mx.array] = None,
     ):
-        super().__init__(request_id=request_id, status=RequestStatus.PREFILLING)
+        super().__init__(request_id=request_id, status=status)
         # Hidden states from the previous peer's computation.
         # Shape:
         #   prefill: (prompt_len, hidden_dim)
         #   decode: (1, hidden_dim)
-        if hidden_states.ndim != 2:
-            raise ValueError("hidden_states must be a 2D array.")
-        if self.status == RequestStatus.DECODING:
-            assert (
-                hidden_states.shape[0] == 1
-            ), f"Decoding state has target len 1, got {hidden_states.shape[0]}."
+        # For data sent from Last Peer to First Peer, this can also be a single token_id
+        # wrapped in a numpy array, e.g., np.array([token_id]).
+        if not self.is_finished and hidden_states is None:
+            raise ValueError(f"hidden_states cannot be None for unfinished request {request_id}.")
+
         self.hidden_states = hidden_states
         self.request_id = request_id
         self.current_position = current_position
@@ -270,16 +267,45 @@ class IntermediateRequest(Request):
         """Total length of the sequence (input + output)."""
         return self.current_position
 
+    @classmethod
     def from_initial_request(
-        self, initial_request: InitialRequest, hidden_states: np.ndarray
+        cls, initial_request: InitialRequest, hidden_states: Optional[mx.array] = None
     ) -> "IntermediateRequest":
+        """Convert an InitialRequest to an IntermediateRequest.
+
+        Pack hidden states and set current position.
+        This is typically used by the First Peer to start the pipeline.
+
+        Args:
+            initial_request: The initial request to convert.
+            hidden_states: The hidden states from the previous peer.
+                If None, it indicates that the request is finished.
+
+        Returns:
+            An IntermediateRequest instance with the request ID,
+            status, current position, and hidden states from InitialRequest.
         """
-        Convert an InitialRequest to an IntermediateRequest.
-        """
-        if not initial_request.is_prefill:
-            raise ValueError("InitialRequest must be in PREFILLING state.")
+        if hidden_states is None:
+            assert initial_request.is_finished, "Hidden states can't be None for unfinished request"
+
         return IntermediateRequest(
             request_id=initial_request.request_id,
-            current_position=initial_request.input_length,
+            status=initial_request.status,
+            current_position=initial_request.total_length,
             hidden_states=hidden_states,
+        )
+
+    @classmethod
+    def from_intermediate_request(
+        cls, old_request: "IntermediateRequest", new_hidden_states: mx.array
+    ) -> "IntermediateRequest":
+        """
+        Creates a new IntermediateRequest from an old one, with updated hidden states.
+        This is used by intermediate peers to pass the request along the pipeline.
+        """
+        return IntermediateRequest(
+            request_id=old_request.request_id,
+            status=old_request.status,
+            current_position=old_request.total_length,
+            hidden_states=new_hidden_states,
         )

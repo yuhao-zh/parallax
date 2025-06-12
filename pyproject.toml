@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["setuptools>=68", "wheel", "poetry-core"]
+build-backend = "poetry.core.masonry.api"
 
 
 [project]
-name = "dllm"
+name = "parallax"
 version = "0.0.1"
 description = "Decentralised pipeline-parallel LLM serving with MLX-LM + Hivemind"
 readme = "README.md"
@@ -32,7 +32,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]                # put your code under ./src/dllm/…
+where = ["src"]                # put your code under ./src/…
 
 [tool.black]
 line-length = 100
@@ -42,3 +42,7 @@ profile = "black"
 
 [tool.ruff]
 ignore = ["E501"]              # line length handled by Black
+line-length = 100
+
+[tool.pylint.main]
+ignore-patterns = "p2p/.*"

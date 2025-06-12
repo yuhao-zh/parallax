@@ -68,9 +68,7 @@ class MLXModelLoader:
         """
         model_path = get_model_path(self.model_path_str)
         config = load_config(model_path)
-        tokenizer = None
-        if self.start_layer == 0:
-            tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
+        tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
 
         num_hidden_layers = config.get("num_hidden_layers", 0)
         current_start_layer = self.start_layer if self.start_layer is not None else 0

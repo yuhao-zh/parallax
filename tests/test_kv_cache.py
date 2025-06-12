@@ -146,12 +146,12 @@ def test_paged_kv_cache_initialization(paged_kv_cache, paged_kv_cache_params):
     assert len(kv._sequences) == 0
 
 
-def test_paged_kv_cache_allocate_for_request(paged_kv_cache):
+def test_paged_kv_cache_add_request(paged_kv_cache):
     kv = paged_kv_cache  # 4 blocks total, block_size 4
     req1 = Request(request_id="req1")
 
     # Allocate 3 tokens (needs 1 block)
-    assert kv.allocate_for_request(req1, num_initial_tokens=3)
+    assert kv.add_request(req1, num_initial_tokens=3)
     assert "req1" in kv._sequences
     assert kv._sequences["req1"].get_token_count() == 3
     assert len(kv._sequences["req1"].get_block_ids()) == 1
@@ -159,12 +159,12 @@ def test_paged_kv_cache_allocate_for_request(paged_kv_cache):
 
     # Attempt to re-allocate (should warn and return True/False based on impl.)
     # Current impl logs warning and returns True
-    assert kv.allocate_for_request(req1, num_initial_tokens=1)
+    assert kv.add_request(req1, num_initial_tokens=1)
     assert kv._block_manager.get_num_free_blocks() == 3  # No change
 
     req2 = Request(request_id="req2")
     # Allocate 8 tokens (needs 2 blocks)
-    assert kv.allocate_for_request(req2, num_initial_tokens=8)
+    assert kv.add_request(req2, num_initial_tokens=8)
     assert "req2" in kv._sequences
     assert kv._sequences["req2"].get_token_count() == 8
     assert len(kv._sequences["req2"].get_block_ids()) == 2
@@ -172,14 +172,14 @@ def test_paged_kv_cache_allocate_for_request(paged_kv_cache):
 
     req3 = Request(request_id="req3")
     # Allocate 4 tokens (needs 1 block, which is available)
-    assert kv.allocate_for_request(req3, num_initial_tokens=4)
+    assert kv.add_request(req3, num_initial_tokens=4)
     assert "req3" in kv._sequences
     assert len(kv._sequences["req3"].get_block_ids()) == 1
     assert kv._block_manager.get_num_free_blocks() == 0  # 1 - 1
 
     req4 = Request(request_id="req4")
     # Attempt to allocate 1 token (needs 1 block, none available)
-    assert not kv.allocate_for_request(req4, num_initial_tokens=1)
+    assert not kv.add_request(req4, num_initial_tokens=1)
     assert "req4" not in kv._sequences
     assert kv._block_manager.get_num_free_blocks() == 0
 
@@ -188,7 +188,7 @@ def test_paged_kv_cache_extend_for_request(paged_kv_cache):
     kv = paged_kv_cache  # 4 blocks total, block_size 4
     req1_id = "req-extend-1"
     req1 = Request(request_id=req1_id)
-    kv.allocate_for_request(req1, num_initial_tokens=2)  # Needs 1 block, count=2. 3 blocks free.
+    kv.add_request(req1, num_initial_tokens=2)  # Needs 1 block, count=2. 3 blocks free.
 
     # Extend by 1 token, still fits in 1 block
     assert kv.extend_for_request(req1_id, num_additional_tokens=1)
@@ -233,7 +233,7 @@ def test_paged_kv_cache_release_request(paged_kv_cache):
     kv = paged_kv_cache
     req1_id = "req-release-1"
     req1 = Request(request_id=req1_id)
-    kv.allocate_for_request(req1, num_initial_tokens=6)  # Needs 2 blocks
+    kv.add_request(req1, num_initial_tokens=6)  # Needs 2 blocks
     assert kv._block_manager.get_num_free_blocks() == 2  # 4 - 2
 
     kv.release_request(req1_id)
@@ -254,7 +254,7 @@ def test_paged_kv_cache_has_capacity_for_tokens(paged_kv_cache):
     assert not kv.has_capacity_for_tokens(17)  # Needs 5 blocks
 
     req1 = Request(request_id="req-cap-1")
-    kv.allocate_for_request(req1, num_initial_tokens=10)  # Needs 3 blocks. 1 block free.
+    kv.add_request(req1, num_initial_tokens=10)  # Needs 3 blocks. 1 block free.
     assert kv.has_capacity_for_tokens(1)  # Needs 1 block, available
     assert kv.has_capacity_for_tokens(4)  # Needs 1 block, available
     assert not kv.has_capacity_for_tokens(5)  # Needs 2 blocks, only 1 available
@@ -264,7 +264,7 @@ def test_paged_kv_cache_get_physical_locations(paged_kv_cache):
     kv = paged_kv_cache  # block_size 4
     req1_id = "req-loc-1"
     req1 = Request(request_id=req1_id)
-    kv.allocate_for_request(
+    kv.add_request(
         req1, num_initial_tokens=10
     )  # Needs 3 blocks. Tokens 0-3 (b0), 4-7 (b1), 8-9 (b2)
     sequence = kv._sequences[req1_id]
@@ -303,7 +303,7 @@ def test_paged_kv_cache_gather_update_kv_cache(paged_kv_cache, paged_kv_cache_pa
     req = Request(request_id=req_id)
 
     num_tokens_to_alloc = 7  # Needs 2 blocks (block_size 4)
-    assert kv.allocate_for_request(req, num_initial_tokens=num_tokens_to_alloc)
+    assert kv.add_request(req, num_initial_tokens=num_tokens_to_alloc)
 
     # Create some dummy K/V values to update
     # Shape: (num_layers, num_tokens_to_update, num_kv_heads, head_dim)
@@ -410,9 +410,7 @@ def test_paged_kv_cache_update_all_tokens_in_block():
     assert kv.num_blocks == 1
     assert kv.block_size == 2
 
-    assert kv.allocate_for_request(
-        req, num_initial_tokens=2
-    )  # Allocate all 2 tokens in the single block
+    assert kv.add_request(req, num_initial_tokens=2)  # Allocate all 2 tokens in the single block
 
     k_update_data = (
         mx.arange(

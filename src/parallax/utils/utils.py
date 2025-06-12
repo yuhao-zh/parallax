@@ -1,8 +1,10 @@
+# pylint: disable=too-many-locals
 """Utility functions."""
 
 from typing import List
 
 import mlx.core as mx
+import numpy as np
 import psutil
 import zmq
 
@@ -50,32 +52,114 @@ def get_zmq_socket(context: zmq.Context, socket_type: zmq.SocketType, endpoint: 
     return socket
 
 
-def pad_inputs(pad_token_id: int, input_ids: List[int]):
+def pad_inputs(
+    pad_value: int, inputs: List, dtype: mx.Dtype = mx.bfloat16
+) -> tuple[mx.array, mx.array]:
     """
-    Tokenize a list of strings and pad them to the same length.
-    """
-    max_len = 0
-    actual_lengths = []
-    for tokens in input_ids:
-        current_length = len(tokens)
-        actual_lengths.append(current_length)
-        max_len = max(max_len, current_length)
+    Pads a list of sequences (token ID lists or hidden state arrays) to the same length.
 
-    padded_input_ids = []
+    Args:
+        pad_value: The value to use for padding. For token IDs, this should be the
+                   tokenizer's pad_token_id. For hidden states, it's ignored (always 0).
+        inputs: A list of sequences to pad. Each sequence can be a list of integers
+                or an MLX/NumPy array of hidden states.
+
+    Returns:
+        A tuple containing:
+        - mx.array: The padded batch of inputs.
+        - mx.array: The corresponding 4D attention mask.
+    """
+    if not inputs:
+        return mx.array([]), mx.array([])
+
+    max_len = 0
     attention_masks = []
 
-    for tokens in input_ids:
-        num_padding_tokens = max_len - len(tokens)
+    # Check the dimensionality of the input to handle KV cache padding
+    is_kv_cache = isinstance(inputs[0], mx.array) and inputs[0].ndim == 4
 
-        # Padded sequence
-        padded_tokens = tokens + [pad_token_id] * num_padding_tokens
-        padded_input_ids.append(padded_tokens)
+    if isinstance(inputs[0], list):  # Assuming list of token IDs
+        for tokens in inputs:
+            max_len = max(max_len, len(tokens))
 
-        # Attention mask
-        mask = [1] * len(tokens) + [0] * num_padding_tokens
-        attention_masks.append(mask)
+        padded_sequences = []
+        for tokens in inputs:
+            num_padding = max_len - len(tokens)
+            padded_sequences.append(tokens + [pad_value] * num_padding)
+            attention_masks.append([1] * len(tokens) + [0] * num_padding)
 
-    batch_input_ids = mx.array(padded_input_ids)
-    # 4d mask: (batch, n_q_heads, target_len, source_len)
-    batch_attention_mask = mx.array(attention_masks)[:, None, None, :]
-    return batch_input_ids, batch_attention_mask
+        padded_batch = mx.array(padded_sequences)
+
+    elif isinstance(
+        inputs[0], (mx.array, np.ndarray)
+    ):  # Assuming list of hidden states or KV caches
+        inputs_mx = [mx.array(i) if isinstance(i, np.ndarray) else i for i in inputs]
+
+        # Determine sequence length axis based on input type
+        # kv cache: (n_layers, L_true, n_kv_h, h_dim)
+        seq_len_axis = 1 if is_kv_cache else 0
+        for tensor in inputs_mx:
+            max_len = max(max_len, tensor.shape[seq_len_axis])
+
+        padded_tensors = []
+        for tensor in inputs_mx:
+            seq_len = tensor.shape[seq_len_axis]
+            num_padding = max_len - seq_len
+
+            if num_padding > 0:
+                if is_kv_cache:
+                    pad_shape = list(tensor.shape)
+                    pad_shape[seq_len_axis] = num_padding
+                    padding = mx.zeros(tuple(pad_shape), dtype=tensor.dtype)
+                else:
+                    # Hidden state shape: (seq_len, hidden_dim)
+                    hidden_dim = tensor.shape[1]
+                    padding = mx.zeros((num_padding, hidden_dim), dtype=tensor.dtype)
+                padded_tensors.append(mx.concatenate([tensor, padding], axis=seq_len_axis))
+            else:
+                padded_tensors.append(tensor)
+            attention_masks.append([1] * seq_len + [0] * num_padding)
+
+        padded_batch = mx.stack(padded_tensors, axis=0)
+
+    else:
+        raise TypeError(f"Unsupported input type for padding: {type(inputs[0])}")
+
+    # Create 4D attention mask, ensuring it's float
+    attention_mask = mx.array(attention_masks, dtype=dtype)[:, None, None, :]
+    return padded_batch, attention_mask
+
+
+def create_causal_mask(seq_len: int, dtype=mx.bfloat16) -> mx.array:
+    """
+    Creates a causal attention mask of shape (seq_len, seq_len).
+
+    Args:
+        seq_len: The length of the sequence.
+        dtype: The data type for the mask.
+
+    Returns:
+        mx.array: A square matrix with -1e9 on the upper triangle (excluding the diagonal).
+    """
+    mask = mx.triu(mx.full((seq_len, seq_len), -1e9, dtype), k=1)
+    return mask
+
+
+def combine_padding_and_causal_masks(
+    padding_mask: mx.array, causal_mask: mx.array, dtype=mx.bfloat16
+) -> mx.array:
+    """
+    Combines a padding mask and a causal mask.
+
+    Args:
+        padding_mask: A 4D padding mask of shape (B, 1, 1, S)
+                      where masked positions are 0 and unmasked are 1.
+        causal_mask: A 2D causal mask of shape (S, S).
+        dtype: The data type for the final mask.
+
+    Returns:
+        mx.array: A combined attention mask, typically of shape (B, 1, S, S).
+    """
+    padding_mask_float = (padding_mask - 1) * 1e9
+    padding_mask_float = padding_mask_float.astype(dtype)
+    return causal_mask + padding_mask_float

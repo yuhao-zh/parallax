@@ -33,7 +33,7 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
             x: (batch, target_len, hidden_dim) - Input hidden states for the current query segment.
             mask: (batch, n_q_heads, target_len, source_len)
             cache: Optional tuple (past_k, past_v).
-                                  past_k shape: (batch, n_kv_heads, S_past_padded, head_dim)
+                   shape: (batch, n_kv_heads, S_past_padded, head_dim)
             offset: S_past_padded (scalar, used for RoPE calculation).
 
         Returns:
@@ -56,13 +56,14 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
         values_new = values_new.reshape(batch, target_len, self.n_kv_heads, -1).transpose(
             0, 2, 1, 3
         )
-
         queries_rotated = self.rope(queries_new, offset=offset)
         keys_rotated = self.rope(keys_new, offset=offset)
 
         if cache is not None:
             past_k, past_v = cache
             if past_k is not None and past_v is not None:
+                past_k = past_k.transpose(0, 2, 1, 3)
+                past_v = past_v.transpose(0, 2, 1, 3)
                 if past_k.shape[2] != offset:  # Check against S_past_padded
                     raise ValueError(
                         f"ParallaxAttention: Expected past_k sequence length {past_k.shape[2]} "
