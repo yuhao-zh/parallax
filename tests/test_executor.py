@@ -33,6 +33,7 @@ def test_decode_pipeline_multiple_steps(start_layer, end_layer, num_decode_steps
         end_layer=end_layer,
         total_model_layers=TOTAL_LAYERS,
         block_class=ParallaxQwen3Block,
+        kv_cache_memory_fraction=0.1,
         dtype=mx.bfloat16,
     )
     executor_peer2 = Executor(
@@ -41,6 +42,7 @@ def test_decode_pipeline_multiple_steps(start_layer, end_layer, num_decode_steps
         end_layer=TOTAL_LAYERS,
         total_model_layers=TOTAL_LAYERS,
         block_class=ParallaxQwen3Block,
+        kv_cache_memory_fraction=0.1,
         dtype=mx.bfloat16,
     )
 

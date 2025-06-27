@@ -12,7 +12,7 @@ from typing import Any, ClassVar, Dict
 import mlx.core as mx
 from mlx import nn
 from mlx.utils import tree_reduce
-from mlx_lm.tuner.utils import nparams
+from mlx_lm.tuner.utils import get_total_parameters
 
 try:
     import psutil
@@ -120,7 +120,7 @@ class ShardedModelInfo:
         Assumes sharded_model_instance has start_layer, end_layer, and model_id_original attributes.
         """
         # Calculate parameter count
-        count = nparams(sharded_model_instance)
+        count = get_total_parameters(sharded_model_instance)
 
         model_bytes = tree_reduce(
             lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,

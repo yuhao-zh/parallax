@@ -381,11 +381,13 @@ def test_paged_kv_cache_gather_update_kv_cache(paged_kv_cache, paged_kv_cache_pa
             np.float16
         )
     )
-    # logger.error should be called, but function returns None
-    kv.update_kv_cache(req_id, [0, 1], k_mismatch, v_mismatch)  # 2 indices, 1 token data
+    # Test that ValueError is raised when token indices count doesn't match K/V data shape
+    with pytest.raises(ValueError, match="Mismatch between number of token indices"):
+        kv.update_kv_cache(req_id, [0, 1], k_mismatch, v_mismatch)  # 2 indices, 1 token data
 
     # Test update with non-existent request
-    kv.update_kv_cache("non-existent", [0], k_mismatch, v_mismatch)
+    with pytest.raises(ValueError, match="Request non-existent not found for updating KV cache"):
+        kv.update_kv_cache("non-existent", [0], k_mismatch, v_mismatch)
 
 
 def test_paged_kv_cache_update_all_tokens_in_block():
