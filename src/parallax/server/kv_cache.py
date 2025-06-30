@@ -58,10 +58,13 @@ from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+K_CACHE_X_DIM = 2
+
 
 @dataclass
 class Block:
     """A fixed-size memory block for storing key-value pairs.
+    TODO: will support prefix caching / chunk prefill
 
     Attributes:
         id: The ID of the block.
@@ -170,8 +173,10 @@ class PagedKVCache:
         num_layers: int,
         dtype: mx.Dtype = mx.float16,
         kv_cache_memory_fraction: float = 0.8,
+        k_cache_x_dim: int = 2,
         max_tokens: Optional[int] = None,
         kv_pool_size: Optional[int] = None,
+        pad_block_id: int = 0,
     ):
         """
         Args:
@@ -181,14 +186,18 @@ class PagedKVCache:
             num_layers: The number of layers.
             dtype: The data type of the cache.
             kv_cache_memory_fraction: The fraction of total memory to use for the KV cache.
+            k_cache_x_dim: Used for splitting the head dimension for paged attention kernel.
             max_tokens: The maximum number of tokens the cache can support.
             kv_pool_size: The size of the KV cache pool.
+            pad_block_id: The block ID to use for padding.
         """
         self.dtype = dtype
         self.block_size = block_size
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.num_layers = num_layers
+        self.k_cache_x_dim = k_cache_x_dim
+        self.pad_block_id = pad_block_id
 
         self.hw_info = HardwareInfo.detect()
         free_memory_in_bytes = self.hw_info.total_ram_gb * 1024**3 - mx.get_active_memory()
@@ -209,15 +218,24 @@ class PagedKVCache:
         )
         self._sequences: Dict[str, SequenceKVCache] = {}
 
-        # Initialize KV Cache Pools
-        self._k_cache_pool = mx.zeros(
-            (num_layers, self.num_blocks, num_kv_heads, block_size, head_dim),
-            dtype=self.dtype,
+        # KV-cache is 5D: (num_layers, num_blocks, num_kv_heads, head_dim // X, block_size, X)
+        # V-cache is 4D: (num_layers, num_blocks, num_kv_heads, head_dim, block_size)
+        k_cache_shape = (
+            num_layers,
+            self.num_blocks,
+            num_kv_heads,
+            self.head_dim,
+            block_size,
         )
-        self._v_cache_pool = mx.zeros(
-            (num_layers, self.num_blocks, num_kv_heads, block_size, head_dim),
-            dtype=self.dtype,
+        v_cache_shape = (
+            num_layers,
+            self.num_blocks,
+            num_kv_heads,
+            self.head_dim,
+            block_size,
         )
+        self._k_cache_pool = mx.zeros(k_cache_shape, dtype=self.dtype)
+        self._v_cache_pool = mx.zeros(v_cache_shape, dtype=self.dtype)
 
         logger.info(
             "KV Cache Memory takes %.2fGB, for %d blocks, supporting %d tokens",
@@ -225,7 +243,16 @@ class PagedKVCache:
             self.num_blocks,
             self.max_tokens,
         )
-        logger.info(f"KV Cache Pool Shape (K/V): {self._k_cache_pool.shape}")
+        logger.info(f"KV Cache K Pool Shape: {self._k_cache_pool.shape}")
+        logger.info(f"KV Cache V Pool Shape: {self._v_cache_pool.shape}")
+
+    def get_k_cache_pool(self, layer_idx: Optional[int] = None) -> mx.array:
+        """Returns the K cache pool."""
+        return self._k_cache_pool if layer_idx is None else self._k_cache_pool[layer_idx]
+
+    def get_v_cache_pool(self, layer_idx: Optional[int] = None) -> mx.array:
+        """Returns the V cache pool."""
+        return self._v_cache_pool if layer_idx is None else self._v_cache_pool[layer_idx]
 
     def _num_blocks_needed_for_tokens(self, num_tokens: int) -> int:
         """Calculates how many blocks are needed for a given number of tokens."""
@@ -307,15 +334,16 @@ class PagedKVCache:
 
         sequence_cache = self._sequences[request_id]
         current_tokens = sequence_cache.get_token_count()
-        new_total_tokens = current_tokens + num_additional_tokens
-
         current_blocks_allocated = len(sequence_cache.get_block_ids())
-        required_total_blocks = self._num_blocks_needed_for_tokens(new_total_tokens)
-        additional_blocks_needed = required_total_blocks - current_blocks_allocated
 
-        if additional_blocks_needed <= 0:  # No new blocks needed
+        current_capacity = current_blocks_allocated * self.block_size
+        if current_tokens + num_additional_tokens <= current_capacity:
             sequence_cache.update_token_count(num_additional_tokens)
             return True
+
+        additional_blocks_needed = self._num_blocks_needed_for_tokens(
+            num_additional_tokens - (current_capacity - current_tokens)
+        )
 
         if not self._block_manager.can_allocate(additional_blocks_needed):
             logger.error(
@@ -359,6 +387,38 @@ class PagedKVCache:
             f"Released {len(sequence_cache.get_block_ids())} blocks for request {request_id}."
         )
 
+    def gather_block_tables(self, requests: List[Request]) -> Tuple(List[List[int]], List[int]):
+        """
+        Gathers the block tables for a list of requests and pads them.
+
+        Args:
+            requests: A list of requests for which to get the block tables.
+
+        Returns:
+            block_tables: A padded 2D list of block IDs (batch_size, max_blocks_per_seq).
+            lengths: A list of lengths of the sequences.
+        """
+        block_tables_list = []
+        max_blocks_per_seq = 0
+        lengths = []
+
+        for req in requests:
+            if not self.has_request(req.request_id):
+                raise ValueError(f"Request {req.request_id} not found in KV cache.")
+
+            sequence = self._sequences[req.request_id]
+            block_ids = sequence.get_block_ids()
+            block_tables_list.append(block_ids)
+            lengths.append(sequence.get_token_count())
+            max_blocks_per_seq = max(max_blocks_per_seq, len(block_ids))
+
+        padded_block_tables = []
+        for block_ids in block_tables_list:
+            padded = block_ids + [self.pad_block_id] * (max_blocks_per_seq - len(block_ids))
+            padded_block_tables.append(padded)
+
+        return padded_block_tables, lengths
+
     def has_capacity_for_tokens(self, num_tokens: int) -> bool:
         """
         Checks if the cache can accommodate a certain number of new tokens
@@ -372,6 +432,7 @@ class PagedKVCache:
         self, sequence: SequenceKVCache, token_indices_in_sequence: List[int]
     ) -> List[Tuple[int, int]]:
         """Maps logical token indices within a sequence to physical (block_id, offset_in_block)
+        # TODO: replace with a custom kernel for better performance.
 
         Args:
             sequence: The sequence to get the physical locations for.
@@ -404,11 +465,98 @@ class PagedKVCache:
             locations.append((physical_block_id, offset_in_block))
         return locations
 
+    def update_kv_cache(
+        self,
+        requests: List[Request],
+        new_key: mx.array,
+        new_val: mx.array,
+        layer_idx: Optional[int] = None,
+    ):
+        """
+        Updates the KV cache for a list of requests.
+
+        Args:
+            requests: List[Request] - The list of requests to update.
+            new_key: (batch, n_kv_heads, target_len, head_dim) - The new key tensor.
+            new_val: (batch, n_kv_heads, target_len, head_dim) - The new value tensor.
+            layer_idx: The index of the layer to update.
+        """
+        for i, request in enumerate(requests):
+            self._update_kv_cache_single_request(
+                request.request_id, new_key[i], new_val[i], layer_idx
+            )
+
+    def _update_kv_cache_single_request(
+        self,
+        request_id: str,
+        token_indices_in_sequence: List[int],
+        k_values: mx.array,
+        v_values: mx.array,
+        layer_idx: Optional[int] = None,
+    ):
+        # pylint: disable=too-many-locals
+        """
+        Writes new K and V values into the cache for specified token positions.
+
+        Args:
+            request_id: The ID of the request to update.
+            token_indices_in_sequence: The list of token indices in the sequence to update.
+            k_values: The new K values to write into the cache.
+                        (num_layers, num_tokens_to_update, num_kv_heads, head_dim)
+            v_values: The new V values to write into the cache.
+                        (num_layers, num_tokens_to_update, num_kv_heads, head_dim)
+            layer_idx: The index of the layer to update.
+        """
+        if request_id not in self._sequences:
+            raise ValueError(f"Request {request_id} not found for updating KV cache.")
+        if not token_indices_in_sequence:
+            raise ValueError("token_indices_in_sequence cannot be empty for update.")
+
+        sequence = self._sequences[request_id]
+        n_layers, n_tokens_to_update, n_kv_heads, head_dim = k_values.shape
+        if k_values.shape != v_values.shape:
+            raise ValueError(f"Mismatch between k v shapes: {k_values.shape} != {v_values.shape}")
+        if n_layers != self.num_layers:
+            raise ValueError(f"Mismatch in num_layers. Expected {self.num_layers}, got {n_layers}")
+        if n_kv_heads != self.num_kv_heads:
+            raise ValueError(
+                f"Mismatch in num_kv_heads. Expected {self.num_kv_heads}, got {n_kv_heads}"
+            )
+        if head_dim != self.head_dim:
+            raise ValueError(f"Mismatch in head_dim. Expected {self.head_dim}, got {head_dim}")
+        if n_tokens_to_update != len(token_indices_in_sequence):
+            raise ValueError(
+                f"Mismatch num tokens. {len(token_indices_in_sequence)} with {n_tokens_to_update}"
+            )
+
+        try:
+            logger.debug(
+                f"Updating KV cache for request {request_id} with ind: {token_indices_in_sequence}"
+            )
+            physical_locations = self._get_physical_locations(sequence, token_indices_in_sequence)
+        except (IndexError, ValueError) as e:
+            logger.error(
+                f"Error getting physical locations for request {request_id} during update: {e}"
+            )
+            return
+
+        for i, (physical_block_id, offset_in_block) in enumerate(physical_locations):
+            # values: (num_layers, num_tokens_to_update, num_kv_heads, head_dim)
+            # block: (num_layers, num_blocks, n_kv_heads, head_dim, block_size)
+            # block_table: (block_id, offset_in_block)
+            k_cache = self._k_cache_pool if layer_idx is None else self._k_cache_pool[layer_idx]
+            v_cache = self._v_cache_pool if layer_idx is None else self._v_cache_pool[layer_idx]
+            k_cache[..., physical_block_id, :, :, offset_in_block] = k_values[:, i, :, :]
+            v_cache[..., physical_block_id, :, :, offset_in_block] = v_values[:, i, :, :]
+
     def gather_kv_cache(
         self, request_id: str, token_indices_in_sequence: Optional[List[int]] = None
     ) -> Tuple[Optional[mx.array], Optional[mx.array]]:
         # pylint: disable=too-many-locals
         """
+        Note: Now we have paged attention kernel,
+              this is only for test / debug purpose.
+
         Gathers KV tensors for specified token indices within a sequence.
 
         If token_indices_in_sequence is None, it gathers all tokens for the request.
@@ -491,69 +639,3 @@ class PagedKVCache:
         v_final = v_stacked.transpose(1, 0, 2, 3)
 
         return k_final, v_final
-
-    def update_kv_cache(
-        self,
-        request_id: str,
-        token_indices_in_sequence: List[int],
-        k_values: mx.array,
-        v_values: mx.array,
-    ):
-        """
-        Writes new K and V values into the cache for specified token positions.
-
-        Args:
-            request_id: The ID of the request to update.
-            token_indices_in_sequence: The list of token indices in the sequence to update.
-            k_values: The new K values to write into the cache.
-                        (num_layers, num_tokens_to_update, num_kv_heads, head_dim)
-            v_values: The new V values to write into the cache.
-                        (num_layers, num_tokens_to_update, num_kv_heads, head_dim)
-        """
-        if request_id not in self._sequences:
-            raise ValueError(f"Request {request_id} not found for updating KV cache.")
-        if not token_indices_in_sequence:
-            raise ValueError("token_indices_in_sequence cannot be empty for update.")
-
-        sequence = self._sequences[request_id]
-        if k_values.shape[1] != len(token_indices_in_sequence) or v_values.shape[1] != len(
-            token_indices_in_sequence
-        ):
-            raise ValueError(
-                f"Mismatch between number of token indices ({len(token_indices_in_sequence)}) and "
-                f"k_values/v_values shape ({k_values.shape[1]}/{v_values.shape[1]}) "
-                f"for request {request_id}."
-            )
-
-        if k_values.shape[0] != self.num_layers or v_values.shape[0] != self.num_layers:
-            raise ValueError(
-                f"Mismatch in num_layers. Expected {self.num_layers}, "
-                f"got k: {k_values.shape[0]}, v: {v_values.shape[0]}"
-            )
-
-        try:
-            logger.debug(
-                f"Updating KV cache for request {request_id} with ind: {token_indices_in_sequence}"
-            )
-            physical_locations = self._get_physical_locations(sequence, token_indices_in_sequence)
-        except (IndexError, ValueError) as e:
-            logger.error(
-                f"Error getting physical locations for request {request_id} during update: {e}"
-            )
-            return
-
-        for i, (physical_block_id, offset_in_block) in enumerate(physical_locations):
-            # k_values_for_token has shape (num_layers, num_kv_heads, head_dim)
-            k_values_for_token = k_values[:, i, :, :]
-            v_values_for_token = v_values[:, i, :, :]
-
-            # Update the cache pools directly
-            # The slices _k_cache_pool[:, physical_block_id, :, offset_in_block, :]
-            # also have shape (num_layers, num_kv_heads, head_dim)
-            self._k_cache_pool[:, physical_block_id, :, offset_in_block, :] = k_values_for_token
-            self._v_cache_pool[:, physical_block_id, :, offset_in_block, :] = v_values_for_token
-
-        logger.debug(
-            f"Updated KV cache for {len(token_indices_in_sequence)} "
-            f"tokens for request {request_id}."
-        )
