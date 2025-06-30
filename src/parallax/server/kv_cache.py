@@ -482,11 +482,11 @@ class PagedKVCache:
             layer_idx: The index of the layer to update.
         """
         for i, request in enumerate(requests):
-            self._update_kv_cache_single_request(
+            self.update_kv_cache_single_request(
                 request.request_id, new_key[i], new_val[i], layer_idx
             )
 
-    def _update_kv_cache_single_request(
+    def update_kv_cache_single_request(
         self,
         request_id: str,
         token_indices_in_sequence: List[int],

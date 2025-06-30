@@ -196,6 +196,7 @@ class Executor:
             return None
 
         h_list = []
+        lengths = []
 
         for req in batched_requests:
             assert req.is_decoding, f"Request {req.request_id} is not a decode request."
@@ -209,13 +210,16 @@ class Executor:
                 assert req.hidden_states is not None and req.hidden_states.shape[0] == 1
                 h_list.append(req.hidden_states)
 
+            n_tokens_in_cache = self.kv_cache_manager.get_num_tokens_for_request(req.request_id)
+            lengths.append(n_tokens_in_cache)
+
         padded_inputs, _ = pad_inputs(0, h_list)
 
         return {
             "h_or_tokens": padded_inputs,
             "requests": batched_requests,
             "cache": None,
-            "lengths": None,
+            "lengths": mx.array(lengths),
             "mask": None,
         }
 
@@ -415,7 +419,7 @@ class Executor:
                 k_to_write = k_update_sliced.transpose(0, 2, 1, 3)
                 v_to_write = v_update_sliced.transpose(0, 2, 1, 3)
 
-                self.kv_cache_manager.update_kv_cache(
+                self.kv_cache_manager.update_kv_cache_single_request(
                     req.request_id, token_indices, k_to_write, v_to_write
                 )
 
