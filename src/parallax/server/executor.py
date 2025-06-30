@@ -386,7 +386,7 @@ class Executor:
             lengths=prepared_inputs["lengths"],
             mask=prepared_inputs["mask"],
             requests=prepared_inputs["requests"],
-            kv_cache_manager=self.kv_cache_manager,
+            cache_manager=self.kv_cache_manager,
         )
         return_decoded_tokens = return_decoded_tokens and self.is_last_peer
         # k_caches shape: (num_layers, B, num_kv_heads, L_padded, head_dim)

@@ -105,16 +105,7 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
                     raise ValueError("cache was provided but one of k/v was None.")
 
         if paged_input is not None:
-            output = scaled_dot_product_attention(
-                queries_rotated,
-                final_keys_for_attn,
-                final_values_for_attn,
-                scale=self.scale,
-                mask=mask,
-                cache=None,
-            )
-        else:
-            output = mx.core.paged_attention(
+            output = mx.paged_attention(
                 q=paged_input.q,
                 k_cache=paged_input.k_cache,
                 v_cache=paged_input.v_cache,
@@ -122,6 +113,15 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
                 context_lens=paged_input.context_lens,
                 max_context_len=paged_input.max_context_len,
                 softmax_scale=paged_input.softmax_scale,
+            )
+        else:
+            output = scaled_dot_product_attention(
+                queries_rotated,
+                final_keys_for_attn,
+                final_values_for_attn,
+                scale=self.scale,
+                mask=mask,
+                cache=None,
             )
 
         output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
@@ -146,6 +146,7 @@ class ParallaxQwen3Block(MLXQwen3Block):
         *,
         requests: Optional[List[Request]] = None,
         cache_manager: Optional[PagedKVCache] = None,
+        layer_idx: Optional[int] = None,
     ):
         r, (k_cache, v_cache) = self.self_attn(
             self.input_layernorm(x),
@@ -154,6 +155,7 @@ class ParallaxQwen3Block(MLXQwen3Block):
             offset=offset,
             requests=requests,
             cache_manager=cache_manager,
+            layer_idx=layer_idx,
         )
         h = x + r
         r = self.mlp(self.post_attention_layernorm(h))

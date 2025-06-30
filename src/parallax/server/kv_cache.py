@@ -387,7 +387,7 @@ class PagedKVCache:
             f"Released {len(sequence_cache.get_block_ids())} blocks for request {request_id}."
         )
 
-    def gather_block_tables(self, requests: List[Request]) -> Tuple(List[List[int]], List[int]):
+    def gather_block_tables(self, requests: List[Request]) -> tuple[List[List[int]], List[int]]:
         """
         Gathers the block tables for a list of requests and pads them.
 
