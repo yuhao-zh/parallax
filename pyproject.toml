@@ -11,7 +11,8 @@ readme = "README.md"
 requires-python = ">=3.8"
 
 dependencies = [
-  "mlx-lm>=0.0.4",
+  "mlx @ git+https://github.com/christ-tt/mlx.git@c9a8965dfacb4493c612416850275aff619ce315",
+  "mlx-lm>=0.25.0",
   "hivemind[p2p]>=1.1.11",
   "protobuf>=4.25.0",
   "msgpack>=1.0.7",

@@ -1,13 +1,18 @@
 # pylint: disable=too-many-locals
 """
 Defines the ShardedModel class for distributing MLX models across multiple devices.
+
+TODO: remove kv_cache manager dependency from here.
 """
 
-from typing import Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import mlx.core as mx
 from mlx import nn
-from mlx_lm.models.base import BaseModelArgs  # , create_causal_mask
+from mlx_lm.models.base import BaseModelArgs
+
+from parallax.server.kv_cache import PagedKVCache
+from parallax.server.request import Request
 
 
 class ShardedModel(nn.Module):
@@ -97,6 +102,9 @@ class ShardedModel(nn.Module):
         lengths: Optional[mx.array] = None,
         mask: Optional[mx.array] = None,
         window_size: Optional[int] = None,
+        *,
+        requests: Optional[List[Request]] = None,
+        cache_manager: Optional[PagedKVCache] = None,
     ) -> Tuple[mx.array, Tuple[mx.array, mx.array]]:
         # pylint: disable=too-many-branches
         """
@@ -110,6 +118,8 @@ class ShardedModel(nn.Module):
             lengths: (batch,) true lengths of each sequence in batch.
             mask: Optional causal mask for the current segment.
             window_size: Optional int, if provided, will use a sliding window attention mask.
+            requests: Optional list of Request, if provided, use paged attention kernel.
+            cache_manager: Optional PagedKVCache, if provided, use paged attention kernel.
 
         Returns:
             h: (batch, L_padded, D) or (batch, L_padded, vocab_size) if last_shard
@@ -148,7 +158,7 @@ class ShardedModel(nn.Module):
             ), f"lengths shape mismatch: expected ({batch},), got {lengths.shape}"
 
         offset = source_len if target_len == 1 else 0
-        if mask is None:
+        if mask is None and cache_manager is None:
             raise ValueError("ShardedModel: mask cannot be None.")
 
         collected_k_updates = []
@@ -166,6 +176,9 @@ class ShardedModel(nn.Module):
                 mask=mask,
                 cache=current_layer_past_kv,
                 offset=offset,
+                requests=requests if cache_manager is not None else None,
+                cache_manager=cache_manager if cache is not None else None,
+                layer_idx=i,
             )
             collected_k_updates.append(new_k)
             collected_v_updates.append(new_v)

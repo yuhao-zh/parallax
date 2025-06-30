@@ -1,4 +1,4 @@
-# pylint: disable=too-many-locals
+# pylint: disable=too-many-locals,c-extension-no-member
 """
 Tests for the ShardedModel loader utilities.
 """

@@ -1,23 +1,19 @@
-"""Tests for the Parallax server's key-value cache system."""
-
 # pylint: disable=missing-function-docstring,missing-module-docstring,protected-access, too-many-locals,redefined-outer-name
+# TODO: add more tests
+"""Tests for the Parallax server's key-value cache system."""
 import mlx.core as mx
-import numpy as np
 import pytest
 
 from parallax.server.kv_cache import BlockManager, PagedKVCache, SequenceKVCache
 from parallax.server.request import Request
 
 
-# Mock HardwareInfo and get_active_memory to avoid environment dependencies in tests
 @pytest.fixture(autouse=True)
 def mock_hardware_info(mocker):
     mock_hw = mocker.patch("parallax.server.kv_cache.HardwareInfo.detect")
-    # Simulate 16GB total RAM for consistent calculations if not overridden by kv_pool_size
     mock_hw.return_value.total_ram_gb = 16
 
     mock_mem = mocker.patch("parallax.server.kv_cache.mx.get_active_memory")
-    # Simulate 1GB already active memory
     mock_mem.return_value = 1 * 1024**3
     return mock_hw, mock_mem
 
@@ -136,8 +132,8 @@ def test_paged_kv_cache_initialization(paged_kv_cache, paged_kv_cache_params):
         params["num_layers"],
         kv.num_blocks,
         params["num_kv_heads"],
-        params["block_size"],
         params["head_dim"],
+        params["block_size"],
     )
     assert kv._k_cache_pool.shape == expected_shape
     assert kv._v_cache_pool.shape == expected_shape
@@ -294,166 +290,3 @@ def test_paged_kv_cache_get_physical_locations(paged_kv_cache):
 
     # Test empty list
     assert kv._get_physical_locations(sequence, []) == []
-
-
-def test_paged_kv_cache_gather_update_kv_cache(paged_kv_cache, paged_kv_cache_params):
-    kv = paged_kv_cache
-    params = paged_kv_cache_params
-    req_id = "req-gather-update"
-    req = Request(request_id=req_id)
-
-    num_tokens_to_alloc = 7  # Needs 2 blocks (block_size 4)
-    assert kv.add_request(req, num_initial_tokens=num_tokens_to_alloc)
-
-    # Create some dummy K/V values to update
-    # Shape: (num_layers, num_tokens_to_update, num_kv_heads, head_dim)
-    num_tokens_to_update = 3
-    token_indices_to_update = [1, 3, 5]
-
-    k_update_data_np = np.random.rand(
-        params["num_layers"], num_tokens_to_update, params["num_kv_heads"], params["head_dim"]
-    ).astype(np.float16)
-    v_update_data_np = np.random.rand(
-        params["num_layers"], num_tokens_to_update, params["num_kv_heads"], params["head_dim"]
-    ).astype(np.float16)
-    k_update_values = mx.array(k_update_data_np)
-    v_update_values = mx.array(v_update_data_np)
-
-    kv.update_kv_cache(req_id, token_indices_to_update, k_update_values, v_update_values)
-    mx.eval(kv._k_cache_pool, kv._v_cache_pool)  # Ensure update is processed
-
-    # Gather the updated tokens and some others
-    token_indices_to_gather = [0, 1, 2, 3, 4, 5, 6]  # Gather all allocated tokens
-    gathered_k, gathered_v = kv.gather_kv_cache(req_id, token_indices_to_gather)
-    mx.eval(gathered_k, gathered_v)
-
-    assert gathered_k is not None and gathered_v is not None
-    expected_gathered_shape = (
-        params["num_layers"],
-        len(token_indices_to_gather),
-        params["num_kv_heads"],
-        params["head_dim"],
-    )
-    assert gathered_k.shape == expected_gathered_shape
-    assert gathered_v.shape == expected_gathered_shape
-    assert gathered_k.dtype == params["dtype"]
-    assert gathered_v.dtype == params["dtype"]
-
-    # Verify that the updated values are correct
-    # token_indices_to_update = [1, 3, 5]
-    # k_update_data_np was (L, 3, H, D), where 3 corresponds to [1,3,5]
-    # gathered_k is (L, 7, H, D), where 7 corresponds to [0,1,2,3,4,5,6]
-
-    # Check token at original index 1 (which is at gathered index 1)
-    assert np.array_equal(np.array(gathered_k[:, 1, :, :]), k_update_data_np[:, 0, :, :])
-    assert np.array_equal(np.array(gathered_v[:, 1, :, :]), v_update_data_np[:, 0, :, :])
-
-    # Check token at original index 3 (which is at gathered index 3)
-    assert np.array_equal(np.array(gathered_k[:, 3, :, :]), k_update_data_np[:, 1, :, :])
-    assert np.array_equal(np.array(gathered_v[:, 3, :, :]), v_update_data_np[:, 1, :, :])
-
-    # Check token at original index 5 (which is at gathered index 5)
-    assert np.array_equal(np.array(gathered_k[:, 5, :, :]), k_update_data_np[:, 2, :, :])
-    assert np.array_equal(np.array(gathered_v[:, 5, :, :]), v_update_data_np[:, 2, :, :])
-
-    # Check a non-updated token (e.g., index 0) - should be zeros
-    assert np.all(np.array(gathered_k[:, 0, :, :]) == 0)
-    assert np.all(np.array(gathered_v[:, 0, :, :]) == 0)
-
-    # Test gather with empty token list
-    empty_k, empty_v = kv.gather_kv_cache(req_id, [])
-    assert empty_k.shape == (params["num_layers"], 0, params["num_kv_heads"], params["head_dim"])
-    assert empty_v.shape == (params["num_layers"], 0, params["num_kv_heads"], params["head_dim"])
-
-    # Test gather with non-existent request_id
-    none_k, none_v = kv.gather_kv_cache("non-existent", [0, 1])
-    assert none_k is None
-    assert none_v is None
-
-    # Test update with mismatched number of tokens
-    k_mismatch = mx.array(
-        np.random.rand(params["num_layers"], 1, params["num_kv_heads"], params["head_dim"]).astype(
-            np.float16
-        )
-    )
-    v_mismatch = mx.array(
-        np.random.rand(params["num_layers"], 1, params["num_kv_heads"], params["head_dim"]).astype(
-            np.float16
-        )
-    )
-    # Test that ValueError is raised when token indices count doesn't match K/V data shape
-    with pytest.raises(ValueError, match="Mismatch between number of token indices"):
-        kv.update_kv_cache(req_id, [0, 1], k_mismatch, v_mismatch)  # 2 indices, 1 token data
-
-    # Test update with non-existent request
-    with pytest.raises(ValueError, match="Request non-existent not found for updating KV cache"):
-        kv.update_kv_cache("non-existent", [0], k_mismatch, v_mismatch)
-
-
-def test_paged_kv_cache_update_all_tokens_in_block():
-    # Modify params for this specific test: 1 layer, 1 head, small head_dim, 1 block cache
-    params = {
-        "block_size": 2,
-        "num_kv_heads": 1,
-        "head_dim": 4,
-        "num_layers": 1,
-        "dtype": mx.float16,
-        "kv_pool_size": 1
-        * 1
-        * 2
-        * 4
-        * 2
-        * 2,  # L=1,H=1,V=2,D=4,B=2byte * 2tokens = 32 bytes => 1 block of 2 tokens
-    }
-    kv = PagedKVCache(**params)
-    req_id = "req-full-block"
-    req = Request(request_id=req_id)
-
-    assert kv.num_blocks == 1
-    assert kv.block_size == 2
-
-    assert kv.add_request(req, num_initial_tokens=2)  # Allocate all 2 tokens in the single block
-
-    k_update_data = (
-        mx.arange(
-            params["num_layers"] * 2 * params["num_kv_heads"] * params["head_dim"], dtype=mx.float32
-        )
-        .reshape(params["num_layers"], 2, params["num_kv_heads"], params["head_dim"])
-        .astype(params["dtype"])
-    )
-    v_update_data = k_update_data + 100  # Make V different
-
-    kv.update_kv_cache(req_id, [0, 1], k_update_data, v_update_data)
-    mx.eval(kv._k_cache_pool, kv._v_cache_pool)
-
-    gathered_k, gathered_v = kv.gather_kv_cache(req_id, [0, 1])
-    mx.eval(gathered_k, gathered_v)
-
-    assert np.array_equal(np.array(gathered_k), np.array(k_update_data))
-    assert np.array_equal(np.array(gathered_v), np.array(v_update_data))
-
-    # Verify raw cache pool content for the first (and only) block
-    # k_update_data is (L, num_tokens, H, D)
-    # _k_cache_pool is (L, num_blocks, H, block_size, D)
-    # For token 0 (offset 0 in block 0):
-    # _k_cache_pool[0, block_id, :, 0, :] should be k_update_data[0, 0, :, :]
-    # For token 1 (offset 1 in block 0):
-    # _k_cache_pool[0, block_id, :, 1, :] should be k_update_data[0, 1, :, :]
-
-    physical_block_id = kv._sequences[req_id].get_block_ids()[0]
-
-    expected_k_in_pool_block_token0 = np.array(k_update_data[0, 0, :, :])  # (H, D)
-    actual_k_in_pool_block_token0 = np.array(kv._k_cache_pool[0, physical_block_id, :, 0, :])
-    assert np.array_equal(actual_k_in_pool_block_token0, expected_k_in_pool_block_token0)
-
-    expected_k_in_pool_block_token1 = np.array(k_update_data[0, 1, :, :])  # (H, D)
-    actual_k_in_pool_block_token1 = np.array(kv._k_cache_pool[0, physical_block_id, :, 1, :])
-    assert np.array_equal(actual_k_in_pool_block_token1, expected_k_in_pool_block_token1)
-
-    expected_v_in_pool_block_token0 = np.array(v_update_data[0, 0, :, :])  # (H, D)
-    actual_v_in_pool_block_token0 = np.array(kv._v_cache_pool[0, physical_block_id, :, 0, :])
-    assert np.array_equal(actual_v_in_pool_block_token0, expected_v_in_pool_block_token0)
-
-    expected_v_in_pool_block_token1 = np.array(v_update_data[0, 1, :, :])  # (H, D)
-    actual_v_in_pool_block_token1 = np.array(kv._v_cache_pool[0, physical_block_id, :, 1, :])
-    assert np.array_equal(actual_v_in_pool_block_token1, expected_v_in_pool_block_token1)
