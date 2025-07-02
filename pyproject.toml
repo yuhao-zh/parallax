@@ -13,13 +13,15 @@ requires-python = ">=3.8"
 dependencies = [
   "mlx @ git+https://github.com/christ-tt/mlx.git@c9a8965dfacb4493c612416850275aff619ce315",
   "mlx-lm>=0.25.0",
-  "hivemind[p2p]>=1.1.11",
-  "protobuf>=4.25.0",
   "msgpack>=1.0.7",
   "safetensors>=0.5.1",
   "numpy>=1.26",
   "pyzmq>=25.0",
   "psutil>=5.9.5",
+  "httpx",
+  "protobuf==6.31.0",
+  "hivemind @ git+https://github.com/learning-at-home/hivemind.git@53533289edfeb1f9b2f5917cbae66fe50cfa2548",
+  "dijkstar",
 ]
 
 [project.optional-dependencies]

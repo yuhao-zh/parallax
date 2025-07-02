@@ -18,17 +18,18 @@ Executor handles
 7. Get the hidden-states from the model execution.
 """
 
+import argparse
 import time
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
 import zmq
-from mlx import nn
 
 from parallax.server.kv_cache import PagedKVCache
 from parallax.server.request import InitialRequest, IntermediateRequest, Request
 from parallax.server.scheduler import Scheduler
 from parallax.server.shard_loader import MLXModelLoader
+from parallax.server.model import get_block_class
 from parallax.utils.logging_config import get_logger
 from parallax.utils.utils import (
     combine_padding_and_causal_masks,
@@ -36,6 +37,7 @@ from parallax.utils.utils import (
     get_zmq_socket,
     pad_inputs,
 )
+
 
 logger = get_logger(__name__)
 
@@ -45,37 +47,37 @@ class Executor:
 
     def __init__(
         self,
+        # Model Configs
         model_repo: str,
         start_layer: int,
         end_layer: int,
-        total_model_layers: int,
-        block_class: Type[nn.Module],
         dtype: mx.Dtype = mx.float16,
         # Scheduler Configs
+        max_batch_size: int = 16,
         max_num_tokens_in_batch: int = 1024,
         prefill_priority: int = 0,
         micro_batch_ratio: int = 2,
         scheduler_wait_ms: int = 500,
         # KV Cache Configs
-        max_batch_size: int = 16,
         kv_block_size: int = 16,
         kv_cache_memory_fraction: float = 0.8,
         kv_max_tokens_in_cache: Optional[int] = None,
-        rpc_listen_addr: str = "ipc:///tmp/parallax_executor.ipc",
-        next_peer_addr: Optional[str] = None,
-        first_peer_addr: Optional[str] = None,
+        # Communication Configs
+        send_to_peer_addr: Optional[str] = None,
+        recv_from_peer_addr: Optional[str] = None,
     ):
-        self.is_first_peer = start_layer == 0
-        self.is_last_peer = end_layer == total_model_layers
-        self.start_layer = start_layer
-        self.end_layer = end_layer
-        self.num_shard_layers = end_layer - start_layer
-
         # Sharded Model
         self.shard_loader = MLXModelLoader(model_repo, start_layer=start_layer, end_layer=end_layer)
         self.model_shard, self.config, self.tokenizer = self.shard_loader.load(
-            block_class=block_class
+            block_class=get_block_class(model_repo)
         )
+
+        self.start_layer = start_layer
+        self.end_layer = end_layer
+        self.is_first_peer = start_layer == 0
+        self.is_last_peer = end_layer == self.config.get("num_hidden_layers")
+        self.num_shard_layers = end_layer - start_layer
+        
         self.dtype = dtype
         self.num_key_value_heads = self.config.get("num_key_value_heads")
         self.head_dim = self.config.get("head_dim")
@@ -112,29 +114,30 @@ class Executor:
         )
 
         # Communication Related
-        self.next_peer_addr = next_peer_addr
-        self.first_peer_addr = first_peer_addr
         self.zmq_context = zmq.Context()
-        self.recv_from_rpc = get_zmq_socket(self.zmq_context, zmq.PULL, rpc_listen_addr, bind=True)
+        if recv_from_peer_addr:
+            self.recv_from_peer_socket = get_zmq_socket(self.zmq_context, zmq.PULL, recv_from_peer_addr, bind=True)
+        if send_to_peer_addr:
+            self.send_to_peer_socket = get_zmq_socket(self.zmq_context, zmq.PUSH, send_to_peer_addr, bind=False)
 
-        self.send_to_next_peer_socket: Optional[zmq.Socket] = None
-        if self.next_peer_addr and not self.is_last_peer:
-            self.send_to_next_peer_socket = get_zmq_socket(
-                self.zmq_context, zmq.PUSH, self.next_peer_addr, bind=False
-            )
+    @classmethod
+    def create_from_args(cls, args: argparse.Namespace):
+        return cls(**create_executor_config(args))
 
-        self.send_to_first_peer_socket: Optional[zmq.Socket] = None
-        if self.first_peer_addr and self.is_last_peer:
-            self.send_to_first_peer_socket = get_zmq_socket(
-                self.zmq_context, zmq.PUSH, self.first_peer_addr, bind=False
-            )
-
-    def recv_requests_from_rpc(self) -> List[Request]:
+    def recv_requests_from_peer(self) -> List[Request]:
         """Receives requests from the RPC server."""
         recv_reqs = []
         while True:
             try:
-                recv_req = self.recv_from_rpc.recv_pyobj(zmq.NOBLOCK)
+                recv_req = self.recv_from_peer_socket.recv_multipart(zmq.NOBLOCK)
+                if recv_req[0] == b"forward":
+                    # TODO: handle forward request
+                    pass
+                elif recv_req[0] == b"abort":
+                    # TODO: handle abort request
+                    pass
+                else:
+                    raise ValueError(f"Unknown request type: {recv_req[0]}")
                 # First peer is responsible for tokenization
                 if self.is_first_peer and isinstance(recv_req, InitialRequest):
                     recv_req.input_ids = self.tokenizer.encode(recv_req.prompt)
@@ -438,11 +441,13 @@ class Executor:
         # pylint: disable=too-many-nested-blocks
         """The main loop of the executor."""
         logger.info(
-            f"Executor for layers {self.start_layer}-{self.end_layer-1} starting run loop..."
+            f"Executor for layers [{self.start_layer}, {self.end_layer}) starting run loop..."
         )
         while True:
             # 1. Ingest new requests from the RPC server
-            incoming_requests = self.recv_requests_from_rpc()
+            incoming_requests = self.recv_requests_from_peer()
+            if len(incoming_requests) > 0:
+                logger.info(f"Received {len(incoming_requests)} requests")
             self._handle_input_requests(incoming_requests)
 
             # 2. Check if we should form a batch
@@ -476,19 +481,13 @@ class Executor:
                         )
 
                         # 6. Dispatch to the appropriate destination
-                        if self.is_last_peer:
-                            # Last peer sends feedback to the first peer
-                            if self.send_to_first_peer_socket:
-                                for req in next_batch:
-                                    self.send_to_first_peer_socket.send_pyobj(req)
-                            # If this is a single-node setup, handle it locally
-                            if self.is_first_peer:
-                                self._handle_input_requests(next_batch)
+                        if self.is_last_peer and self.is_first_peer:
+                            # Single node: handle locally
+                            self._handle_input_requests(next_batch)
                         else:
-                            # First or intermediate peer sends to the next peer
-                            if self.send_to_next_peer_socket:
-                                for req in next_batch:
-                                    self.send_to_next_peer_socket.send_pyobj(req)
+                            # Send output to next peer
+                            for req in next_batch:
+                                self.send_to_peer_socket.send_pyobj(req)
 
             except Exception as e:
                 logger.exception(f"Error processing batch: {e}")
@@ -496,19 +495,36 @@ class Executor:
                 for req in batch_to_process:
                     self.kv_cache_manager.release_request(req.request_id)
                     self.scheduler.evict_request(req.request_id, req.status)
+    
+    def run_loop_in_background(self):
+        """Run the executor loop in the background."""
+        pass
+
 
     def shutdown(self):
         """Shuts down the executor."""
         logger.info("Executor shutting down...")
-        self.recv_from_rpc.close()
-        if self.send_to_next_peer_socket:
-            self.send_to_next_peer_socket.close()
-        if self.send_to_first_peer_socket:
-            self.send_to_first_peer_socket.close()
+        self.recv_from_peer_socket.close()
+        self.send_to_peer_socket.close()
         self.zmq_context.term()
         logger.info("Executor shutdown complete.")
 
 
-if __name__ == "__main__":
-    # check test_executor.py for exmample
-    logger.info("Executor conceptual example finished (not actually run).")
+def create_executor_config(args):
+    config = {
+        "model_repo": args.model_path,
+        "start_layer": args.start_layer,
+        "end_layer": args.end_layer,
+        "dtype": args.dtype,
+        "max_batch_size": args.max_batch_size,
+        "kv_block_size": args.kv_block_size,
+        "kv_cache_memory_fraction": args.kv_cache_memory_fraction,
+        "kv_max_tokens_in_cache": args.kv_max_tokens_in_cache,
+        "max_num_tokens_in_batch": args.max_num_tokens_in_batch,
+        "prefill_priority": args.prefill_priority,
+        "micro_batch_ratio": args.micro_batch_ratio,
+        "scheduler_wait_ms": args.scheduler_wait_ms,
+        "send_to_peer_addr": getattr(args, "send_to_peer_addr", None),
+        "recv_from_peer_addr": getattr(args, "recv_from_peer_addr", None),
+    }
+    return config

@@ -7,17 +7,14 @@ import time
 
 import mlx.core as mx
 import pytest
-from mlx_lm import generate
+from mlx_lm.generate import generate
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import get_model_path, load_model
 
-from parallax.models.qwen3 import ParallaxQwen3Block
 from parallax.server.executor import Executor
 from parallax.server.request import InitialRequest
 
 MODEL_REPO = "mlx-community/Qwen3-0.6B-bf16"
-TOTAL_LAYERS = 28
-PAD_TOKEN_ID = 151643
 
 model_path = get_model_path(MODEL_REPO)
 ref_model, ref_config = load_model(model_path)
@@ -33,17 +30,13 @@ def test_decode_pipeline_multiple_steps(start_layer, end_layer, num_decode_steps
         model_repo=MODEL_REPO,
         start_layer=start_layer,
         end_layer=end_layer,
-        total_model_layers=TOTAL_LAYERS,
-        block_class=ParallaxQwen3Block,
         kv_cache_memory_fraction=0.4,
         dtype=mx.bfloat16,
     )
     executor_peer2 = Executor(
         model_repo=MODEL_REPO,
         start_layer=end_layer,
-        end_layer=TOTAL_LAYERS,
-        total_model_layers=TOTAL_LAYERS,
-        block_class=ParallaxQwen3Block,
+        end_layer=ref_config.get("num_hidden_layers"),
         kv_cache_memory_fraction=0.4,
         dtype=mx.bfloat16,
     )
@@ -59,17 +52,24 @@ def test_decode_pipeline_multiple_steps(start_layer, end_layer, num_decode_steps
 
     executor_peer1._handle_input_requests(initial_requests)
     prefill_batch_p1 = executor_peer1.scheduler.form_batch()
-    prefill_inputs_p1 = executor_peer1._prepare_batch_inputs(prefill_batch_p1)["prefill_batch"]
-    hidden_states_p1 = executor_peer1.process_batch(prefill_inputs_p1, return_decoded_tokens=False)
+    prefill_inputs_p1 = executor_peer1._prepare_batch_inputs(prefill_batch_p1)
+    assert prefill_inputs_p1 is not None, "Failed to prepare batch inputs"
+    prefill_batch_data = prefill_inputs_p1["prefill_batch"]
+    hidden_states_p1 = executor_peer1.process_batch(prefill_batch_data, return_decoded_tokens=False)
     prefill_reqs_p2 = executor_peer1._prepare_next_batch_requests(
-        requests=prefill_inputs_p1["requests"],
+        requests=prefill_batch_data["requests"],
         hidden_states=hidden_states_p1,
-        lengths=prefill_inputs_p1["lengths"],
+        lengths=prefill_batch_data["lengths"],
     )
+
+    # send to next peer
+
     executor_peer2._handle_input_requests(prefill_reqs_p2)
     prefill_batch_p2 = executor_peer2.scheduler.form_batch()
-    prefill_inputs_p2 = executor_peer2._prepare_batch_inputs(prefill_batch_p2)["prefill_batch"]
-    gen_tokens_mx = executor_peer2.process_batch(prefill_inputs_p2, return_decoded_tokens=True)
+    prefill_inputs_p2 = executor_peer2._prepare_batch_inputs(prefill_batch_p2)
+    assert prefill_inputs_p2 is not None, "Failed to prepare batch inputs"
+    prefill_batch_data = prefill_inputs_p2["prefill_batch"]
+    gen_tokens_mx = executor_peer2.process_batch(prefill_batch_data, return_decoded_tokens=True)
     generated_tokens_pipeline = [gen_tokens_mx]
     print(
         f"Prefill done: generated_tokens_pipeline: {generated_tokens_pipeline}, "
@@ -79,9 +79,9 @@ def test_decode_pipeline_multiple_steps(start_layer, end_layer, num_decode_steps
     for _ in range(num_decode_steps):
         # 1. Simulate feedback from Peer 2 to Peer 1
         feedback_reqs = executor_peer2._prepare_next_batch_requests(
-            requests=prefill_inputs_p2["requests"],
+            requests=prefill_batch_data["requests"],
             hidden_states=generated_tokens_pipeline[-1],
-            lengths=prefill_inputs_p2["lengths"],  # Not used by last peer
+            lengths=prefill_batch_data["lengths"],  # Not used by last peer
         )
 
         # 2. Peer 1: process feedback, commit token, re-enqueue
@@ -89,24 +89,28 @@ def test_decode_pipeline_multiple_steps(start_layer, end_layer, num_decode_steps
 
         # 3. Peer 1: form and process decode batch
         decode_batch_p1 = executor_peer1.scheduler.form_batch()
-        decode_inputs_p1 = executor_peer1._prepare_batch_inputs(decode_batch_p1)["decode_batch"]
+        decode_inputs_p1 = executor_peer1._prepare_batch_inputs(decode_batch_p1)
+        assert decode_inputs_p1 is not None, "Failed to prepare batch inputs"
+        decode_batch_data = decode_inputs_p1["decode_batch"]
         decode_hidden_states_p1 = executor_peer1.process_batch(
-            decode_inputs_p1, return_decoded_tokens=False
+            decode_batch_data, return_decoded_tokens=False
         )
 
         # 4. Peer 1 -> Peer 2: Prepare next decode batch
         decode_reqs_p2 = executor_peer1._prepare_next_batch_requests(
-            requests=decode_inputs_p1["requests"],
+            requests=decode_batch_data["requests"],
             hidden_states=decode_hidden_states_p1,
-            lengths=decode_inputs_p1["lengths"],
+            lengths=decode_batch_data["lengths"],
         )
 
         # 5. Peer 2: process decode batch to get next tokens
         executor_peer2._handle_input_requests(decode_reqs_p2)
         decode_batch_p2 = executor_peer2.scheduler.form_batch()
-        decode_inputs_p2 = executor_peer2._prepare_batch_inputs(decode_batch_p2)["decode_batch"]
+        decode_inputs_p2 = executor_peer2._prepare_batch_inputs(decode_batch_p2)
+        assert decode_inputs_p2 is not None, "Failed to prepare batch inputs"
+        decode_batch_data = decode_inputs_p2["decode_batch"]
         next_gen_tokens_mx = executor_peer2.process_batch(
-            decode_inputs_p2, return_decoded_tokens=True
+            decode_batch_data, return_decoded_tokens=True
         )
         generated_tokens_pipeline.append(next_gen_tokens_mx)
 

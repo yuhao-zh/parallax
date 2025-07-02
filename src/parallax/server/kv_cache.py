@@ -209,7 +209,8 @@ class PagedKVCache:
         # Maximum number of tokens that can be stored in the cache pool.
         self.max_tokens: int = self.kv_pool_size // per_token_cache_size
         if max_tokens:
-            self.max_tokens = min(max_tokens, self.max_tokens)
+            self.max_tokens = min(self.max_tokens, max_tokens)
+        self.kv_pool_size = self.max_tokens * per_token_cache_size
         # A single block stores (num_layers, num_kv_heads, block_size, head_dim)
         self.num_blocks: int = self.max_tokens // block_size
 
