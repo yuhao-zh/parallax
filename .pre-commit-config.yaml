@@ -27,5 +27,5 @@ repos:
         language: system
         types: [python]
         args:
-          - "--disable=fixme,logging-fstring-interpolation,too-many-instance-attributes,too-many-arguments,too-many-positional-arguments,c-extension-no-member"
+          - "--disable=fixme,logging-fstring-interpolation,too-many-instance-attributes,too-many-arguments,too-many-positional-arguments"
           - "--msg-template={abspath}:{line}: [{msg_id}({symbol}), {obj}] {msg}"

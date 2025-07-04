@@ -1,4 +1,4 @@
-# pylint: disable=too-many-locals,too-few-public-methods,too-many-statements,too-many-branches, broad-exception-caught, pointless-string-statement,c-extension-no-member
+# pylint: disable=too-many-locals,too-few-public-methods,too-many-statements,too-many-branches, broad-exception-caught, pointless-string-statement
 """
 High-level executor for managing model shards, scheduler, and cache pool on each Peer.
 
@@ -26,10 +26,10 @@ import mlx.core as mx
 import zmq
 
 from parallax.server.kv_cache import PagedKVCache
+from parallax.server.model import get_block_class
 from parallax.server.request import InitialRequest, IntermediateRequest, Request
 from parallax.server.scheduler import Scheduler
 from parallax.server.shard_loader import MLXModelLoader
-from parallax.server.model import get_block_class
 from parallax.utils.logging_config import get_logger
 from parallax.utils.utils import (
     combine_padding_and_causal_masks,
@@ -37,7 +37,6 @@ from parallax.utils.utils import (
     get_zmq_socket,
     pad_inputs,
 )
-
 
 logger = get_logger(__name__)
 
@@ -77,7 +76,7 @@ class Executor:
         self.is_first_peer = start_layer == 0
         self.is_last_peer = end_layer == self.config.get("num_hidden_layers")
         self.num_shard_layers = end_layer - start_layer
-        
+
         self.dtype = dtype
         self.num_key_value_heads = self.config.get("num_key_value_heads")
         self.head_dim = self.config.get("head_dim")
@@ -116,9 +115,13 @@ class Executor:
         # Communication Related
         self.zmq_context = zmq.Context()
         if recv_from_peer_addr:
-            self.recv_from_peer_socket = get_zmq_socket(self.zmq_context, zmq.PULL, recv_from_peer_addr, bind=True)
+            self.recv_from_peer_socket = get_zmq_socket(
+                self.zmq_context, zmq.PULL, recv_from_peer_addr, bind=True
+            )
         if send_to_peer_addr:
-            self.send_to_peer_socket = get_zmq_socket(self.zmq_context, zmq.PUSH, send_to_peer_addr, bind=False)
+            self.send_to_peer_socket = get_zmq_socket(
+                self.zmq_context, zmq.PUSH, send_to_peer_addr, bind=False
+            )
 
     @classmethod
     def create_from_args(cls, args: argparse.Namespace):
@@ -199,7 +202,8 @@ class Executor:
             return None
 
         h_list = []
-        lengths = []
+        cache_lengths = []
+        kv_cache_list = []
 
         for req in batched_requests:
             assert req.is_decoding, f"Request {req.request_id} is not a decode request."
@@ -213,17 +217,41 @@ class Executor:
                 assert req.hidden_states is not None and req.hidden_states.shape[0] == 1
                 h_list.append(req.hidden_states)
 
-            n_tokens_in_cache = self.kv_cache_manager.get_num_tokens_for_request(req.request_id)
-            lengths.append(n_tokens_in_cache)
+            # The length of the KV cache for this request
+            num_tokens_in_cache = self.kv_cache_manager.get_num_tokens_for_request(req.request_id)
+            cache_lengths.append(num_tokens_in_cache)
+            kv_cache = self.kv_cache_manager.gather_kv_cache(req.request_id)
+            kv_cache_list.append(kv_cache)
 
         padded_inputs, _ = pad_inputs(0, h_list)
 
+        if not kv_cache_list:
+            raise ValueError("No KV cache found for request.")
+
+        # Separate K and V caches for padding
+        k_caches = [kv[0] for kv in kv_cache_list]
+        v_caches = [kv[1] for kv in kv_cache_list]
+
+        k_batched, k_padding_mask = pad_inputs(0, k_caches, self.dtype)
+        v_batched, _ = pad_inputs(0, v_caches, self.dtype)
+
+        # The mask from padding K is for the PAST tokens. It has shape (B, 1, 1, S_padded).
+        # We need to add a '1' for the CURRENT token so the final mask can be broadcast
+        # to the attention weights of shape (B, n_heads, 1, S_padded + 1).
+        ones_for_current_token = mx.ones((k_padding_mask.shape[0], 1, 1, 1), dtype=self.dtype)
+        final_padding_mask = mx.concatenate([k_padding_mask, ones_for_current_token], axis=3)
+        attention_mask = (1.0 - final_padding_mask) * -1e9
+
+        # `lengths` for the model should be the total sequence length for logit selection
+        # padded source length
+        model_lengths = mx.array([kv[0].shape[2] for kv in kv_cache_list])
+
         return {
             "h_or_tokens": padded_inputs,
+            "cache": (k_batched, v_batched),
+            "lengths": model_lengths,
+            "mask": attention_mask,
             "requests": batched_requests,
-            "cache": None,
-            "lengths": mx.array(lengths),
-            "mask": None,
         }
 
     def _prepare_batch_inputs(self, batched_requests: List[Request]) -> Optional[Dict[str, Any]]:
@@ -392,12 +420,10 @@ class Executor:
             cache=prepared_inputs["cache"],
             lengths=prepared_inputs["lengths"],
             mask=prepared_inputs["mask"],
-            requests=prepared_inputs["requests"],
-            cache_manager=self.kv_cache_manager,
         )
         return_decoded_tokens = return_decoded_tokens and self.is_last_peer
         # k_caches shape: (num_layers, B, num_kv_heads, L_padded, head_dim)
-        logger.debug(
+        logger.info(
             f"Processed batch with {len(prepared_inputs['requests'])} requests, "
             f"request status: {prepared_inputs['requests'][0].status}, "
             f"hidden_states shape: {hidden_states.shape}, "
@@ -417,21 +443,28 @@ class Executor:
                 k_update_sliced = k_update_for_req[:, :, :num_tokens_to_update, :]
                 v_update_sliced = v_update_for_req[:, :, :num_tokens_to_update, :]
                 lengths.append(prepared_inputs["lengths"][i])
-                # Transpose from: (num_layers, num_kv_heads, L_padded, head_dim)
-                # to (n_layers, L_true, n_kv_h, h_dim)
-                k_to_write = k_update_sliced.transpose(0, 2, 1, 3)
-                v_to_write = v_update_sliced.transpose(0, 2, 1, 3)
-
-                self.kv_cache_manager.update_kv_cache_single_request(
-                    req.request_id, token_indices, k_to_write, v_to_write
-                )
-
             elif req.is_decoding:
+                token_indices = [num_tokens_to_update - 1]
+                k_update_sliced = k_update_for_req
+                v_update_sliced = v_update_for_req
                 lengths.append(1)
+                # TODO: handle OOM for decoding
+                # TODO: speculative decoding for multi token updats
+                if not self.kv_cache_manager.extend_for_request(req.request_id, 1):
+                    raise ValueError("OOM")
             else:
                 continue
 
-                # Process last peer: need additional sampling + detokenization
+            # Transpose from: (num_layers, num_kv_heads, L_padded, head_dim)
+            # to (n_layers, L_true, n_kv_h, h_dim)
+            k_to_write = k_update_sliced.transpose(0, 2, 1, 3)
+            v_to_write = v_update_sliced.transpose(0, 2, 1, 3)
+
+            self.kv_cache_manager.update_kv_cache(
+                req.request_id, token_indices, k_to_write, v_to_write
+            )
+
+        # Process last peer: need additional sampling + detokenization
         if return_decoded_tokens:
             return mx.array(self.model_shard.logits_to_tokens(hidden_states, mx.array(lengths)))
 
@@ -495,11 +528,10 @@ class Executor:
                 for req in batch_to_process:
                     self.kv_cache_manager.release_request(req.request_id)
                     self.scheduler.evict_request(req.request_id, req.status)
-    
+
     def run_loop_in_background(self):
         """Run the executor loop in the background."""
         pass
-
 
     def shutdown(self):
         """Shuts down the executor."""
