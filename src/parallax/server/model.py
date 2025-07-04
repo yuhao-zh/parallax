@@ -10,6 +10,9 @@ from mlx import nn
 from mlx_lm.models.base import BaseModelArgs
 
 from parallax.models.qwen3 import ParallaxQwen3Block
+from parallax.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class ShardedModel(nn.Module):
