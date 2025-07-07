@@ -298,7 +298,6 @@ class Executor:
             for req in requests:
                 if isinstance(req, InitialRequest):
                     if not self.kv_cache_manager.has_request(req.request_id):
-                        print(f"add request {req.request_id} to cache manager")
                         self.kv_cache_manager.add_request(req, req.total_length)
                     self.scheduler.enque_request(req)
                 elif isinstance(req, IntermediateRequest):
