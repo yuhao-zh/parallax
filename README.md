@@ -1,3 +1,3 @@
 # Parallax
-* Paged Attention + Continuous Batching for MAC;
+* Dynamic KV Cache Management + Continuous Batching for MAC;
 * Pipeline Parallel sharding;
