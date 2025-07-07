@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 import mlx.core as mx
 import zmq
 
-from parallax.server.kv_cache import PagedKVCache
+from parallax.server.kv_cache import KVCacheManager
 from parallax.server.model import get_block_class
 from parallax.server.request import InitialRequest, IntermediateRequest, Request
 from parallax.server.scheduler import Scheduler
@@ -58,7 +58,7 @@ class Executor:
         micro_batch_ratio: int = 2,
         scheduler_wait_ms: int = 500,
         # KV Cache Configs
-        kv_block_size: int = 16,
+        kv_block_size: int = 64,
         kv_cache_memory_fraction: float = 0.8,
         kv_max_tokens_in_cache: Optional[int] = None,
         # Communication Configs
@@ -102,14 +102,14 @@ class Executor:
         )
 
         # KV Cache Manager
-        self.kv_cache_manager = PagedKVCache(
+        self.kv_cache_manager = KVCacheManager(
             block_size=kv_block_size,
             num_kv_heads=self.num_key_value_heads,
             head_dim=self.head_dim,
             num_layers=self.num_shard_layers,
             dtype=self.dtype,
-            kv_cache_memory_fraction=kv_cache_memory_fraction,
-            max_tokens=kv_max_tokens_in_cache,
+            cache_memory_fraction=kv_cache_memory_fraction,
+            max_num_tokens=kv_max_tokens_in_cache,
         )
 
         # Communication Related
@@ -218,7 +218,7 @@ class Executor:
                 h_list.append(req.hidden_states)
 
             # The length of the KV cache for this request
-            num_tokens_in_cache = self.kv_cache_manager.get_num_tokens_for_request(req.request_id)
+            num_tokens_in_cache = self.kv_cache_manager.request_length(req.request_id)
             cache_lengths.append(num_tokens_in_cache)
             kv_cache = self.kv_cache_manager.gather_kv_cache(req.request_id)
             kv_cache_list.append(kv_cache)
@@ -423,7 +423,7 @@ class Executor:
         )
         return_decoded_tokens = return_decoded_tokens and self.is_last_peer
         # k_caches shape: (num_layers, B, num_kv_heads, L_padded, head_dim)
-        logger.info(
+        logger.debug(
             f"Processed batch with {len(prepared_inputs['requests'])} requests, "
             f"request status: {prepared_inputs['requests'][0].status}, "
             f"hidden_states shape: {hidden_states.shape}, "
@@ -431,42 +431,20 @@ class Executor:
             f"v_caches shape: {v_caches.shape}"
         )
 
-        lengths = []
-        for i, req in enumerate(prepared_inputs["requests"]):
-            # Slice the KV updates for the current request
-            k_update_for_req = k_caches[:, i]
-            v_update_for_req = v_caches[:, i]
-
-            num_tokens_to_update = req.total_length
+        lengths = mx.zeros((len(prepared_inputs["requests"]),), dtype=mx.int32)
+        requests = prepared_inputs["requests"]
+        for i, req in enumerate(requests):
             if req.is_prefill:
-                token_indices = list(range(num_tokens_to_update))
-                k_update_sliced = k_update_for_req[:, :, :num_tokens_to_update, :]
-                v_update_sliced = v_update_for_req[:, :, :num_tokens_to_update, :]
-                lengths.append(prepared_inputs["lengths"][i])
+                lengths[i] = prepared_inputs["lengths"][i]
             elif req.is_decoding:
-                token_indices = [num_tokens_to_update - 1]
-                k_update_sliced = k_update_for_req
-                v_update_sliced = v_update_for_req
-                lengths.append(1)
-                # TODO: handle OOM for decoding
-                # TODO: speculative decoding for multi token updats
-                if not self.kv_cache_manager.extend_for_request(req.request_id, 1):
-                    raise ValueError("OOM")
+                lengths[i] = 1
             else:
                 continue
-
-            # Transpose from: (num_layers, num_kv_heads, L_padded, head_dim)
-            # to (n_layers, L_true, n_kv_h, h_dim)
-            k_to_write = k_update_sliced.transpose(0, 2, 1, 3)
-            v_to_write = v_update_sliced.transpose(0, 2, 1, 3)
-
-            self.kv_cache_manager.update_kv_cache(
-                req.request_id, token_indices, k_to_write, v_to_write
-            )
+        self.kv_cache_manager.update_requests(requests, k_caches, v_caches, lengths)
 
         # Process last peer: need additional sampling + detokenization
         if return_decoded_tokens:
-            return mx.array(self.model_shard.logits_to_tokens(hidden_states, mx.array(lengths)))
+            return mx.array(self.model_shard.logits_to_tokens(hidden_states, lengths))
 
         return hidden_states
 

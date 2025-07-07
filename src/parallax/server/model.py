@@ -124,7 +124,7 @@ class ShardedModel(nn.Module):
         """
         h = h_or_tokens
         batch = h.shape[0]
-        target_len = h.shape[1]  # Padded length of current query segment
+        target_len = h.shape[1]
 
         if self.is_first_shard:
             if self.embed_tokens is None:
@@ -142,7 +142,8 @@ class ShardedModel(nn.Module):
                 assert (
                     k_past_all_layers.ndim == 5
                 ), f"Unexpected k_past_all_layers ndim: {k_past_all_layers.ndim}"
-                source_len = k_past_all_layers.shape[2]
+                # (batch, n_layers, n_kv_heads, source_len, head_dim)
+                source_len = k_past_all_layers.shape[3]
 
         if lengths is None:
             lengths = mx.full((batch,), target_len + source_len, dtype=mx.int32)
@@ -181,10 +182,10 @@ class ShardedModel(nn.Module):
             h = self.norm(h)
             h = self.lm_head(h)
 
-        # Stack the collected KV updates for this shard.
-        # (batch, n_layers_in_shard, n_kv_heads, source_len, head_dim)
-        stacked_k_updates = mx.stack(collected_k_updates, axis=0)
-        stacked_v_updates = mx.stack(collected_v_updates, axis=0)
+        # Stack the collected KV updates for this shard. Resulting:
+        # (batch, n_layers, n_kv_heads, target_len, head_dim)
+        stacked_k_updates = mx.stack(collected_k_updates, axis=1)
+        stacked_v_updates = mx.stack(collected_v_updates, axis=1)
 
         return h, (stacked_k_updates, stacked_v_updates)
 

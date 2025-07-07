@@ -57,12 +57,14 @@ def pad_inputs(
 ) -> tuple[mx.array, mx.array]:
     """
     Pads a list of sequences (token ID lists or hidden state arrays) to the same length.
+    # TODO: refactor this allow cumstomized dim.
 
     Args:
         pad_value: The value to use for padding. For token IDs, this should be the
                    tokenizer's pad_token_id. For hidden states, it's ignored (always 0).
         inputs: A list of sequences to pad. Each sequence can be a list of integers
                 or an MLX/NumPy array of hidden states.
+        dtype: The data type for the padded inputs.
 
     Returns:
         A tuple containing:
@@ -96,8 +98,8 @@ def pad_inputs(
         inputs_mx = [mx.array(i) if isinstance(i, np.ndarray) else i for i in inputs]
 
         # Determine sequence length axis based on input type
-        # kv cache: (n_layers, L_true, n_kv_h, h_dim)
-        seq_len_axis = 1 if is_kv_cache else 0
+        # kv cache: (n_layers, n_kv_h, source_len, h_dim)
+        seq_len_axis = 2 if is_kv_cache else 0
         for tensor in inputs_mx:
             max_len = max(max_len, tensor.shape[seq_len_axis])
 
