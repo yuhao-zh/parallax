@@ -62,8 +62,6 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
         if cache is not None:
             past_k, past_v = cache
             if past_k is not None and past_v is not None:
-                past_k = past_k.transpose(0, 2, 1, 3)
-                past_v = past_v.transpose(0, 2, 1, 3)
                 if past_k.shape[2] != offset:  # Check against S_past_padded
                     raise ValueError(
                         f"ParallaxAttention: Expected past_k sequence length {past_k.shape[2]} "
