@@ -12,10 +12,10 @@ KVCache:
     - Supports efficient update and fetch operations
     - Automatically handles memory expansion in chunks
 
-PagedKVCache:
-    - Simplified interface that maintains compatibility with existing code
+KVCacheManager:
     - Uses a dictionary mapping request_id to KVCache instances
-    - Provides the same public methods as the original implementation
+    - Supports adding, updating, releasing requests' KV Cache
+    - Performs necessary memory checks to avoid exceeding limits
 """
 
 from typing import Dict, List, Optional, Tuple

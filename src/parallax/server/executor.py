@@ -217,7 +217,6 @@ class Executor:
                 assert req.hidden_states is not None and req.hidden_states.shape[0] == 1
                 h_list.append(req.hidden_states)
 
-            # The length of the KV cache for this request
             num_tokens_in_cache = self.kv_cache_manager.request_length(req.request_id)
             cache_lengths.append(num_tokens_in_cache)
             kv_cache = self.kv_cache_manager.gather_kv_cache(req.request_id)
@@ -228,22 +227,19 @@ class Executor:
         if not kv_cache_list:
             raise ValueError("No KV cache found for request.")
 
-        # Separate K and V caches for padding
         k_caches = [kv[0] for kv in kv_cache_list]
         v_caches = [kv[1] for kv in kv_cache_list]
 
         k_batched, k_padding_mask = pad_inputs(0, k_caches, self.dtype)
         v_batched, _ = pad_inputs(0, v_caches, self.dtype)
 
-        # The mask from padding K is for the PAST tokens. It has shape (B, 1, 1, S_padded).
+        # The mask from padding K is for the PAST tokens. It has shape (B, 1, 1, source_len_padded).
         # We need to add a '1' for the CURRENT token so the final mask can be broadcast
-        # to the attention weights of shape (B, n_heads, 1, S_padded + 1).
+        # to the attention weights of shape (B, n_heads, 1, source_len_padded + 1).
         ones_for_current_token = mx.ones((k_padding_mask.shape[0], 1, 1, 1), dtype=self.dtype)
         final_padding_mask = mx.concatenate([k_padding_mask, ones_for_current_token], axis=3)
         attention_mask = (1.0 - final_padding_mask) * -1e9
 
-        # `lengths` for the model should be the total sequence length for logit selection
-        # padded source length
         model_lengths = mx.array([kv[0].shape[2] for kv in kv_cache_list])
 
         return {
@@ -369,12 +365,10 @@ class Executor:
 
         # This peer is the first or an intermediate peer.
         if self.is_first_peer:
-            # First peer converts its InitialRequest to an IntermediateRequest.
             assert isinstance(request, InitialRequest), "First peer must process an InitialRequest."
             if request.is_finished:
                 hidden_states = None
             return IntermediateRequest.from_initial_request(request, hidden_states=hidden_states)
-        # Intermediate peer passes along an updated IntermediateRequest.
         assert isinstance(
             request, IntermediateRequest
         ), "Intermediate peer must process an IntermediateRequest."
