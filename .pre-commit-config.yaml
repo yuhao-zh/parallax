@@ -8,16 +8,26 @@ repos:
       - id: trailing-whitespace
       - id: mixed-line-ending
 
-  - repo: https://github.com/psf/black
-    rev: 24.3.0
+  - repo: https://github.com/PyCQA/autoflake
+    rev: v2.3.1
     hooks:
-      - id: black
-        language_version: python3.11
+      - id: autoflake
+        args:
+          - --remove-all-unused-imports
+          - --remove-unused-variables
+          - --in-place
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:
       - id: isort
+        language_version: python3.11
+        args: ["--profile", "black"]
+
+  - repo: https://github.com/psf/black
+    rev: 24.3.0
+    hooks:
+      - id: black
         language_version: python3.11
 
   - repo: https://github.com/pycqa/pylint
@@ -26,6 +36,8 @@ repos:
       - id: pylint
         language: system
         types: [python]
+        exclude: ".*_pb2\\.py$"
         args:
-          - "--disable=fixme,logging-fstring-interpolation,too-many-instance-attributes,too-many-arguments,too-many-positional-arguments,c-extension-no-member"
+          - "--disable=fixme,logging-fstring-interpolation,too-many-instance-attributes,too-many-arguments,too-many-positional-arguments,too-few-public-methods,c-extension-no-member,broad-exception-caught,consider-using-with,no-member,attribute-defined-outside-init,dangerous-default-value"
+          - "--max-line-length=120"
           - "--msg-template={abspath}:{line}: [{msg_id}({symbol}), {obj}] {msg}"

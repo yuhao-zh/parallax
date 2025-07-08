@@ -94,10 +94,12 @@ class Request:
         request_id: Optional[str] = None,
         status: RequestStatus = RequestStatus.PREFILLING,
         prompt_len: int = 0,
+        routing_table: Optional[List[str]] = [],
     ):
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
         self.prompt_len = prompt_len
+        self.routing_table = routing_table
 
     @property
     def is_finished(self) -> bool:
@@ -241,8 +243,10 @@ class IntermediateRequest(Request):
         current_position: int,
         status: RequestStatus = RequestStatus.PREFILLING,
         hidden_states: Optional[mx.array] = None,
+        next_token_id: Optional[int] = None,
+        routing_table: Optional[List[str]] = [],
     ):
-        super().__init__(request_id=request_id, status=status)
+        super().__init__(request_id=request_id, status=status, routing_table=routing_table)
         # Hidden states from the previous peer's computation.
         # Shape:
         #   prefill: (prompt_len, hidden_dim)
@@ -252,9 +256,9 @@ class IntermediateRequest(Request):
         if not self.is_finished and hidden_states is None:
             raise ValueError(f"hidden_states cannot be None for unfinished request {request_id}.")
 
-        self.hidden_states = hidden_states
-        self.request_id = request_id
         self.current_position = current_position
+        self.hidden_states = hidden_states
+        self.next_token_id = next_token_id
 
     @property
     def input_length(self) -> int:
@@ -309,3 +313,19 @@ class IntermediateRequest(Request):
             current_position=old_request.total_length,
             hidden_states=new_hidden_states,
         )
+
+    def __repr__(self):
+        fields = [
+            f"request_id={self.request_id}",
+            f"status={self.status}",
+            f"current_position={self.current_position}",
+            f"hidden_states={self.hidden_states}",
+        ]
+
+        if self.hidden_states is not None:
+            fields.append(f"hidden_states_shape={self.hidden_states.shape}")
+
+        fields.append(f"next_token_id={self.next_token_id}")
+
+        field_str = ",\n    ".join(fields)
+        return f"IntermediateRequest(\n    {field_str}\n)"

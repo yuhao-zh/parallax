@@ -191,12 +191,13 @@ class ShardedModel(nn.Module):
 
 
 def get_block_class(model_name: str):
+    """Get the block class for a given model name."""
     model_block_map = {
         "qwen3": ParallaxQwen3Block,
         # Add more models here as they are implemented
     }
     model_type = None
-    for key in model_block_map.keys():
+    for key in model_block_map:
         if key.lower() in model_name.lower():
             model_type = key
             break

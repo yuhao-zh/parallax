@@ -1,3 +1,20 @@
+"""
+Launch the Parallax server.
+
+This script is used to launch the Parallax server.
+It will start the P2P server and the executor.
+
+Example command:
+python src/parallax/launch.py \
+    --model-path Qwen/Qwen3-0.6B-MLX-bf16 \
+    --kv-max-tokens-in-cache 1000000 \
+    --max-num-tokens-in-batch 16384 \
+    --max-batch-size 128 \
+    --start-layer 14 \
+    --end-layer 28 \
+    --initial-peers {peer of GPU which hold the first half model}
+"""
+
 import multiprocessing
 import tempfile
 

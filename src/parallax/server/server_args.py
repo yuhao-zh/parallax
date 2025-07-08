@@ -7,13 +7,9 @@ and performance tuning.
 """
 
 import argparse
-import sys
-from typing import List, Optional, Type
 
 import mlx.core as mx
-from mlx import nn
 
-from parallax.models.qwen3 import ParallaxQwen3Block
 from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)

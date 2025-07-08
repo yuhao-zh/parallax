@@ -25,9 +25,16 @@ from typing import Any, Dict, List, Optional
 import mlx.core as mx
 import zmq
 
+from parallax.p2p.message_util import proto_to_request, request_to_proto
+from parallax.p2p.proto import forward_pb2
 from parallax.server.kv_cache import KVCacheManager
 from parallax.server.model import get_block_class
-from parallax.server.request import InitialRequest, IntermediateRequest, Request
+from parallax.server.request import (
+    InitialRequest,
+    IntermediateRequest,
+    Request,
+    RequestStatus,
+)
 from parallax.server.scheduler import Scheduler
 from parallax.server.shard_loader import MLXModelLoader
 from parallax.utils.logging_config import get_logger
@@ -116,7 +123,7 @@ class Executor:
         self.zmq_context = zmq.Context()
         if recv_from_peer_addr:
             self.recv_from_peer_socket = get_zmq_socket(
-                self.zmq_context, zmq.PULL, recv_from_peer_addr, bind=True
+                self.zmq_context, zmq.PULL, recv_from_peer_addr, bind=False
             )
         if send_to_peer_addr:
             self.send_to_peer_socket = get_zmq_socket(
@@ -125,6 +132,7 @@ class Executor:
 
     @classmethod
     def create_from_args(cls, args: argparse.Namespace):
+        """Create executor from command line arguments."""
         return cls(**create_executor_config(args))
 
     def recv_requests_from_peer(self) -> List[Request]:
@@ -134,8 +142,11 @@ class Executor:
             try:
                 recv_req = self.recv_from_peer_socket.recv_multipart(zmq.NOBLOCK)
                 if recv_req[0] == b"forward":
-                    # TODO: handle forward request
-                    pass
+                    # Create a new ForwardRequest instance and parse from bytes
+                    forward_request = forward_pb2.ForwardRequest()
+                    forward_request.ParseFromString(recv_req[1])
+                    recv_req = proto_to_request(forward_request)
+                    logger.info(f"Received request: {recv_req}")
                 elif recv_req[0] == b"abort":
                     # TODO: handle abort request
                     pass
@@ -149,12 +160,11 @@ class Executor:
                         recv_req.max_total_length, recv_req.prompt_len + recv_req.max_new_tokens
                     )
 
-                recv_reqs.append(recv_req)
+                recv_reqs.extend(recv_req)
             except zmq.ZMQError:
                 break
             except Exception as e:
-                logger.error(f"Error receiving or deserializing request: {e}")
-                break
+                logger.exception(f"Error receiving or deserializing request: {e}")
         return recv_reqs
 
     def _prepare_prefill_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
@@ -358,9 +368,10 @@ class Executor:
             assert hidden_states.dtype == mx.uint32, "Last peer must receive an output_id."
             return IntermediateRequest(
                 request_id=request.request_id,
-                status=request.status,  # Status remains DECODING or PREFILLING
+                status=RequestStatus.DECODING,  # Last peer always changes status to DECODING
                 current_position=request.total_length + 1,
                 hidden_states=hidden_states,
+                routing_table=request.routing_table,
             )
 
         # This peer is the first or an intermediate peer.
@@ -451,8 +462,6 @@ class Executor:
         while True:
             # 1. Ingest new requests from the RPC server
             incoming_requests = self.recv_requests_from_peer()
-            if len(incoming_requests) > 0:
-                logger.info(f"Received {len(incoming_requests)} requests")
             self._handle_input_requests(incoming_requests)
 
             # 2. Check if we should form a batch
@@ -474,10 +483,11 @@ class Executor:
                     if prepared_inputs_dict and prepared_inputs_dict.get(batch_type):
                         prepared_inputs = prepared_inputs_dict[batch_type]
 
+                        logger.info(f"Processing batch of type {batch_type} with {len(prepared_inputs['requests'])} requests")
+                        start_time = time.time()
                         output = self.process_batch(
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
                         )
-
                         # 5. Prepare requests for the next stage in the pipeline
                         next_batch = self._prepare_next_batch_requests(
                             requests=prepared_inputs["requests"],
@@ -491,8 +501,11 @@ class Executor:
                             self._handle_input_requests(next_batch)
                         else:
                             # Send output to next peer
-                            for req in next_batch:
-                                self.send_to_peer_socket.send_pyobj(req)
+                            self.send_to_peer_socket.send_multipart(
+                                [b"forward", request_to_proto(next_batch).SerializeToString()]
+                            )
+                        logger.info(f"Processed batch of type {batch_type} with {len(next_batch)} requests in {time.time() - start_time} seconds")
+
 
             except Exception as e:
                 logger.exception(f"Error processing batch: {e}")
@@ -503,7 +516,6 @@ class Executor:
 
     def run_loop_in_background(self):
         """Run the executor loop in the background."""
-        pass
 
     def shutdown(self):
         """Shuts down the executor."""
@@ -515,6 +527,8 @@ class Executor:
 
 
 def create_executor_config(args):
+    """Create executor configuration from command line arguments."""
+
     config = {
         "model_repo": args.model_path,
         "start_layer": args.start_layer,

@@ -78,6 +78,9 @@ class AppleSiliconHardwareInfo(HardwareInfo):
         ).strip()
 
         short_name = chip.rsplit("Apple ", maxsplit=1)[-1]
+        # For github action, we need to remove the "(Virtual)" suffix
+        if short_name.endswith(" (Virtual)"):
+            short_name = short_name.rsplit(" (Virtual)", maxsplit=1)[0]
         try:
             flops = cls._APPLE_PEAK_FP16[short_name]
         except KeyError as e:

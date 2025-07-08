@@ -221,13 +221,13 @@ class KVCacheManager:
         self.tokens_in_cache += self.request_num_tokens(request.request_id)
         return True
 
-    def release_request(self, request: Request) -> bool:
+    def release_request(self, request_id: str) -> bool:
         """
         Releases the request from the cache.
         """
-        assert self.has_request(request.request_id), "request not in cache"
-        self.tokens_in_cache -= self.request_num_tokens(request.request_id)
-        del self.request_caches[request.request_id]
+        assert self.has_request(request_id), "request not in cache"
+        self.tokens_in_cache -= self.request_num_tokens(request_id)
+        del self.request_caches[request_id]
         return True
 
     def update_requests(

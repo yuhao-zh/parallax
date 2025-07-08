@@ -167,7 +167,6 @@ class Scheduler:
         At-most `micro_batch_size` requests will be returned.
         """
         if not self.has_pending_requests:
-            logger.warning("No pending requests in the scheduler.")
             return []
 
         batch = []
