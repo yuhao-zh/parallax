@@ -187,8 +187,9 @@ class MLXModelLoader:
             mx.eval(model_shard.parameters())
         model_shard.eval()
         logger.info(
-            "Successfully loaded model shard (layers [%d-%d))",
+            "Successfully loaded model shard (layers [%d-%d)), memory usage: %.3f GB",
             current_start_layer,
             current_end_layer,
+            mx.get_active_memory() / 1024**3,
         )
         return model_shard, config, tokenizer

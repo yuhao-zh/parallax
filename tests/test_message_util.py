@@ -145,7 +145,7 @@ class TestMessageUtil:
             status=RequestStatus.PREFILLING,
             hidden_states=hidden_states1,
         )
-        
+
         # Create second request
         hidden_states2 = mx.array([[5.0, 6.0], [7.0, 8.0]], dtype=mx.float32)
         request2 = IntermediateRequest(
@@ -154,7 +154,7 @@ class TestMessageUtil:
             status=RequestStatus.PREFILLING,
             hidden_states=hidden_states2,
         )
-        
+
         # Create third request
         hidden_states3 = mx.array([[9.0, 10.0]], dtype=mx.float32)
         request3 = IntermediateRequest(
@@ -169,32 +169,33 @@ class TestMessageUtil:
 
         # Verify that there are 3 requests
         assert len(forward_request.reqs) == 3
-        
+
         # Verify that there's only one concatenated hidden_states tensor
         assert len(forward_request.pp_proxy_tensors.tensors) == 1
         named_tensor = forward_request.pp_proxy_tensors.tensors[0]
         assert named_tensor.name == "hidden_states"
-        
+
         # Convert back to MLX tensor and verify concatenation
         concatenated_tensor = proto_to_tensor(named_tensor.tensor)
-        
+
         # Expected concatenated tensor should be: [[1,2], [3,4], [5,6], [7,8], [9,10]]
-        expected_concatenated = mx.concatenate([hidden_states1, hidden_states2, hidden_states3], axis=0)
-        
+        expected_concatenated = mx.concatenate(
+            [hidden_states1, hidden_states2, hidden_states3], axis=0
+        )
+
         # Verify shape and values
         assert concatenated_tensor.shape == expected_concatenated.shape
         np.testing.assert_array_almost_equal(
-            np.array(concatenated_tensor.tolist()),
-            np.array(expected_concatenated.tolist())
+            np.array(concatenated_tensor.tolist()), np.array(expected_concatenated.tolist())
         )
-        
+
         # Verify that proto_to_request can correctly split the concatenated tensor back
         converted_requests = proto_to_request(forward_request)
         assert len(converted_requests) == 3
-        
+
         # Verify that each request gets the correct portion of hidden_states
         # Note: The slicing logic depends on current_position, so we need to account for that
-        for i, (original_req, converted_req) in enumerate(zip([request1, request2, request3], converted_requests)):
+        for original_req, converted_req in zip([request1, request2, request3], converted_requests):
             assert converted_req.request_id == original_req.request_id
             assert converted_req.status == RequestStatus.PREFILLING
             # The hidden_states should be sliced based on current_position

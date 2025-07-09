@@ -119,7 +119,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--kv-block-size", type=int, default=16, help="Block size for KV cache management"
+        "--kv-block-size", type=int, default=64, help="Block size for KV cache management"
     )
 
     # Scheduler configuration

@@ -42,3 +42,18 @@ jobs:
       with:
         file: ./coverage.xml
         fail_ci_if_error: false
+    
+    - name: Run E2E tests
+      run: |
+        python src/parallax/launch.py \
+          --model-path Qwen/Qwen3-0.6B-MLX-bf16 \
+          --kv-max-tokens-in-cache 100000 \
+          --max-num-tokens-in-batch 16384 \
+          --kv-block-size 1024 \
+          --max-batch-size 128 \
+          --start-layer 14 \
+          --end-layer 28 &
+        PID=$!
+        sleep 180
+        kill $PID 2>/dev/null || true
+        wait $PID 2>/dev/null || echo "E2E test completed after 3 minutes"

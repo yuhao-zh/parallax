@@ -146,7 +146,6 @@ class Executor:
                     forward_request = forward_pb2.ForwardRequest()
                     forward_request.ParseFromString(recv_req[1])
                     recv_req = proto_to_request(forward_request)
-                    logger.info(f"Received request: {recv_req}")
                 elif recv_req[0] == b"abort":
                     # TODO: handle abort request
                     pass
@@ -337,8 +336,12 @@ class Executor:
                     req, IntermediateRequest
                 ), "Non-first peers must receive IntermediateRequests."
                 if req.is_finished or req.hidden_states is None:
-                    logger.info(f"Releasing resources for finished request {req.request_id}")
                     self.kv_cache_manager.release_request(req.request_id)
+                    logger.info(
+                        f"Released resources for finished request {req.request_id}, "
+                        f"kv cache manager has {self.kv_cache_manager.tokens_in_cache} tokens, "
+                        f"memory usage: {mx.get_active_memory() / 1024**3 :.3f} GB"
+                    )
                     self.scheduler.evict_request(req.request_id, req.status)
                 else:
                     # This is an active request, add it to the scheduler queue to be processed.
@@ -483,7 +486,6 @@ class Executor:
                     if prepared_inputs_dict and prepared_inputs_dict.get(batch_type):
                         prepared_inputs = prepared_inputs_dict[batch_type]
 
-                        logger.info(f"Processing batch of type {batch_type} with {len(prepared_inputs['requests'])} requests")
                         start_time = time.time()
                         output = self.process_batch(
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
@@ -504,8 +506,10 @@ class Executor:
                             self.send_to_peer_socket.send_multipart(
                                 [b"forward", request_to_proto(next_batch).SerializeToString()]
                             )
-                        logger.info(f"Processed batch of type {batch_type} with {len(next_batch)} requests in {time.time() - start_time} seconds")
-
+                            logger.info(
+                                f"Processed batch of type {batch_type} with {len(next_batch)} requests "
+                                f"in {(time.time() - start_time) * 1000:.3f} ms"
+                            )
 
             except Exception as e:
                 logger.exception(f"Error processing batch: {e}")

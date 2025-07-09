@@ -78,7 +78,7 @@ class KVCache:
         """Fetches the KV cache for the request."""
         return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
 
-    def update(self, keys: mx.array, values: mx.array) -> None:
+    def update(self, keys: mx.array, values: mx.array) -> int:
         """
         Updates the cache with new key-value pairs.
 
@@ -88,6 +88,7 @@ class KVCache:
         """
         prev = self.offset
         seq_len = keys.shape[2]
+        prev_tokens = self.num_tokens
         # Grow the cache based on the block_size size
         if self.needs_grow(seq_len):
             num_layers, num_kv_heads, _, head_dim = keys.shape
@@ -108,6 +109,7 @@ class KVCache:
         self.offset += seq_len
         self.keys[..., prev : self.offset, :] = keys
         self.values[..., prev : self.offset, :] = values
+        return self.num_tokens - prev_tokens
 
 
 class KVCacheManager:
@@ -265,8 +267,7 @@ class KVCacheManager:
                     f"{self.tokens_in_cache} + {length} > {self.max_num_tokens}"
                 )
                 return False
-            self.request_caches[request.request_id].update(
+            self.tokens_in_cache += self.request_caches[request.request_id].update(
                 key[..., :length, :], value[..., :length, :]
             )
-            self.tokens_in_cache += self.round_up_to_step(length)
         return True

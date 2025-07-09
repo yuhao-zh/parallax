@@ -21,7 +21,9 @@ def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.Forward
     """
     forward_request = forward_pb2.ForwardRequest()
     assert len(requests) > 0, "No requests to convert"
-    assert all(request.status == requests[0].status for request in requests), "All requests must have the same status"
+    assert all(
+        request.status == requests[0].status for request in requests
+    ), "All requests must have the same status"
     if requests[0].status == RequestStatus.PREFILLING:
         forward_request.forward_mode = forward_pb2.ForwardMode.EXTEND
     elif requests[0].status == RequestStatus.DECODING:
@@ -31,7 +33,7 @@ def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.Forward
 
     # Collect all hidden_states and next_token_ids
     all_hidden_states = []
-    
+
     for request in requests:
         proto_req = forward_pb2.Req()
         proto_req.rid = request.request_id
@@ -60,7 +62,7 @@ def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.Forward
     if all_hidden_states:
         # Concatenate along the first dimension (batch dimension)
         concatenated_hidden_states = mx.concatenate(all_hidden_states, axis=0)
-        
+
         # Create a single named tensor for all hidden states
         named_tensor = forward_pb2.NamedTensor()
         named_tensor.name = "hidden_states"
@@ -76,7 +78,7 @@ def proto_to_hidden_states(proto: forward_pb2.PPProxyTensorsMessage) -> mx.array
     """
     if proto is None:
         return None
-    
+
     hidden_states = None
     for named_tensor in proto.tensors:
         if named_tensor.name in ("hidden_states", "residual"):
@@ -85,6 +87,7 @@ def proto_to_hidden_states(proto: forward_pb2.PPProxyTensorsMessage) -> mx.array
             else:
                 hidden_states = hidden_states + proto_to_tensor(named_tensor.tensor)
     return hidden_states
+
 
 def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[IntermediateRequest]:
     """
@@ -100,23 +103,25 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
         status = RequestStatus.PREFILLING
     elif proto_request.forward_mode == forward_pb2.ForwardMode.DECODE:
         status = RequestStatus.DECODING
-    
+    else:
+        raise ValueError(f"Invalid forward mode: {proto_request.forward_mode}")
+
     token_index = 0
     for index, proto_req in enumerate(proto_request.reqs):
         current_position = len(proto_req.input_ids) + proto_req.output_length
-        
+
         current_hidden_states = None
         if status == RequestStatus.PREFILLING:
-            current_hidden_states = hidden_states[token_index:token_index + current_position]
+            current_hidden_states = hidden_states[token_index : token_index + current_position]
             token_index += current_position
         elif status == RequestStatus.DECODING:
-            current_hidden_states = hidden_states[token_index:token_index + 1]
+            current_hidden_states = hidden_states[token_index : token_index + 1]
             token_index += 1
 
         next_token_id = None
         if proto_request.next_token_ids:
             next_token_id = proto_request.next_token_ids[index]
-        
+
         request = IntermediateRequest(
             request_id=proto_req.rid,
             current_position=current_position,
