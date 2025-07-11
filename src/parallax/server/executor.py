@@ -28,7 +28,6 @@ import zmq
 from parallax.p2p.message_util import proto_to_request, request_to_proto
 from parallax.p2p.proto import forward_pb2
 from parallax.server.kv_cache import KVCacheManager
-from parallax.server.model import get_block_class
 from parallax.server.request import (
     InitialRequest,
     IntermediateRequest,
@@ -74,9 +73,7 @@ class Executor:
     ):
         # Sharded Model
         self.shard_loader = MLXModelLoader(model_repo, start_layer=start_layer, end_layer=end_layer)
-        self.model_shard, self.config, self.tokenizer = self.shard_loader.load(
-            block_class=get_block_class(model_repo)
-        )
+        self.model_shard, self.config, self.tokenizer = self.shard_loader.load()
 
         self.start_layer = start_layer
         self.end_layer = end_layer
@@ -86,7 +83,9 @@ class Executor:
 
         self.dtype = dtype
         self.num_key_value_heads = self.config.get("num_key_value_heads")
-        self.head_dim = self.config.get("head_dim")
+        self.head_dim = self.config.get("head_dim") or self.config.get(
+            "hidden_size"
+        ) // self.config.get("num_attention_heads")
 
         if self.tokenizer.pad_token_id is None:
             self.pad_token_id = self.tokenizer.eos_token_id

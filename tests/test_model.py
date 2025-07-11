@@ -10,7 +10,6 @@ import pytest
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import get_model_path, load_model
 
-from parallax.models.qwen3 import ParallaxQwen3Block as Qwen3Block
 from parallax.server.server_info import ShardedModelInfo
 from parallax.server.shard_loader import MLXModelLoader
 from parallax.utils.utils import pad_inputs
@@ -44,7 +43,7 @@ def test_shard_prefill(layers_config: List[Tuple[int, int]]) -> None:
             start_layer=layer_from,
             end_layer=layer_to,
         )
-        model_shard_instance, _, _tokenizer = loader.load(block_class=Qwen3Block)
+        model_shard_instance, _, _tokenizer = loader.load()
         if layer_from == 0:
             tokenizer = _tokenizer
         model_info = ShardedModelInfo.from_sharded_model(model_shard_instance)

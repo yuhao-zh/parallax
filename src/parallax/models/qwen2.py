@@ -3,16 +3,17 @@
 hidden_dimefines the Qwen3 model.
 """
 
+
 from typing import Optional, Tuple
 
 import mlx.core as mx
 from mlx_lm.models.base import scaled_dot_product_attention
-from mlx_lm.models.qwen3 import Attention as MLXQwen3Attention
-from mlx_lm.models.qwen3 import ModelArgs
-from mlx_lm.models.qwen3 import TransformerBlock as MLXQwen3Block
+from mlx_lm.models.qwen2 import Attention as MLXQwen2Attention
+from mlx_lm.models.qwen2 import ModelArgs
+from mlx_lm.models.qwen2 import TransformerBlock as MLXQwen2Block
 
 
-class ParallaxQwen3Attention(MLXQwen3Attention):
+class ParallaxQwen2Attention(MLXQwen2Attention):
     """A custom attention module for Parallax, extending the Qwen3 Attention class.
 
     We apply explicit KV cache handling and passing in `offset` directly from Request.
@@ -43,21 +44,16 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
         """
         batch, target_len, _ = x.shape
 
-        queries_new = self.q_proj(x)
-        keys_new = self.k_proj(x)
-        values_new = self.v_proj(x)
+        queries = self.q_proj(x)
+        keys = self.k_proj(x)
+        values = self.v_proj(x)
 
-        queries_new = self.q_norm(
-            queries_new.reshape(batch, target_len, self.n_heads, -1)
-        ).transpose(0, 2, 1, 3)
-        keys_new = self.k_norm(keys_new.reshape(batch, target_len, self.n_kv_heads, -1)).transpose(
-            0, 2, 1, 3
-        )
-        values_new = values_new.reshape(batch, target_len, self.n_kv_heads, -1).transpose(
-            0, 2, 1, 3
-        )
-        queries_rotated = self.rope(queries_new, offset=offset)
-        keys_rotated = self.rope(keys_new, offset=offset)
+        queries = queries.reshape(batch, target_len, self.n_heads, -1).transpose(0, 2, 1, 3)
+        keys = keys.reshape(batch, target_len, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+        values = values.reshape(batch, target_len, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+
+        queries_rotated = self.rope(queries, offset=offset)
+        keys_rotated = self.rope(keys, offset=offset)
 
         if cache is not None:
             past_k, past_v = cache
@@ -68,12 +64,12 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
                         f"to match RoPE offset {offset} (S_past_padded)."
                     )
                 final_keys_for_attn = mx.concatenate([past_k, keys_rotated], axis=2)
-                final_values_for_attn = mx.concatenate([past_v, values_new], axis=2)
+                final_values_for_attn = mx.concatenate([past_v, values], axis=2)
             else:
                 raise ValueError("cache was provided but one of k/v was None.")
         else:
             final_keys_for_attn = keys_rotated
-            final_values_for_attn = values_new
+            final_values_for_attn = values
 
         output = scaled_dot_product_attention(
             queries_rotated,
@@ -85,17 +81,17 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
         )
 
         output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
-        return self.o_proj(output), (keys_rotated, values_new)
+        return self.o_proj(output), (keys_rotated, values)
 
 
-class ParallaxQwen3Block(MLXQwen3Block):
+class ParallaxQwen2Block(MLXQwen2Block):
     """A custom transformer block for Parallax, extending the Qwen3 Block class.
     This version handles the KV cache explicitly and returns new K and V states.
     """
 
     def __init__(self, args: ModelArgs):
         super().__init__(args)
-        self.self_attn = ParallaxQwen3Attention(args)
+        self.self_attn = ParallaxQwen2Attention(args)
 
     def __call__(
         self,
@@ -113,7 +109,7 @@ class ParallaxQwen3Block(MLXQwen3Block):
     @classmethod
     def get_architecture(cls):
         """Get the architecture name for the block."""
-        return "Qwen3ForCausalLM"
+        return "Qwen2ForCausalLM"
 
 
-EntryClass = ParallaxQwen3Block
+EntryClass = ParallaxQwen2Block

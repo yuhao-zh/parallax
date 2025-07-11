@@ -5,7 +5,7 @@ Loads sharded MLX models from Hugging Face Hub or local paths.
 import glob
 import importlib
 import pathlib
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, Dict, Optional, Tuple
 
 import mlx.core as mx
 import safetensors
@@ -47,9 +47,41 @@ class MLXModelLoader:
         self.model_path_str = model_path_or_hf_repo
         self.start_layer = start_layer
         self.end_layer = end_layer
+        self.register_block_class()
+
+    def register_block_class(self):
+        """Automatically read all EntryClass from models directory and generate block class map."""
+        self.block_class_map = {}
+
+        # Get models directory path
+        models_dir = pathlib.Path(__file__).parent.parent / "models"
+
+        # Find all .py files in models directory (excluding __init__.py)
+        model_files = [f for f in models_dir.glob("*.py") if f.name != "__init__.py"]
+
+        for model_file in model_files:
+            try:
+                # Import the module
+                module_name = f"parallax.models.{model_file.stem}"
+                module = importlib.import_module(module_name)
+
+                # Get EntryClass from the module
+                if hasattr(module, "EntryClass"):
+                    entry_class = getattr(module, "EntryClass")
+
+                    # Get architecture from class attribute
+                    if hasattr(entry_class, "get_architecture"):
+                        architecture = entry_class.get_architecture()
+                        self.block_class_map[architecture] = entry_class
+                        logger.info(f"Registered {architecture} -> {entry_class.__name__}")
+                    else:
+                        logger.warning(f"No architecture attribute found in {entry_class.__name__}")
+
+            except Exception as e:
+                logger.warning(f"Failed to load model from {model_file}: {e}")
 
     def load(
-        self, lazy: bool = False, strict: bool = True, *, block_class: Type[nn.Module]
+        self, lazy: bool = False, strict: bool = True
     ) -> Tuple[nn.Module, Dict[str, Any], Any]:
         # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         """
@@ -61,14 +93,22 @@ class MLXModelLoader:
                          into memory. Defaults to False.
             strict (bool): If True, raises an exception if weights do not match.
                            Defaults to True.
-            block_class (Type[nn.Module]): The class to use for instantiating transformer blocks.
-
         Returns:
             A tuple containing the loaded sharded MLX model and its configuration dictionary.
         """
         model_path = get_model_path(self.model_path_str)
         config = load_config(model_path)
         tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
+
+        architectures = config.get("architectures", None)
+        if architectures is None:
+            raise ValueError("architectures not found in config.json")
+        if len(architectures) != 1:
+            raise ValueError("only one architecture is supported")
+        architecture = architectures[0]
+        block_class = self.block_class_map.get(architecture, None)
+        if block_class is None:
+            raise ValueError(f"block_class not found for architecture: {architecture}")
 
         num_hidden_layers = config.get("num_hidden_layers", 0)
         current_start_layer = self.start_layer if self.start_layer is not None else 0

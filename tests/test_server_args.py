@@ -8,8 +8,7 @@ from unittest.mock import patch
 import mlx.core as mx
 import pytest
 
-from parallax.models.qwen3 import ParallaxQwen3Block
-from parallax.server.executor import create_executor_config, get_block_class
+from parallax.server.executor import create_executor_config
 from parallax.server.server_args import parse_args, parse_dtype, validate_args
 
 
@@ -26,25 +25,6 @@ class TestParseDtype:
         """Test parsing of invalid dtype."""
         with pytest.raises(ValueError, match="Unsupported dtype"):
             parse_dtype("invalid_dtype")
-
-
-class TestGetBlockClass:
-    """Test block class selection functionality."""
-
-    def test_qwen3_model(self):
-        """Test Qwen3 model detection."""
-        block_class = get_block_class("mlx-community/Qwen3-0.6B-bf16")
-        assert block_class == ParallaxQwen3Block
-
-    def test_qwen3_model_case_insensitive(self):
-        """Test Qwen3 model detection case insensitive."""
-        block_class = get_block_class("QWEN3-model")
-        assert block_class == ParallaxQwen3Block
-
-    def test_unknown_model_defaults_to_qwen3(self):
-        """Test that unknown models default to Qwen3."""
-        block_class = get_block_class("unknown-model")
-        assert block_class == ParallaxQwen3Block
 
 
 class TestValidateArgs:

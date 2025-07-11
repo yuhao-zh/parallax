@@ -9,7 +9,6 @@ import mlx.core as mx
 from mlx import nn
 from mlx_lm.models.base import BaseModelArgs
 
-from parallax.models.qwen3 import ParallaxQwen3Block
 from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -188,24 +187,3 @@ class ShardedModel(nn.Module):
         stacked_v_updates = mx.stack(collected_v_updates, axis=1)
 
         return h, (stacked_k_updates, stacked_v_updates)
-
-
-def get_block_class(model_name: str):
-    """Get the block class for a given model name."""
-    model_block_map = {
-        "qwen3": ParallaxQwen3Block,
-        # Add more models here as they are implemented
-    }
-    model_type = None
-    for key in model_block_map:
-        if key.lower() in model_name.lower():
-            model_type = key
-            break
-    if model_type is None:
-        logger.warning(f"Model type not recognized from '{model_name}', defaulting to qwen3")
-        model_type = "qwen3"
-    if model_type not in model_block_map:
-        raise ValueError(
-            f"Unsupported model type: {model_type}. Supported models: {list(model_block_map.keys())}"
-        )
-    return model_block_map[model_type]
