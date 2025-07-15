@@ -123,7 +123,7 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
         if proto_request.next_token_ids:
             next_token_id = proto_request.next_token_ids[index]
 
-        sampling_params = proto_to_sampling_params(proto_req.SamplingParams)
+        sampling_params = proto_to_sampling_params(proto_req.sampling_params)
 
         request = IntermediateRequest(
             request_id=proto_req.rid,

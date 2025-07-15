@@ -102,7 +102,7 @@ class ShardedModel(nn.Module):
             next_token_ids = mx.argmax(last_token_logits, axis=-1)
         else:
             sampler = Sampler()
-            next_token_ids = sampler(next_token_ids, sampling_info)
+            next_token_ids = sampler(last_token_logits, sampling_info)
         return next_token_ids
 
     def __call__(
