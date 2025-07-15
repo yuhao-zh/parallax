@@ -15,6 +15,7 @@ import mlx.core as mx
 from mlx import nn
 
 from parallax.server.request import Request
+from parallax.server.sampling.sampling_params import SamplingParams
 
 @dataclasses.dataclass
 class SamplingBatchInfo:
@@ -32,6 +33,10 @@ class SamplingBatchInfo:
 
     @classmethod
     def from_reqs(cls, reqs: list[Request]):
+        for r in reqs:
+            if r.sampling_params is None:
+                r.sampling_params = SamplingParams()
+
         is_all_greedy = all(r.sampling_params.top_k <=1 for r in reqs)
         need_min_p_sampling = any(r.sampling_params.min_p > 0 for r in reqs)
 
