@@ -68,6 +68,7 @@ from typing import List, Optional
 import mlx.core as mx
 
 from parallax.utils.logging_config import get_logger
+from parallax.server.sampling.sampling_params import SamplingParams
 
 logger = get_logger(__name__)
 
@@ -95,11 +96,13 @@ class Request:
         status: RequestStatus = RequestStatus.PREFILLING,
         prompt_len: int = 0,
         routing_table: Optional[List[str]] = [],
+        sampling_params: Optional[SamplingParams] = None,
     ):
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
         self.prompt_len = prompt_len
         self.routing_table = routing_table
+        self.sampling_params = sampling_params
 
     @property
     def is_finished(self) -> bool:
@@ -145,6 +148,7 @@ class InitialRequest(Request):
         request_id: Optional[str] = None,
         output_ids: Optional[List[int]] = None,
         input_ids: Optional[List[int]] = None,
+        sampling_params: Optional[SamplingParams] = None,
         max_new_tokens: int = 512,
         max_total_length: int = 1024,
         status: RequestStatus = RequestStatus.PREFILLING,
@@ -163,6 +167,7 @@ class InitialRequest(Request):
         self.max_total_length = max_total_length
         self.output_ids = output_ids or []
         self.hidden_states = None
+        self.sampling_params = sampling_params
 
         if len(self.output_ids) > 0 and self.status == RequestStatus.PREFILLING:
             raise ValueError(f"Cannot initialize with output_ids given {self.status}.")
@@ -245,6 +250,7 @@ class IntermediateRequest(Request):
         hidden_states: Optional[mx.array] = None,
         next_token_id: Optional[int] = None,
         routing_table: Optional[List[str]] = [],
+        sampling_params: Optional[SamplingParams] = None,
     ):
         super().__init__(request_id=request_id, status=status, routing_table=routing_table)
         # Hidden states from the previous peer's computation.
@@ -259,6 +265,7 @@ class IntermediateRequest(Request):
         self.current_position = current_position
         self.hidden_states = hidden_states
         self.next_token_id = next_token_id
+        self.sampling_params = sampling_params
 
     @property
     def input_length(self) -> int:
