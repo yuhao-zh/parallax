@@ -189,6 +189,8 @@ class Scheduler:
                 staled_req_state = self._running_requests[rid]
                 if staled_req_state.is_prefill:
                     self._inflight_tokens -= staled_req_state.prompt_len
+                else:
+                    self._inflight_tokens -= 1
                 self._running_requests[rid] = req
 
             self._inflight_tokens += cost
