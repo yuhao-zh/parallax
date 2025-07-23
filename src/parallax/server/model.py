@@ -57,7 +57,7 @@ class ShardedModel(nn.Module):
             self.embed_tokens = None
             self.norm_in = None
 
-        self.layers = [block_class(config) for _ in range(self.n_layers_in_shard)]
+        self.layers = [block_class(config, layer_idx) for layer_idx in range(start_layer, end_layer)]
 
         if self.is_last_shard:
             self.norm = nn.RMSNorm(self.hidden_size, eps=config.rms_norm_eps)

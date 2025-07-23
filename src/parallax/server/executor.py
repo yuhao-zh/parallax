@@ -145,20 +145,20 @@ class Executor:
                     forward_request = forward_pb2.ForwardRequest()
                     forward_request.ParseFromString(recv_req[1])
                     recv_req = proto_to_request(forward_request)
+                    recv_reqs.extend(recv_req)
                 elif recv_req[0] == b"abort":
                     # TODO: handle abort request
                     pass
                 else:
                     raise ValueError(f"Unknown request type: {recv_req[0]}")
                 # First peer is responsible for tokenization
-                if self.is_first_peer and isinstance(recv_req, InitialRequest):
-                    recv_req.input_ids = self.tokenizer.encode(recv_req.prompt)
-                    recv_req.prompt_len = len(recv_req.input_ids)
-                    recv_req.max_total_length = min(
-                        recv_req.max_total_length, recv_req.prompt_len + recv_req.max_new_tokens
-                    )
+                # if self.is_first_peer and isinstance(recv_req, InitialRequest):
+                #     recv_req.input_ids = self.tokenizer.encode(recv_req.prompt)
+                #     recv_req.prompt_len = len(recv_req.input_ids)
+                #     recv_req.max_total_length = min(
+                #         recv_req.max_total_length, recv_req.prompt_len + recv_req.max_new_tokens
+                #     )
 
-                recv_reqs.extend(recv_req)
             except zmq.ZMQError:
                 break
             except Exception as e:

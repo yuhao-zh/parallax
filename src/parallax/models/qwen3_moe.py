@@ -7,12 +7,12 @@ from typing import Optional, Tuple
 
 import mlx.core as mx
 from mlx_lm.models.base import scaled_dot_product_attention
-from mlx_lm.models.qwen3 import Attention as MLXQwen3Attention
-from mlx_lm.models.qwen3 import ModelArgs
-from mlx_lm.models.qwen3 import TransformerBlock as MLXQwen3Block
+from mlx_lm.models.qwen3_moe import Attention as MLXQwen3MoeAttention
+from mlx_lm.models.qwen3_moe import ModelArgs
+from mlx_lm.models.qwen3_moe import Qwen3MoeDecoderLayer as MLXQwen3MoeBlock
 
 
-class ParallaxQwen3Attention(MLXQwen3Attention):
+class ParallaxQwen3MoeAttention(MLXQwen3MoeAttention):
     """A custom attention module for Parallax, extending the Qwen3 Attention class.
 
     We apply explicit KV cache handling and passing in `offset` directly from Request.
@@ -88,14 +88,14 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
         return self.o_proj(output), (keys_rotated, values_new)
 
 
-class ParallaxQwen3Block(MLXQwen3Block):
+class ParallaxQwen3MoeBlock(MLXQwen3MoeBlock):
     """A custom transformer block for Parallax, extending the Qwen3 Block class.
     This version handles the KV cache explicitly and returns new K and V states.
     """
 
     def __init__(self, args: ModelArgs, layer_idx: int):
-        super().__init__(args)
-        self.self_attn = ParallaxQwen3Attention(args)
+        super().__init__(args, layer_idx)
+        self.self_attn = ParallaxQwen3MoeAttention(args, layer_idx)
 
     def __call__(
         self,
@@ -113,7 +113,7 @@ class ParallaxQwen3Block(MLXQwen3Block):
     @classmethod
     def get_architecture(cls):
         """Get the architecture name for the block."""
-        return "Qwen3ForCausalLM"
+        return "Qwen3MoeForCausalLM"
 
 
-EntryClass = ParallaxQwen3Block
+EntryClass = ParallaxQwen3MoeBlock

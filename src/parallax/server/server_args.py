@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--announce-maddrs",
-        type=str,
+        nargs="+",
         default=None,
         help="Comma-separated list of multiaddresses to announce",
     )

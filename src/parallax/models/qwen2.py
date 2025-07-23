@@ -89,7 +89,7 @@ class ParallaxQwen2Block(MLXQwen2Block):
     This version handles the KV cache explicitly and returns new K and V states.
     """
 
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_idx: int):
         super().__init__(args)
         self.self_attn = ParallaxQwen2Attention(args)
 

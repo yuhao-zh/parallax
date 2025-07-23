@@ -312,6 +312,7 @@ class IntermediateRequest(Request):
             status=old_request.status,
             current_position=old_request.total_length,
             hidden_states=new_hidden_states,
+            routing_table=old_request.routing_table,
         )
 
     def __repr__(self):
