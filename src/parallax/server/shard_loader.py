@@ -178,7 +178,7 @@ class MLXModelLoader:
                             is_needed = True
                             remapped_key = key
                         elif (
-                            config.get("tie_word_embedding", True)
+                            config.get("tie_word_embeddings", True)
                             and "embed" in key
                             and key.startswith("model.embed_tokens")
                         ):
