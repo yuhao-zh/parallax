@@ -461,6 +461,7 @@ class Executor:
         logger.info(
             f"Executor for layers [{self.start_layer}, {self.end_layer}) starting run loop..."
         )
+        mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
         while True:
             # 1. Ingest new requests from the RPC server
             incoming_requests = self.recv_requests_from_peer()
