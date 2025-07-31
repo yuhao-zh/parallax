@@ -234,7 +234,7 @@ class Executor:
                 assert isinstance(req, IntermediateRequest)
                 assert req.hidden_states is not None and req.hidden_states.shape[0] == 1
                 h_list.append(req.hidden_states)
-            self.prefix_cache.update_req_to_token(req.request_id, req.next_token_id)
+            self.prefix_cache.update_req_to_token(req.request_id, list([req.next_token_id]))
 
             num_tokens_in_cache = self.kv_cache_manager.request_length(req.request_id)
             cache_lengths.append(num_tokens_in_cache)
@@ -346,10 +346,10 @@ class Executor:
                     req, IntermediateRequest
                 ), "Non-first peers must receive IntermediateRequests."
                 if req.is_finished or req.hidden_states is None:
-                    self.prefix_cache.update_req_to_token(req.request_id, req.next_token_id)
                     keys, values = self.kv_cache_manager.gather_kv_cache(req.request_id)
                     self.prefix_cache.cache_finished_request(req, keys, values)
                     self.prefix_cache.evict_request(req.request_id)
+                    self.prefix_cache.pretty_print()
                     self.kv_cache_manager.release_request(req.request_id)
                     logger.info(
                         f"Released resources for finished request {req.request_id}, "
@@ -466,6 +466,12 @@ class Executor:
                 continue
         self.kv_cache_manager.update_requests(requests, k_caches, v_caches, lengths)
 
+        # Update prefix cache. Can be improved
+        for _, req in enumerate(requests):
+            if req.is_prefill:
+                keys, values = self.kv_cache_manager.gather_kv_cache(req.request_id)
+                self.prefix_cache.cache_unfinished_request(req, keys, values)
+
         # Process last peer: need additional sampling + detokenization
         if return_decoded_tokens:
             return mx.array(self.model_shard.logits_to_tokens(hidden_states, lengths))
@@ -527,6 +533,7 @@ class Executor:
                                 f"Processed batch of type {batch_type} with {len(next_batch)} requests "
                                 f"in {(time.time() - start_time) * 1000:.3f} ms"
                             )
+                self.prefix_cache.pretty_print()
 
             except Exception as e:
                 logger.exception(f"Error processing batch: {e}")
@@ -559,7 +566,7 @@ def create_executor_config(args):
         "kv_block_size": args.kv_block_size,
         "kv_cache_memory_fraction": args.kv_cache_memory_fraction,
         "kv_max_tokens_in_cache": args.kv_max_tokens_in_cache,
-        "enable_prefix_cache": args.enable_prefix_cache,
+        "disable_prefix_cache": args.disable_prefix_cache,
         "max_num_tokens_in_batch": args.max_num_tokens_in_batch,
         "prefill_priority": args.prefill_priority,
         "micro_batch_ratio": args.micro_batch_ratio,

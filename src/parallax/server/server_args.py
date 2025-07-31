@@ -126,6 +126,10 @@ def parse_args() -> argparse.Namespace:
         "--disable-prefix-cache", type=bool, default=False, help="Disable prefix cache reuse"
     )
 
+    parser.add_argument(
+        "--prefix-cache-mb", type=int, default=1024, help="Reserved prefix cache in MB"
+    )
+
     # Scheduler configuration
     parser.add_argument(
         "--max-batch-size", type=int, default=16, help="Maximum batch size for processing requests"
