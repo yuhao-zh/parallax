@@ -94,11 +94,15 @@ class Request:
         request_id: Optional[str] = None,
         status: RequestStatus = RequestStatus.PREFILLING,
         prompt_len: int = 0,
+        input_ids: Optional[List[int]] = None,
+        output_ids: Optional[List[int]] = None,
         routing_table: Optional[List[str]] = [],
     ):
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
         self.prompt_len = prompt_len
+        self.input_ids = input_ids
+        self.output_ids = output_ids or []
         self.routing_table = routing_table
 
     @property
@@ -242,6 +246,7 @@ class IntermediateRequest(Request):
         request_id: str,
         current_position: int,
         status: RequestStatus = RequestStatus.PREFILLING,
+        input_ids: Optional[List[int]] = None,
         hidden_states: Optional[mx.array] = None,
         next_token_id: Optional[int] = None,
         routing_table: Optional[List[str]] = [],
@@ -257,6 +262,7 @@ class IntermediateRequest(Request):
             raise ValueError(f"hidden_states cannot be None for unfinished request {request_id}.")
 
         self.current_position = current_position
+        self.input_ids = input_ids
         self.hidden_states = hidden_states
         self.next_token_id = next_token_id
 
@@ -296,6 +302,7 @@ class IntermediateRequest(Request):
             request_id=initial_request.request_id,
             status=initial_request.status,
             current_position=initial_request.total_length,
+            input_ids=initial_request.input_ids,
             hidden_states=hidden_states,
         )
 
@@ -311,6 +318,8 @@ class IntermediateRequest(Request):
             request_id=old_request.request_id,
             status=old_request.status,
             current_position=old_request.total_length,
+            input_ids=old_request.input_ids,
+            next_token_id=old_request.next_token_id,
             hidden_states=new_hidden_states,
             routing_table=old_request.routing_table,
         )
@@ -320,6 +329,7 @@ class IntermediateRequest(Request):
             f"request_id={self.request_id}",
             f"status={self.status}",
             f"current_position={self.current_position}",
+            f"input_ids={self.input_ids}",
             f"hidden_states={self.hidden_states}",
         ]
 

@@ -28,6 +28,7 @@ import zmq
 from parallax.p2p.message_util import proto_to_request, request_to_proto
 from parallax.p2p.proto import forward_pb2
 from parallax.server.kv_cache import KVCacheManager
+from parallax.server.radix_cache import RadixCache
 from parallax.server.request import (
     InitialRequest,
     IntermediateRequest,
@@ -67,6 +68,7 @@ class Executor:
         kv_block_size: int = 64,
         kv_cache_memory_fraction: float = 0.8,
         kv_max_tokens_in_cache: Optional[int] = None,
+        disable_prefix_cache: Optional[bool] = True,
         # Communication Configs
         send_to_peer_addr: Optional[str] = None,
         recv_from_peer_addr: Optional[str] = None,
@@ -116,6 +118,15 @@ class Executor:
             dtype=self.dtype,
             cache_memory_fraction=kv_cache_memory_fraction,
             max_num_tokens=kv_max_tokens_in_cache,
+        )
+
+        self.prefix_cache = RadixCache(
+            num_kv_heads=self.num_key_value_heads,
+            head_dim=self.head_dim,
+            num_layers=self.num_shard_layers,
+            dtype=self.dtype,
+            page_size = 1,
+            disable = disable_prefix_cache,
         )
 
         # Communication Related
@@ -175,16 +186,15 @@ class Executor:
         lengths = []
         for req in batched_requests:
             assert req.is_prefill, f"Request {req.request_id} is not a prefill request."
-            if hasattr(req, "input_ids"):
-                assert (
-                    isinstance(req, InitialRequest) and self.is_first_peer
-                ), f"Request {req.request_id} should be in FirstPeer."
+            if isinstance(req, InitialRequest):
+                assert (self.is_first_peer), f"Request {req.request_id} should be in FirstPeer."
                 h.append(req.input_ids)
             else:
                 assert isinstance(
                     req, IntermediateRequest
                 ), f"Request {req.request_id} should not be in FirstPeer."
                 h.append(req.hidden_states)
+            self.prefix_cache.update_req_to_token(req.request_id, req.input_ids)
             lengths.append(req.total_length)
 
         if self.is_first_peer:
@@ -224,6 +234,7 @@ class Executor:
                 assert isinstance(req, IntermediateRequest)
                 assert req.hidden_states is not None and req.hidden_states.shape[0] == 1
                 h_list.append(req.hidden_states)
+            self.prefix_cache.update_req_to_token(req.request_id, req.next_token_id)
 
             num_tokens_in_cache = self.kv_cache_manager.request_length(req.request_id)
             cache_lengths.append(num_tokens_in_cache)
@@ -335,6 +346,10 @@ class Executor:
                     req, IntermediateRequest
                 ), "Non-first peers must receive IntermediateRequests."
                 if req.is_finished or req.hidden_states is None:
+                    self.prefix_cache.update_req_to_token(req.request_id, req.next_token_id)
+                    keys, values = self.kv_cache_manager.gather_kv_cache(req.request_id)
+                    self.prefix_cache.cache_finished_request(req, keys, values)
+                    self.prefix_cache.evict_request(req.request_id)
                     self.kv_cache_manager.release_request(req.request_id)
                     logger.info(
                         f"Released resources for finished request {req.request_id}, "
@@ -346,6 +361,7 @@ class Executor:
                     # This is an active request, add it to the scheduler queue to be processed.
                     self.scheduler.enque_request(req)
                     if not self.kv_cache_manager.has_request(req.request_id):
+                        # keys, values = self.prefix_cache.match_prefix(req)
                         self.kv_cache_manager.add_request(req, req.total_length)
 
     def _prepare_next_single_request(self, request: Request, hidden_states: mx.array) -> Request:
@@ -372,6 +388,7 @@ class Executor:
                 request_id=request.request_id,
                 status=RequestStatus.DECODING,  # Last peer always changes status to DECODING
                 current_position=request.total_length + 1,
+                input_ids=request.input_ids,
                 hidden_states=hidden_states,
                 routing_table=request.routing_table,
             )
@@ -542,6 +559,7 @@ def create_executor_config(args):
         "kv_block_size": args.kv_block_size,
         "kv_cache_memory_fraction": args.kv_cache_memory_fraction,
         "kv_max_tokens_in_cache": args.kv_max_tokens_in_cache,
+        "enable_prefix_cache": args.enable_prefix_cache,
         "max_num_tokens_in_batch": args.max_num_tokens_in_batch,
         "prefill_priority": args.prefill_priority,
         "micro_batch_ratio": args.micro_batch_ratio,

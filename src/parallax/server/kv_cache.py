@@ -223,6 +223,8 @@ class KVCacheManager:
         self.tokens_in_cache += self.request_num_tokens(request.request_id)
         return True
 
+    # def add_request_with_prefix_cache():
+
     def release_request(self, request_id: str) -> bool:
         """
         Releases the request from the cache.

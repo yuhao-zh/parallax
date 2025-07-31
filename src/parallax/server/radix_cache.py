@@ -6,11 +6,14 @@ same as SGLang.
 
 from collections import defaultdict
 from functools import partial
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 import time
 import heapq
 
 import mlx.core as mx
+
+from parallax.server.kv_cache import KVCache
+from parallax.server.request import Request
 
 class TreeNode:
     """
@@ -24,7 +27,9 @@ class TreeNode:
         self.children = defaultdict(TreeNode)
         self.parent: TreeNode = None
         self.key: List[int] = None
-        self.value: Optional[mx.array] = None
+        self.value: Optional[List[int]] = None
+        self.kv_cache = None
+        self.lock_ref = 0
         self.last_access_time = time.monotonic()
 
         self.hit_count = 0
@@ -39,6 +44,13 @@ class TreeNode:
     def __lt__(self, other: "TreeNode"):
         return self.last_access_time < other.last_access_time
 
+def _key_match_page_size1(key0: List, key1: List):
+    i = 0
+    for k0, k1 in zip(key0, key1):
+        if k0 != k1:
+            break
+        i += 1
+    return i
 
 def _key_match_paged(key0: List, key1: List, page_size: int):
     min_len = min(len(key0), len(key1))
@@ -55,18 +67,31 @@ def _key_match_paged(key0: List, key1: List, page_size: int):
 class RadixCache:
     """
     Manages Radix Cache for the running executor.
+    Note: Currently only support page_size=1.
     """
     def __init__(
         self,
-        page_size: int,
+        num_kv_heads: int,
+        head_dim: int,
+        num_layers: int,
+        dtype: mx.Dtype,
+        page_size: int = 1,
         disable: bool = False,
     ):
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.num_layers = num_layers
+        self.dtype = dtype
         self.page_size = page_size
         self.disable = disable
-        self.kv_event_queue = []
+        self.req_to_token: Dict[str, List[int]] = {}
 
-        self.key_match_fn = partial(_key_match_paged, page_size=page_size)
-        self.get_child_key_fn = lambda key: tuple(key[:page_size])
+        if self.page_size == 1:
+            self.key_match_fn = _key_match_page_size1
+            self.get_child_key_fn = lambda key: key[0]
+        else:
+            self.key_match_fn = partial(_key_match_paged, page_size=page_size)
+            self.get_child_key_fn = lambda key: tuple(key[:page_size])
         self.reset()
 
     def reset(self):
@@ -76,41 +101,51 @@ class RadixCache:
         self.root_node.lock_ref = 1
         self.evictable_size_ = 0
         self.protected_size_ = 0
+        self.req_to_token = {}
 
-    def match_prefix(self, key: List[int], **kwargs) -> Tuple[mx.array, int]:
+    def update_req_to_token(self, req_id: str, token_ids: List[int]):
+        value = self.req_to_token.get(req_id)
+        if value:
+            self.req_to_token[req_id] = self.req_to_token[req_id] + token_ids
+        else:
+            self.req_to_token[req_id] = token_ids
+
+    def evict_request(self, req_id: str):
+        del self.req_to_token[req_id]
+
+    def match_prefix(
+            self,
+            key: List[int],
+        ) -> Tuple[mx.array, mx.array, int]:
         """Find the matching prefix from the radix tree.
         Args:
             key: A list of token IDs to find a matching prefix.
         Returns:
-            A tuple of a tensor of matching prefix token IDs and
-            the last node that contains the prefix values. Note that
-            this API can modify the internal state of the Radix tree.
-            The last node create a new child if the prefix is shorter
-            than the last node's value.
+            A tuple of (key, value, matched last node)
+        Note that this API can modify the internal state of the Radix tree.
+        The last node creates a new child if the prefix is shorter than
+        the last node's value.
         """
         if self.disable or len(key) == 0:
             return (
-                mx.array([]),
+                [],
                 self.root_node,
             )
 
-        page_aligned_len = len(key) // self.page_size * self.page_size
-        key = key[:page_aligned_len]
+        if self.page_size != 1:
+            page_aligned_len = len(key) // self.page_size * self.page_size
+            key = key[:page_aligned_len]
 
         value, last_node = self._match_prefix_helper(self.root_node, key)
-        if value:
-            value = mx.concatenate(value)
-        else:
-            value = mx.array([])
         return value, last_node
 
-    def insert(self, key: List, value=None):
+    def insert(self, key: List, value, keys: mx.array, values: mx.array):
         if self.disable:
             return 0
 
         if value is None:
             value = [x for x in key]
-        return self._insert_helper(self.root_node, key, value)
+        return self._insert_helper(self.root_node, key, value, keys, values)
 
     def evict(self, num_tokens: int):
         if self.disable:
@@ -142,6 +177,59 @@ class RadixCache:
     def total_size(self):
         return self._total_size_helper()
 
+    def increase_lock_ref(self, node: TreeNode):
+        if self.disable:
+            return 0
+
+        delta = 0
+        while node != self.root_node:
+            if node.lock_ref == 0:
+                self.evictable_size_ -= len(node.value)
+                self.protected_size_ += len(node.value)
+                delta -= len(node.value)
+            node.lock_ref += 1
+            node = node.parent
+        return delta
+
+    def decrease_lock_ref(self, node: TreeNode):
+        if self.disable:
+            return 0
+
+        delta = 0
+        while node != self.root_node:
+            if node.lock_ref == 1:
+                self.evictable_size_ += len(node.value)
+                self.protected_size_ -= len(node.value)
+                delta += len(node.value)
+            node.lock_ref -= 1
+            node = node.parent
+        return delta
+
+    def cache_finished_request(
+            self,
+            req: Request,
+            keys: mx.array,
+            values: mx.array
+        ):
+        """Cache request when it finishes."""
+        if self.disable:
+            return
+
+        token_ids = self.req_to_token[req.request_id]
+        _, node = self.insert(
+            key=token_ids,
+            value=None,
+            keys=keys,
+            values=values
+        )
+
+        # Remove req slot release the cache lock
+        self.dec_lock_ref(node)
+
+    def cache_unfinished_request(self):
+        """Cache request when it is unfinished."""
+        pass
+
     """Internal Helper Functions"""
     def _match_prefix_helper(self, node: TreeNode, key: List):
         node.last_access_time = time.monotonic()
@@ -168,6 +256,25 @@ class RadixCache:
 
         return value, node
 
+    def _fetch_kv_cache(self, value):
+        # assert value, "Fetching KV indicies should not be empty."
+        # # initialize
+        # init_kv_cache = self.kv_cache_dict[value[0]]
+        # init_keys, _ = init_kv_cache.fetch()
+        # num_layers, num_kv_heads, _, head_dim = init_keys.shape
+        # init_dtype = init_keys.dtype
+        # keys = mx.zeros((num_layers, num_kv_heads, 0, head_dim), dtype=init_dtype)
+        # values = mx.zeros((num_layers, num_kv_heads, 0, head_dim), dtype=init_dtype)
+
+        # # concatenate kv cache
+        # for i in value:
+        #     kv_cache = self.kv_cache_dict[i]
+        #     cur_keys, cur_values = kv_cache.fetch()
+        #     keys = mx.concatenate([keys, cur_keys], axis=2)
+        #     values = mx.concatenate([values, cur_values], axis=2)
+        # return keys, values
+        pass
+
     def _split_node(self, key, child: TreeNode, split_len: int):
         # new_node -> child
         new_node = TreeNode()
@@ -180,6 +287,32 @@ class RadixCache:
         child.key = child.key[split_len:]
         child.value = child.value[split_len:]
         new_node.parent.children[self.get_child_key_fn(key)] = new_node
+
+        child_keys, child_values = child.kv_cache.fetch()
+        # create kv cache for new_node
+        new_keys = child_keys[..., :split_len, :]
+        new_values = child_values[..., :split_len, :]
+        new_node.kv_cache = KVCache(
+                num_kv_heads = self.num_kv_heads,
+                head_dim = self.head_dim,
+                num_layers = self.num_layers,
+                dtype = self.dtype,
+                block_size = self.page_size,
+                num_initial_tokens = self.page_size,
+            )
+        new_node.kv_cache.update(new_keys, new_values)
+        # update kv cache for child
+        child_keys = child_keys[..., split_len:, :]
+        child_values = child_values[..., split_len:, :]
+        child.kv_cache = KVCache(
+                num_kv_heads = self.num_kv_heads,
+                head_dim = self.head_dim,
+                num_layers = self.num_layers,
+                dtype = self.dtype,
+                block_size = self.page_size,
+                num_initial_tokens = self.page_size,
+            )
+        child.kv_cache.update(child_keys, child_values)
 
         return new_node
 
@@ -196,7 +329,13 @@ class RadixCache:
 
         return ret_list
 
-    def _insert_helper(self, node: TreeNode, key: List, value):
+    def _insert_helper(
+            self,
+            node: TreeNode,
+            key: List,
+            value: List,
+            keys: mx.array,
+            values: mx.array):
         node.last_access_time = time.monotonic()
         if len(key) == 0:
             return 0
@@ -226,7 +365,22 @@ class RadixCache:
             new_node.value = value
             node.children[child_key] = new_node
             self.evictable_size_ += len(value)
-        return total_prefix_length
+
+            # create kvcache for new_node
+            kv_cache = KVCache(
+                num_kv_heads = self.num_kv_heads,
+                head_dim = self.head_dim,
+                num_layers = self.num_layers,
+                dtype = self.dtype,
+                block_size = self.page_size,
+                num_initial_tokens = self.page_size,
+            )
+            keys = keys[..., self.total_prefix_length:, :]
+            values = values[..., self.total_prefix_length:, :]
+            kv_cache.update(keys, values)
+            new_node.kv_cache = kv_cache
+
+        return total_prefix_length, node
 
     def _delete_leaf(self, node):
         for k, v in node.parent.children.items():

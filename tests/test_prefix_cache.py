@@ -6,7 +6,7 @@ Tests for the radix tree.
 from parallax.server.radix_cache import RadixCache
 
 if __name__ == "__main__":
-    tree = RadixCache(None, None, page_size=1, disable=False)
+    tree = RadixCache(page_size=64, disable=False)
 
     tree.insert("Hello")
     tree.insert("Hello")
@@ -17,10 +17,6 @@ if __name__ == "__main__":
 
     print(tree.match_prefix("I love you! aha"))
 
-    def evict_callback(x):
-       print("evict", x)
-       return len(x)
-
-    tree.evict(5, evict_callback)
-    tree.evict(10, evict_callback)
+    tree.evict(5)
+    tree.evict(10)
     tree.pretty_print()
