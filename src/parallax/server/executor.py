@@ -43,6 +43,7 @@ from parallax.utils.utils import (
     create_causal_mask,
     get_zmq_socket,
     pad_inputs,
+    pad_prefix_caches,
 )
 
 logger = get_logger(__name__)
@@ -184,6 +185,9 @@ class Executor:
 
         h = []
         lengths = []
+        k_caches = []
+        v_caches = []
+        matched_prefix = False
         for req in batched_requests:
             assert req.is_prefill, f"Request {req.request_id} is not a prefill request."
             if isinstance(req, InitialRequest):
@@ -197,17 +201,42 @@ class Executor:
             self.prefix_cache.update_req_to_token(req.request_id, req.input_ids)
             lengths.append(req.total_length)
 
+            value, node = self.prefix_cache.match_prefix(req.input_ids)
+            if value:
+                kv = self.prefix_cache.fetch_kv_cache(node)
+                k_caches.append(kv[0])
+                v_caches.append(kv[1])
+                matched_prefix = True
+            else:
+                k_caches.append(mx.zeros([
+                        self.prefix_cache.num_layers,
+                        self.prefix_cache.num_kv_heads,
+                        0,
+                        self.prefix_cache.head_dim],
+                    dtype=self.dtype))
+                v_caches.append(mx.zeros([
+                        self.prefix_cache.num_layers,
+                        self.prefix_cache.num_kv_heads,
+                        0,
+                        self.prefix_cache.head_dim],
+                    dtype=self.dtype))
+
         if self.is_first_peer:
             padded_inputs, padding_mask = pad_inputs(self.pad_token_id, h, self.dtype)
         else:
             padded_inputs, padding_mask = pad_inputs(0, h, self.dtype)
 
-        causal_mask = create_causal_mask(padded_inputs.shape[1])
+        if matched_prefix:
+            k_batched, k_padding_mask = pad_prefix_caches(k_caches, lengths, self.dtype)
+            v_batched, _ = pad_prefix_caches(v_caches, lengths, self.dtype)
+            padding_mask = k_padding_mask
+
+        causal_mask = create_causal_mask(padded_inputs.shape[1], max(lengths))
         mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
 
         return {
             "h_or_tokens": padded_inputs,
-            "cache": None,
+            "cache": (k_batched, v_batched) if matched_prefix else None,
             "lengths": mx.array(lengths),
             "mask": mask,
             "requests": batched_requests,

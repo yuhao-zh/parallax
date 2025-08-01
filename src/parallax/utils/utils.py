@@ -1,7 +1,7 @@
 # pylint: disable=too-many-locals
 """Utility functions."""
 
-from typing import List
+from typing import List, Optional
 
 import mlx.core as mx
 import numpy as np
@@ -51,6 +51,45 @@ def get_zmq_socket(context: zmq.Context, socket_type: zmq.SocketType, endpoint: 
 
     return socket
 
+def pad_prefix_caches(
+    cache: List, input_lengths: List, dtype: mx.Dtype = mx.bfloat16
+) -> tuple[mx.array, mx.array]:
+    """
+    Pads prefix kv caches.
+
+    Returnas:
+        - mx.array: The padded batch of caches with a shape of [B, max_input_seq_len].
+        - mx.array: The corresponding 4D k mask with a shape of [B, 1, 1, max_output_seq_len].
+    """
+    caches_mx = [mx.array(i) if isinstance(i, np.ndarray) else i for i in cache]
+
+    seq_len_axis = 2
+    max_input_len = 0
+    max_output_len = 0
+    for i, tensor in enumerate(caches_mx):
+        max_input_len = max(max_input_len, tensor.shape[seq_len_axis])
+        max_output_len = max(max_output_len, input_lengths[i])
+
+    padded_tensors = []
+    k_masks = []
+    for i, tensor in enumerate(caches_mx):
+        cache_len = tensor.shape[seq_len_axis]
+        num_kv_padding = max_input_len - cache_len
+        input_seq_len = input_lengths[i]
+        num_mask_padding = max_output_len - input_seq_len
+
+        if num_kv_padding > 0:
+            pad_shape = list(tensor.shape)
+            pad_shape[seq_len_axis] = num_kv_padding
+            padding = mx.zeros(tuple(pad_shape), dtype=tensor.dtype)
+            padded_tensors.append(mx.concatenate([tensor, padding], axis=seq_len_axis))
+        else:
+            padded_tensors.append(tensor)
+
+        k_masks.append([1] * input_seq_len + [0] * num_mask_padding + [1])
+    padded_batch = mx.stack(padded_tensors, axis=0)
+    attention_mask = mx.array(k_masks, dtype=dtype)[:, None, None, :]
+    return padded_batch, attention_mask
 
 def pad_inputs(
     pad_value: int, inputs: List, dtype: mx.Dtype = mx.bfloat16
@@ -132,19 +171,22 @@ def pad_inputs(
     return padded_batch, attention_mask
 
 
-def create_causal_mask(seq_len: int, dtype=mx.bfloat16) -> mx.array:
+def create_causal_mask(seq_len: int, total_len: int, dtype=mx.bfloat16) -> mx.array:
     """
-    Creates a causal attention mask of shape (seq_len, seq_len).
+    Creates a causal attention mask of shape (input_seq, total_seq).
 
     Args:
-        seq_len: The length of the sequence.
+        input_seq: The length of sequence.
+        total_seq: The length of sequence + cached sequence.
         dtype: The data type for the mask.
 
     Returns:
         mx.array: A square matrix with -1e9 on the upper triangle (excluding the diagonal).
     """
+    cached_zeros = mx.zeros((seq_len, total_len - seq_len), dtype)
     mask = mx.triu(mx.full((seq_len, seq_len), -1e9, dtype), k=1)
-    return mask
+    final_mask = mx.concatenate([cached_zeros, mask], axis=1)
+    return final_mask
 
 
 def combine_padding_and_causal_masks(
@@ -154,13 +196,13 @@ def combine_padding_and_causal_masks(
     Combines a padding mask and a causal mask.
 
     Args:
-        padding_mask: A 4D padding mask of shape (B, 1, 1, S)
+        padding_mask: A 4D padding mask of shape (B, 1, 1, total_seq)
                       where masked positions are 0 and unmasked are 1.
-        causal_mask: A 2D causal mask of shape (S, S).
+        causal_mask: A 2D causal mask of shape (input_seq, total_seq).
         dtype: The data type for the final mask.
 
     Returns:
-        mx.array: A combined attention mask, typically of shape (B, 1, S, S).
+        mx.array: A combined attention mask, typically of shape (B, 1, input_seq, total_seq).
     """
     padding_mask_float = (padding_mask - 1) * 1e9
     padding_mask_float = padding_mask_float.astype(dtype)

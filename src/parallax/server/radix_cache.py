@@ -141,6 +141,17 @@ class RadixCache:
         value, last_node = self._match_prefix_helper(self.root_node, key)
         return value, last_node
 
+    def fetch_kv_cache(self, node: TreeNode):
+        assert node != self.root_node, "should not fetch from the root node."
+        k_cache, v_cache = node.kv_cache.fetch()
+        node = node.parent
+        while node != self.root_node:
+            cur_k_cache, cur_v_cache = node.kv_cache.fetch()
+            k_cache = mx.concatenate([cur_k_cache, k_cache], axis=2)
+            v_cache = mx.concatenate([cur_v_cache, v_cache], axis=2)
+            node = node.parent
+        return k_cache, v_cache
+
     def insert(self, key: List, value, keys: mx.array, values: mx.array):
         if self.disable:
             return 0
@@ -286,25 +297,6 @@ class RadixCache:
                     child_key = self.get_child_key_fn(key)
 
         return value, node
-
-    def _fetch_kv_cache(self, value):
-        # assert value, "Fetching KV indicies should not be empty."
-        # # initialize
-        # init_kv_cache = self.kv_cache_dict[value[0]]
-        # init_keys, _ = init_kv_cache.fetch()
-        # num_layers, num_kv_heads, _, head_dim = init_keys.shape
-        # init_dtype = init_keys.dtype
-        # keys = mx.zeros((num_layers, num_kv_heads, 0, head_dim), dtype=init_dtype)
-        # values = mx.zeros((num_layers, num_kv_heads, 0, head_dim), dtype=init_dtype)
-
-        # # concatenate kv cache
-        # for i in value:
-        #     kv_cache = self.kv_cache_dict[i]
-        #     cur_keys, cur_values = kv_cache.fetch()
-        #     keys = mx.concatenate([keys, cur_keys], axis=2)
-        #     values = mx.concatenate([values, cur_values], axis=2)
-        # return keys, values
-        pass
 
     def _split_node(self, key, child: TreeNode, split_len: int):
         # new_node -> child
