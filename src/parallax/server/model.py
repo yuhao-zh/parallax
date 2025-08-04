@@ -152,7 +152,11 @@ class ShardedModel(nn.Module):
                 batch,
             ), f"lengths shape mismatch: expected ({batch},), got {lengths.shape}"
 
-        offset = source_len if target_len == 1 else 0
+        if cache is None:
+            offset = 0
+        else:
+            offset = source_len
+
         if mask is None:
             raise ValueError("ShardedModel: mask cannot be None.")
 

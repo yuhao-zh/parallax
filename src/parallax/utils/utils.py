@@ -86,7 +86,12 @@ def pad_prefix_caches(
         else:
             padded_tensors.append(tensor)
 
-        k_masks.append([1] * input_seq_len + [0] * num_mask_padding + [1])
+        if (input_seq_len == cache_len):
+            # special case: prefix all matched, it is actually a decoding stage.
+            k_masks.append([1] * (input_seq_len + 1))
+        else:
+            k_masks.append([1] * input_seq_len + [0] * num_mask_padding)
+
     padded_batch = mx.stack(padded_tensors, axis=0)
     attention_mask = mx.array(k_masks, dtype=dtype)[:, None, None, :]
     return padded_batch, attention_mask

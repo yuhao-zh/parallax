@@ -123,7 +123,7 @@ class RadixCache:
         Args:
             key: A list of token IDs to find a matching prefix.
         Returns:
-            A tuple of (key, value, matched last node)
+            A tuple of (value, matched last node)
         Note that this API can modify the internal state of the Radix tree.
         The last node creates a new child if the prefix is shorter than
         the last node's value.
@@ -285,11 +285,11 @@ class RadixCache:
             prefix_len = self.key_match_fn(child.key, key)
             if prefix_len < len(child.key):
                 new_node = self._split_node(child.key, child, prefix_len)
-                value.append(new_node.value)
+                value += new_node.value
                 node = new_node
                 break
             else:
-                value.append(child.value)
+                value += child.value
                 node = child
                 key = key[prefix_len:]
 

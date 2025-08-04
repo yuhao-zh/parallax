@@ -188,6 +188,7 @@ class Executor:
         k_caches = []
         v_caches = []
         matched_prefix = False
+        is_decode = False
         for req in batched_requests:
             assert req.is_prefill, f"Request {req.request_id} is not a prefill request."
             if isinstance(req, InitialRequest):
@@ -206,7 +207,13 @@ class Executor:
                 kv = self.prefix_cache.fetch_kv_cache(node)
                 k_caches.append(kv[0])
                 v_caches.append(kv[1])
+                assert (
+                    len(value) == kv[0].shape[2]
+                ), f"Mached prefix length{len(value)} mismatches kv cache length {kv[0].shape[2]}."
                 matched_prefix = True
+                self.kv_cache_manager.add_matched_prefix_request(req, kv[0], kv[1], len(value))
+                if (len(value) == len(req.input_ids)):
+                    is_decode = True
             else:
                 k_caches.append(mx.zeros([
                         self.prefix_cache.num_layers,
@@ -231,8 +238,11 @@ class Executor:
             v_batched, _ = pad_prefix_caches(v_caches, lengths, self.dtype)
             padding_mask = k_padding_mask
 
-        causal_mask = create_causal_mask(padded_inputs.shape[1], max(lengths))
-        mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
+        if is_decode:
+            mask = (1.0 - k_padding_mask) * -1e9
+        else:
+            causal_mask = create_causal_mask(padded_inputs.shape[1], max(lengths))
+            mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
 
         return {
             "h_or_tokens": padded_inputs,
@@ -495,7 +505,7 @@ class Executor:
                 continue
         self.kv_cache_manager.update_requests(requests, k_caches, v_caches, lengths)
 
-        # Update prefix cache. Can be improved
+        # Update prefix cache.
         for _, req in enumerate(requests):
             if req.is_prefill:
                 keys, values = self.kv_cache_manager.gather_kv_cache(req.request_id)
