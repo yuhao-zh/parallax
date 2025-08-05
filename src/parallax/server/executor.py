@@ -69,7 +69,7 @@ class Executor:
         kv_block_size: int = 64,
         kv_cache_memory_fraction: float = 0.8,
         kv_max_tokens_in_cache: Optional[int] = None,
-        disable_prefix_cache: Optional[bool] = True,
+        disable_prefix_cache: Optional[bool] = False,
         # Communication Configs
         send_to_peer_addr: Optional[str] = None,
         recv_from_peer_addr: Optional[str] = None,
