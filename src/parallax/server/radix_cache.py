@@ -76,8 +76,8 @@ class RadixCache:
         num_layers: int,
         dtype: mx.Dtype,
         page_size: int = 1,
-        cache_size: int = 1024,
         disable: bool = False,
+        max_num_tokens: int = None,
     ):
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -86,7 +86,10 @@ class RadixCache:
         self.page_size = page_size
         self.disable = disable
         self.req_to_token: Dict[str, List[int]] = {}
-        self.max_token_num = self._calc_max_token_cache(cache_size)
+        if max_num_tokens is None:
+            self.max_num_tokens = 10000
+        else:
+            self.max_num_tokens = max_num_tokens
 
         if self.page_size == 1:
             self.key_match_fn = _key_match_page_size1
@@ -152,13 +155,13 @@ class RadixCache:
             node = node.parent
         return k_cache, v_cache
 
-    def insert(self, key: List, value, keys: mx.array, values: mx.array):
+    def insert(self, key: List, value, k_cache: mx.array, v_cache: mx.array):
         if self.disable:
             return 0
 
         if value is None:
             value = [x for x in key]
-        return self._insert_helper(self.root_node, key, value, keys, values)
+        return self._insert_helper(self.root_node, key, value, k_cache, v_cache)
 
     def evict(self, num_tokens: int):
         if self.disable:
@@ -222,8 +225,8 @@ class RadixCache:
     def cache_finished_request(
             self,
             req: Request,
-            keys: mx.array,
-            values: mx.array
+            k_cache: mx.array,
+            v_cache: mx.array
         ):
         """Cache request when it finishes."""
         if self.disable:
@@ -233,21 +236,21 @@ class RadixCache:
         _, node = self.insert(
             key=token_ids,
             value=None,
-            keys=keys,
-            values=values
+            k_cache=k_cache,
+            v_cache=v_cache
         )
         self.decrease_lock_ref(node)
 
-        if self.protected_size_ > self.max_token_num:
+        if self.protected_size_ > self.max_num_tokens:
             self.evict(self.protected_size_)
-        elif self.protected_size_ + self.evictable_size_ > self.max_token_num:
-            self.evict(self.protected_size_ + self.evictable_size_ - self.max_token_num)
+        elif self.protected_size_ + self.evictable_size_ > self.max_num_tokens:
+            self.evict(self.protected_size_ + self.evictable_size_ - self.max_num_tokens)
 
     def cache_unfinished_request(
             self,
             req: Request,
-            keys: mx.array,
-            values: mx.array
+            k_cache: mx.array,
+            v_cache: mx.array
         ):
         """Cache request when it is unfinished."""
         if self.disable:
@@ -257,22 +260,16 @@ class RadixCache:
         _, node = self.insert(
             key=token_ids,
             value=None,
-            keys=keys,
-            values=values
+            k_cache=k_cache,
+            v_cache=v_cache
         )
         self.increase_lock_ref(node)
-        if self.protected_size_ > self.max_token_num:
+        if self.protected_size_ > self.max_num_tokens:
             self.evict(self.protected_size_)
-        elif self.protected_size_ + self.evictable_size_ > self.max_token_num:
-            self.evict(self.protected_size_ + self.evictable_size_ - self.max_token_num)
+        elif self.protected_size_ + self.evictable_size_ > self.max_num_tokens:
+            self.evict(self.protected_size_ + self.evictable_size_ - self.max_num_tokens)
 
     """Internal Helper Functions"""
-    def _calc_max_token_cache(self, cache_size: int):
-        bpe = mx.zeros([1], dtype=self.dtype).nbytes
-        bytes_per_token = self.num_layers * self.num_kv_heads * self.head_dim * bpe * 2
-        max_token_num = cache_size * 1024 * 1024 // bytes_per_token
-        return max_token_num
-
     def _match_prefix_helper(self, node: TreeNode, key: List):
         node.last_access_time = time.monotonic()
 
@@ -311,10 +308,10 @@ class RadixCache:
         child.value = child.value[split_len:]
         new_node.parent.children[self.get_child_key_fn(key)] = new_node
 
-        child_keys, child_values = child.kv_cache.fetch()
+        child_k_cache, child_v_cache = child.kv_cache.fetch()
         # create kv cache for new_node
-        new_keys = child_keys[..., :split_len, :]
-        new_values = child_values[..., :split_len, :]
+        new_k_cache = child_k_cache[..., :split_len, :]
+        new_v_cache = child_v_cache[..., :split_len, :]
         new_node.kv_cache = KVCache(
                 num_kv_heads = self.num_kv_heads,
                 head_dim = self.head_dim,
@@ -323,10 +320,10 @@ class RadixCache:
                 block_size = self.page_size,
                 num_initial_tokens = self.page_size,
             )
-        new_node.kv_cache.update(new_keys, new_values)
+        new_node.kv_cache.update(new_k_cache, new_v_cache)
         # update kv cache for child
-        child_keys = child_keys[..., split_len:, :]
-        child_values = child_values[..., split_len:, :]
+        child_k_cache = child_k_cache[..., split_len:, :]
+        child_v_cache = child_v_cache[..., split_len:, :]
         child.kv_cache = KVCache(
                 num_kv_heads = self.num_kv_heads,
                 head_dim = self.head_dim,
@@ -335,7 +332,7 @@ class RadixCache:
                 block_size = self.page_size,
                 num_initial_tokens = self.page_size,
             )
-        child.kv_cache.update(child_keys, child_values)
+        child.kv_cache.update(child_k_cache, child_v_cache)
 
         return new_node
 
@@ -357,8 +354,8 @@ class RadixCache:
             node: TreeNode,
             key: List,
             value: List,
-            keys: mx.array,
-            values: mx.array):
+            k_cache: mx.array,
+            v_cache: mx.array):
         node.last_access_time = time.monotonic()
         if len(key) == 0:
             return 0
@@ -398,9 +395,9 @@ class RadixCache:
                 block_size = self.page_size,
                 num_initial_tokens = self.page_size,
             )
-            keys = keys[..., total_prefix_length:, :]
-            values = values[..., total_prefix_length:, :]
-            kv_cache.update(keys, values)
+            k_cache = k_cache[..., total_prefix_length:, :]
+            v_cache = v_cache[..., total_prefix_length:, :]
+            kv_cache.update(k_cache, v_cache)
             new_node.kv_cache = kv_cache
 
             node = new_node

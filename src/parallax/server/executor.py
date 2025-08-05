@@ -121,6 +121,7 @@ class Executor:
             max_num_tokens=kv_max_tokens_in_cache,
         )
 
+        # Prefix Cache Manager
         self.prefix_cache = RadixCache(
             num_kv_heads=self.num_key_value_heads,
             head_dim=self.head_dim,
@@ -128,6 +129,7 @@ class Executor:
             dtype=self.dtype,
             page_size = 1,
             disable = disable_prefix_cache,
+            max_num_tokens=kv_max_tokens_in_cache,
         )
 
         # Communication Related
@@ -185,10 +187,10 @@ class Executor:
 
         h = []
         lengths = []
+        actual_lengths = []
         k_caches = []
         v_caches = []
         matched_prefix = False
-        is_decode = False
         for req in batched_requests:
             assert req.is_prefill, f"Request {req.request_id} is not a prefill request."
             if isinstance(req, InitialRequest):
@@ -202,18 +204,17 @@ class Executor:
             self.prefix_cache.update_req_to_token(req.request_id, req.input_ids)
             lengths.append(req.total_length)
 
-            value, node = self.prefix_cache.match_prefix(req.input_ids)
+            value, node = self.prefix_cache.match_prefix(req.input_ids[:-1])
             if value:
                 kv = self.prefix_cache.fetch_kv_cache(node)
                 k_caches.append(kv[0])
                 v_caches.append(kv[1])
                 assert (
-                    len(value) == kv[0].shape[2]
+                    len(value) == (kv[0].shape[2])
                 ), f"Mached prefix length{len(value)} mismatches kv cache length {kv[0].shape[2]}."
                 matched_prefix = True
                 self.kv_cache_manager.add_matched_prefix_request(req, kv[0], kv[1], len(value))
-                if (len(value) == len(req.input_ids)):
-                    is_decode = True
+                actual_lengths.append(req.total_length - len(value))
             else:
                 k_caches.append(mx.zeros([
                         self.prefix_cache.num_layers,
@@ -227,6 +228,7 @@ class Executor:
                         0,
                         self.prefix_cache.head_dim],
                     dtype=self.dtype))
+                actual_lengths.append(req.total_length)
 
         if self.is_first_peer:
             padded_inputs, padding_mask = pad_inputs(self.pad_token_id, h, self.dtype)
@@ -238,16 +240,13 @@ class Executor:
             v_batched, _ = pad_prefix_caches(v_caches, lengths, self.dtype)
             padding_mask = k_padding_mask
 
-        if is_decode:
-            mask = (1.0 - k_padding_mask) * -1e9
-        else:
-            causal_mask = create_causal_mask(padded_inputs.shape[1], max(lengths))
-            mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
+        causal_mask = create_causal_mask(padded_inputs.shape[1], max(lengths))
+        mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
 
         return {
             "h_or_tokens": padded_inputs,
             "cache": (k_batched, v_batched) if matched_prefix else None,
-            "lengths": mx.array(lengths),
+            "lengths": mx.array(actual_lengths),
             "mask": mask,
             "requests": batched_requests,
         }
@@ -388,7 +387,6 @@ class Executor:
                     keys, values = self.kv_cache_manager.gather_kv_cache(req.request_id)
                     self.prefix_cache.cache_finished_request(req, keys, values)
                     self.prefix_cache.evict_request(req.request_id)
-                    self.prefix_cache.pretty_print()
                     self.kv_cache_manager.release_request(req.request_id)
                     logger.info(
                         f"Released resources for finished request {req.request_id}, "
@@ -400,7 +398,6 @@ class Executor:
                     # This is an active request, add it to the scheduler queue to be processed.
                     self.scheduler.enque_request(req)
                     if not self.kv_cache_manager.has_request(req.request_id):
-                        # keys, values = self.prefix_cache.match_prefix(req)
                         self.kv_cache_manager.add_request(req, req.total_length)
 
     def _prepare_next_single_request(self, request: Request, hidden_states: mx.array) -> Request:
@@ -572,7 +569,6 @@ class Executor:
                                 f"Processed batch of type {batch_type} with {len(next_batch)} requests "
                                 f"in {(time.time() - start_time) * 1000:.3f} ms"
                             )
-                self.prefix_cache.pretty_print()
 
             except Exception as e:
                 logger.exception(f"Error processing batch: {e}")
