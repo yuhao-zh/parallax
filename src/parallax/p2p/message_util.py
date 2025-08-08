@@ -12,6 +12,7 @@ import mlx.core as mx
 
 from parallax.p2p.proto import forward_pb2
 from parallax.server.request import IntermediateRequest, RequestStatus
+from parallax.server.sampling.sampling_params import SamplingParams
 
 
 def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.ForwardRequest:
@@ -122,6 +123,8 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
         if proto_request.next_token_ids:
             next_token_id = proto_request.next_token_ids[index]
 
+        sampling_params = proto_to_sampling_params(proto_req.sampling_params)
+
         request = IntermediateRequest(
             request_id=proto_req.rid,
             current_position=current_position,
@@ -129,12 +132,54 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
             hidden_states=current_hidden_states,
             routing_table=proto_req.routing_table,
             next_token_id=next_token_id,
+            sampling_params=sampling_params,
         )
 
         requests.append(request)
 
     return requests
 
+def proto_to_sampling_params(proto: forward_pb2.SamplingParams) -> SamplingParams:
+    """Convert protobuf message to SamplingParams."""
+    if proto is None:
+        return SamplingParams()
+    sampling_params = SamplingParams(
+        max_new_tokens=proto.max_new_tokens,
+        min_new_tokens=proto.min_new_tokens,
+        temperature=proto.temperature,
+        top_p=proto.top_p,
+        min_p=proto.min_p,
+        top_k=proto.top_k,
+        stop_strs=list(proto.stop_strs),
+        stop_token_ids=list(proto.stop_token_ids),
+        ignore_eos=proto.ignore_eos,
+        repetition_penalty=proto.repetition_penalty,
+        presence_penalty=proto.presence_penalty,
+        frequency_penalty=proto.frequency_penalty,
+        json_schema=proto.json_schema,
+    )
+    return sampling_params
+
+def sampling_params_to_proto(params: SamplingParams) -> forward_pb2.SamplingParams:
+    """Convert SamplingParams to protobuf message."""
+    proto = forward_pb2.SamplingParams()
+
+    proto.max_new_tokens = params.max_new_tokens
+    proto.min_new_tokens = params.min_new_tokens
+    proto.temperature=params.temperature
+    proto.top_p=params.top_p
+    proto.min_p=params.min_p
+    proto.top_k=params.top_k
+    if params.stop_strs is not None:
+        proto.stop_strs.extend(params.stop_strs)
+    if params.stop_token_ids is not None:
+        proto.stop_token_ids.extend(params.stop_token_ids)
+    proto.ignore_eos=params.ignore_eos
+    proto.repetition_penalty=params.repetition_penalty
+    proto.presence_penalty=params.presence_penalty
+    proto.frequency_penalty=params.frequency_penalty
+    proto.json_schema=params.json_schema
+    return proto
 
 def tensor_to_proto(mlx_tensor: mx.array) -> forward_pb2.Tensor:
     """Convert MLX array to protobuf Tensor using safetensor serialization."""

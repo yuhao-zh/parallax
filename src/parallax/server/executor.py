@@ -36,6 +36,7 @@ from parallax.server.request import (
 )
 from parallax.server.scheduler import Scheduler
 from parallax.server.shard_loader import MLXModelLoader
+from parallax.server.sampling.sampler import SamplingBatchInfo
 from parallax.utils.logging_config import get_logger
 from parallax.utils.utils import (
     combine_padding_and_causal_masks,
@@ -451,7 +452,8 @@ class Executor:
 
         # Process last peer: need additional sampling + detokenization
         if return_decoded_tokens:
-            return mx.array(self.model_shard.logits_to_tokens(hidden_states, lengths))
+            sampling_info = SamplingBatchInfo.from_reqs(requests)
+            return mx.array(self.model_shard.logits_to_tokens(hidden_states, lengths, sampling_info))
 
         return hidden_states
 
