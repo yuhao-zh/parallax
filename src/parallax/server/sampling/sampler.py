@@ -92,7 +92,7 @@ class Sampler(nn.Module):
                 sampling_info.min_ps,
                 sampling_info.need_min_p_sampling
             )
-        return batch_next_token_ids    
+        return batch_next_token_ids
 
 @mx.compile
 def apply_top_k_top_p_min_p_sampling(

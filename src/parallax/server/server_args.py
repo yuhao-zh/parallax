@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    # HTTP server configuration
+    parser.add_argument("--host", type=str, default="localhost", help="Host of the HTTP server.")
+
+    parser.add_argument("--port", type=int, default=3000, help="Port of the HTTP server")
+
     # P2P configuration
     parser.add_argument("--initial-peers", nargs="+", default=[], help="List of initial DHT peers")
 
