@@ -491,7 +491,7 @@ class GreedyLayerAllocator(LayerAllocator):
         super().__init__(model_info, nodes)
         self.nodes = self._sort_nodes_by_capacity()
         self.rebalancer = WaterFillingPipelineRebalancer(model_info.num_layers)
-        self.allocation_plan = self.allocate()
+        self.allocation_plan: Optional[LayerAllocationPlan] = None
 
     # pylint: disable=too-many-locals, too-many-nested-blocks, too-many-branches
     def allocate(self) -> LayerAllocationPlan:
@@ -574,6 +574,7 @@ class GreedyLayerAllocator(LayerAllocator):
                 available_nodes.extend(pipeline_nodes)
                 break
 
+        self.allocation_plan = allocation_plan
         return allocation_plan
 
     def add_node(self, node: NodeInfo) -> None:
@@ -640,7 +641,7 @@ class DynamicProgrammingLayerAllocator(LayerAllocator):
         self.alpha = alpha
         self._path: Dict[Tuple[int, Tuple[int, ...], int], Tuple] = {}
         self._rebalancer = WaterFillingPipelineRebalancer(model_info.num_layers)
-        self.allocation_plan = self.allocate()
+        self.allocation_plan: Optional[LayerAllocationPlan] = None
 
     # pylint: disable=too-many-locals, too-many-statements
     def allocate(self) -> LayerAllocationPlan:
@@ -767,6 +768,7 @@ class DynamicProgrammingLayerAllocator(LayerAllocator):
                 node_info = pipeline_plan.node_id_to_node_info[node_id]
                 plan.add_to_allocation(assignment.start_layer, assignment.end_layer, node_info)
 
+        self.allocation_plan = plan
         return plan
 
     def _backtrack(self, best_num_pipes: int, num_nodes: int) -> List[List[NodeInfo]]:

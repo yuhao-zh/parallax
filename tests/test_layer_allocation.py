@@ -1,5 +1,11 @@
 """
-Test Phase 1.
+Tests for Phase 1: layer allocation and rebalancing.
+
+Covers:
+- Capacity sanity for `NodeInfo`
+- Water-filling pipeline rebalancer (stage splits across heterogeneous nodes)
+- Gap-patch dynamic rebalancing (join/leave behavior)
+- Greedy and DP allocators producing contiguous [start, end) layer ranges
 """
 
 from collections import Counter
@@ -272,7 +278,7 @@ def test_allocator(
         if strategy == "greedy"
         else DynamicProgrammingLayerAllocator(model, nodes)
     )
-    plan = allocator.allocation_plan
+    plan = allocator.allocate()
     _test_gap_patch_rebalance(plan)
 
     # Collect (start,end) per node in creation order

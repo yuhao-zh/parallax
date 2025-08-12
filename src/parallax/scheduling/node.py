@@ -20,7 +20,7 @@ Node: Dynamic runtime state for phase 2 request routing and load management
 import time
 from dataclasses import dataclass
 from math import floor
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from parallax.scheduling.model_info import ModelInfo
 
@@ -139,13 +139,16 @@ class Node:
 
     node_id: str
     node_info: NodeInfo
-    current_layers: Optional[Tuple[int, int]] = None  # (start_layer, end_layer) inclusive range
+    # start: inclusive, end: exclusive
+    current_layers: Optional[Tuple[int, int]] = None
     current_requests: int = 0
     max_requests: int = 8
     avg_layer_latency_ms: float = 0.0
     rtt_to_nodes: Dict[str, float] = None
     is_active: bool = True
     last_heartbeat: float = 0.0
+    # Optional RTT provider for measuring latency to other nodes
+    rtt_getter: Optional[Callable[["Node", "Node"], float]] = None
 
     def __post_init__(self):
         if self.rtt_to_nodes is None:
@@ -159,7 +162,7 @@ class Node:
         if self.current_layers is None:
             return 0
         start_layer, end_layer = self.current_layers
-        return end_layer - start_layer + 1
+        return end_layer - start_layer
 
     @property
     def has_embedding(self) -> bool:
@@ -175,7 +178,7 @@ class Node:
         if self.current_layers is None:
             return False
         _, end_layer = self.current_layers
-        return end_layer == self.node_info.model_info.num_layers - 1
+        return end_layer == self.node_info.model_info.num_layers
 
     @property
     def is_overloaded(self) -> bool:
@@ -212,6 +215,31 @@ class Node:
     def update_rtt(self, target_node_id: str, rtt_ms: float):
         """Update RTT measurement to another node."""
         self.rtt_to_nodes[target_node_id] = rtt_ms
+
+    def get_rtt_to(self, other: "Node") -> float:
+        """Get RTT to another node, measuring via `rtt_getter` if needed.
+
+        Falls back to 0.0 if no getter is provided and no cached RTT exists.
+        """
+        if self == other:
+            return 0.0
+        if other.node_id in self.rtt_to_nodes:
+            return self.rtt_to_nodes[other.node_id]
+        if self.rtt_getter is None:
+            return 0.0
+        rtt_ms = float(self.rtt_getter(self, other))
+        self.update_rtt(other.node_id, rtt_ms)
+        return rtt_ms
+
+    def hosts_layer(self, layer_id: int) -> bool:
+        """Return True if this node hosts the given layer id.
+
+        Interprets `current_layers` as a half-open interval [start, end).
+        """
+        if self.current_layers is None:
+            return False
+        start_layer, end_layer = self.current_layers
+        return start_layer <= layer_id < end_layer
 
     def add_request(self):
         """Add a request to this node."""

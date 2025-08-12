@@ -61,6 +61,7 @@ TODO:
     4. Decouple different HW: mx.array to np.ndarray.
 """
 
+import time
 import uuid
 from enum import Enum
 from typing import List, Optional
@@ -103,6 +104,14 @@ class Request:
         self.prompt_len = prompt_len
         self.routing_table = routing_table
         self.sampling_params = sampling_params
+        # Timestamps
+        now = time.time()
+        self.created_at: float = now
+        self.last_updated_at: float = now
+
+    def _touch(self) -> None:
+        """Update the last-updated timestamp."""
+        self.last_updated_at = time.time()
 
     @property
     def is_finished(self) -> bool:
@@ -135,6 +144,7 @@ class Request:
             return
         self.status = new_status
         logger.debug(f"Request {self.request_id} status updated to {self.status}.")
+        self._touch()
 
 
 class InitialRequest(Request):
@@ -216,6 +226,7 @@ class InitialRequest(Request):
         # Finishing condition checks are now handled by the Scheduler.
         if self.status == RequestStatus.PREFILLING:
             self.status = RequestStatus.DECODING
+        self._touch()
 
     @classmethod
     def from_prompt_ids(
