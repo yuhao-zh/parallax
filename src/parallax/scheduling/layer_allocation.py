@@ -19,13 +19,15 @@ Key components:
     - GreedyLayerAllocator: a LayerAllocator that
         - assigns layers to nodes in a greedy manner.
     - DPAllocator: a LayerAllocator that
-        - uses dynamic programming to find an optimal balance between maximizing
-          pipelines and minimizing stages.
+        - uses dynamic programming to find an optimal balance between
+          maximizing pipelines and minimizing stages.
+        - uses a simple scalar taking number of pipelines and average stages as objective
 """
 
 import heapq
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import lru_cache
 from math import floor
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -193,11 +195,11 @@ class WaterFillingPipelineRebalancer:
     - Integerizes with largest remainders under per-node caps
     - First node reserves input embedding; last reserves LM head
 
-    Solving lambda for
-    - t_i prop flops_i
-    - 0 <= t_i <= capacity_i
-    - Sum_i t_i = total_layers
-    such that
+    - Goal:
+        - t_i prop flops_i
+        - 0 <= t_i <= capacity_i
+        - Sum_i t_i = total_layers
+    - Solving for lambda:
         - t_i(lambda) = min(c_i, lambda F_i)
         - sum t_i(lambda) = total_layers
     """
@@ -578,14 +580,259 @@ class GreedyLayerAllocator(LayerAllocator):
         """Add a node to the allocator and re-calculates the allocation plan."""
         self.nodes.append(node)
         self.nodes = self._sort_nodes_by_capacity()
-        self.rebalance()
+        self.rebalancer.handle_node_join(self.allocation_plan, node)
 
     def remove_node(self, node_id: str) -> None:
         """Remove a node from the allocator and re-calculates the allocation plan."""
         self.nodes = [node for node in self.nodes if node.node_id != node_id]
-        self.rebalance()
+        self.rebalancer.handle_node_leave(self.allocation_plan, node_id)
 
-    def rebalance(self) -> LayerAllocationPlan:
+    def rebalance(self) -> None:
         """Re-runs the allocation and rebalancing process."""
+        if self.rebalancer.should_global_rebalance(self.allocation_plan):
+            self.allocation_plan = self.allocate()
+
+
+class DynamicProgrammingLayerAllocator(LayerAllocator):
+    """
+    Dynamic programming based allocator that balances two objectives:
+     - Concurrency (number of pipelines)
+     - Latency (number of stages per pipeline).
+
+    Why DP (vs greedy): interleaving constructions of multiple pipelines
+    so cases like capacities (40, 40, 20, 20, 10, 10) with total 70 layers
+    yields (40, 20, 10) + (40, 20, 10) instead of a single 2-stage pipe line (40 + 30).
+
+    We want to maximize a simple scalar objective function:
+        Z(k) = k / (s*(k) / k) = k^2 / s*(k)
+    where:
+        k: number of pipelines
+        s*(k): minimum total number of stages realizing k pipelines
+
+    DP State:
+        dp(i, open_residuals, finshed_pipes) := min total stages needed using GPUs with index >= i;
+        where:
+            i: GPU index, in [0, N]
+            open_residuals: sorted tuple of remaining layers for all open pipelines (values in 1..L-1)
+            finished_pipes: number of already fully closed pipelines
+        Transitions (for node i with capacity c_i):
+            1. Skip node: dp(i + 1, open_residuals, finished_pipes)
+            2. Assign to an existing open pipeline j:
+               r' = r_j - c_i. If r' <= 0, try closing with LM head; if still <= 0 -> close (remove j, finished+1),
+               else keep open with updated residual r'.
+            3. Start a new pipeline (if finished + len(open_residuals) < k_target):
+               r = L - c_i (with input embedding). If r <= 0, it closes immediately (finished+1), else append r.
+
+    Finally:
+        Compute objective Z(k) = (k**alpha) / (T_comp + (total_stages/k)*r_RTT)
+        Choose the best k and backtrack to recover assignments
+    """
+
+    def __init__(
+        self,
+        model_info: ModelInfo,
+        nodes: List[NodeInfo],
+        alpha: float = 2.0,
+    ) -> None:
+        super().__init__(model_info, nodes)
+        # Sort GPUs by layer capacity descending
+        self.nodes = self._sort_nodes_by_capacity()
+        self.alpha = alpha
+        self._path: Dict[Tuple[int, Tuple[int, ...], int], Tuple] = {}
+        self._rebalancer = WaterFillingPipelineRebalancer(model_info.num_layers)
         self.allocation_plan = self.allocate()
-        return self.allocation_plan
+
+    # pylint: disable=too-many-locals, too-many-statements
+    def allocate(self) -> LayerAllocationPlan:
+        num_nodes = len(self.nodes)
+        num_layers = int(self.model_info.num_layers)
+        total_cap = sum(node.capacity_layers() for node in self.nodes)
+
+        if num_layers <= 0 or num_nodes == 0 or total_cap < num_layers:
+            raise ValueError("No valid allocation found")
+        # used for pruning
+        suffix_sum = [0] * (num_nodes + 1)
+        for i in range(num_nodes - 1, -1, -1):
+            suffix_sum[i] = suffix_sum[i + 1] + self.nodes[i].capacity_layers()
+
+        max_num_pipes = min(num_nodes, total_cap // num_layers)
+        best_num_pipes = 0
+        best_score: float = float("-inf")
+
+        best_path: Dict[Tuple[int, Tuple[int, ...], int], Tuple] = {}
+        for k_target in range(1, max_num_pipes + 1):
+            path: Dict[Tuple[int, Tuple[int, ...], int], Tuple] = {}
+
+            # pylint: disable=too-many-branches, too-many-locals, cell-var-from-loop, too-many-statements
+            @lru_cache(maxsize=None)
+            def dp(i: int, open_residuals: Tuple[int, ...], finished_pipes: int) -> int:
+                # Completed target with no open pipelines
+                if finished_pipes == k_target and len(open_residuals) == 0:
+                    path[(i, open_residuals, finished_pipes)] = ("done",)
+                    return 0
+                if i == num_nodes:
+                    return float("inf")
+
+                new_needed = k_target - finished_pipes - len(open_residuals)
+                need_open = sum(open_residuals)
+                remaining_cap = suffix_sum[i]
+
+                # Pruning
+                # 1. already have more (finished + open) than target;
+                # 2. remaining capacity is not enough to close ongoing pipelines
+                #    and unfulfilled new pipelines
+                # 3. remaining nodes are not enough to fulfill new pipelines
+                if (
+                    new_needed < 0
+                    or remaining_cap < need_open + max(0, new_needed) * num_layers
+                    or finished_pipes + len(open_residuals) + (num_nodes - i) < k_target
+                ):
+                    return float("inf")
+
+                # Option 1: Skip this node
+                best_cost = dp(i + 1, open_residuals, finished_pipes)
+                best_action: Tuple = ("skip",)
+
+                # Option 2: Assign to existing open pipeline
+                for j, rj in enumerate(open_residuals):
+                    c_norm = self.nodes[i].capacity_layers()
+                    r_after = rj - c_norm
+                    if r_after <= 0:
+                        # try closing with LM head allowance
+                        c_close = self.nodes[i].capacity_layers(include_lm_head=True)
+                        r_after_close = rj - c_close
+                        if r_after_close <= 0:
+                            new_open = list(open_residuals)
+                            new_open.pop(j)
+                            cost = 1 + dp(i + 1, tuple(new_open), finished_pipes + 1)
+                            if cost < best_cost:
+                                best_cost = cost
+                                best_action = ("assign", j, True)
+                        else:
+                            new_open = list(open_residuals)
+                            new_open[j] = r_after_close
+                            new_open.sort()
+                            cost = 1 + dp(i + 1, tuple(new_open), finished_pipes)
+                            if cost < best_cost:
+                                best_cost = cost
+                                best_action = ("assign", j, False)
+                    else:
+                        new_open = list(open_residuals)
+                        new_open[j] = r_after
+                        new_open.sort()
+                        cost = 1 + dp(i + 1, tuple(new_open), finished_pipes)
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_action = ("assign", j, False)
+
+                # Option 3: start a new pipeline (if we still need more)
+                if new_needed > 0:
+                    c_start = self.nodes[i].capacity_layers(include_input_embed=True)
+                    r_new = num_layers - c_start
+                    if r_new <= 0:
+                        cost = 1 + dp(i + 1, open_residuals, finished_pipes + 1)
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_action = ("start", 0, True)
+                    else:
+                        new_open = list(open_residuals) + [r_new]
+                        new_open.sort()
+                        cost = 1 + dp(i + 1, tuple(new_open), finished_pipes)
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_action = ("start", r_new, False)
+
+                path[(i, open_residuals, finished_pipes)] = best_action
+                return best_cost
+
+            s_star = dp(0, tuple(), 0)
+            if s_star < float("inf"):
+                score = (k_target * k_target) / s_star  # Z(k) = k^2 / s*(k)
+                if score > best_score:
+                    best_score, best_num_pipes = score, k_target
+                    best_path = dict(path)
+
+        if best_num_pipes is None or best_num_pipes == 0:
+            raise ValueError("No valid allocation found")
+        self._path = best_path
+        pipelines = self._backtrack(best_num_pipes, num_nodes)
+
+        plan = LayerAllocationPlan(num_layers)
+        # Merge pipelines into the final plan with rebalancing
+        for pl_nodes in pipelines:
+            if not pl_nodes:
+                continue
+            pipeline_plan = self._rebalancer.rebalance(pl_nodes, assume_sorted=False)
+            for node_id, assignment in pipeline_plan.node_assignments.items():
+                node_info = pipeline_plan.node_id_to_node_info[node_id]
+                plan.add_to_allocation(assignment.start_layer, assignment.end_layer, node_info)
+
+        return plan
+
+    def _backtrack(self, best_num_pipes: int, num_nodes: int) -> List[List[NodeInfo]]:
+        # Reconstruct pipelines
+        pipelines: List[List[NodeInfo]] = [[] for _ in range(best_num_pipes)]
+        # (residual, nodes list)
+        open_list: List[Tuple[int, List[NodeInfo]]] = []
+        i = 0
+        finished = 0
+        while i < num_nodes and finished < best_num_pipes:
+            open_tuple = tuple(sorted(r for r, _ in open_list))
+            action = self._path.get((i, open_tuple, finished))
+            if action is None:
+                break
+            kind = action[0]
+            if kind in ("skip", "done"):
+                i += 1
+                continue
+            node = self.nodes[i]
+            if kind == "assign":
+                j, closed = action[1], action[2]
+                # ensure open_list sorted like open_tuple
+                open_list.sort(key=lambda x: x[0])
+                rj, nodes_seq = open_list[j]
+                c_norm = node.capacity_layers()
+                r_after = rj - c_norm
+                if r_after <= 0:
+                    c_close = node.capacity_layers(include_lm_head=True)
+                    r_after = rj - c_close
+                nodes_seq.append(node)
+                if r_after <= 0 or closed:
+                    # pipeline closes here
+                    pipelines[finished].extend(nodes_seq)
+                    open_list.pop(j)
+                    finished += 1
+                else:
+                    open_list[j] = (r_after, nodes_seq)
+                i += 1
+            elif kind == "start":
+                r_new, closed = action[1], action[2]
+                if closed:
+                    pipelines[finished].append(node)
+                    finished += 1
+                else:
+                    open_list.append((r_new, [node]))
+                i += 1
+            else:
+                # Unknown action; advance to avoid infinite loop
+                i += 1
+
+        return pipelines
+
+    def add_node(self, node: NodeInfo) -> None:
+        """Add a node to the allocator and re-calculates the allocation plan."""
+        self.nodes.append(node)
+        self.nodes = self._sort_nodes_by_capacity()
+        self._rebalancer.handle_node_join(self.allocation_plan, node)
+
+    def remove_node(self, node_id: str) -> None:
+        """Remove a node from the allocator and re-calculates the allocation plan."""
+        self.nodes = [node for node in self.nodes if node.node_id != node_id]
+        self._rebalancer.handle_node_leave(self.allocation_plan, node_id)
+
+    def rebalance(self) -> None:
+        """Re-runs the allocation and rebalancing process."""
+        if self._rebalancer.should_global_rebalance(self.allocation_plan):
+            self._memo.clear()
+            self._path.clear()
+            self.allocation_plan = self.allocate()

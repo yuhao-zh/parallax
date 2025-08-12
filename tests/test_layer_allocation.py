@@ -1,9 +1,5 @@
 """
-Parametrized tests for water-filling rebalancer.
-
-Covers:
-- Real GPU setup (A100, RTX 5090, RTX 4090) with realistic FLOPS and RAM
-- Mock "tight" setups where sum of capacities barely exceeds total layers
+Test Phase 1.
 """
 
 from collections import Counter
@@ -12,7 +8,10 @@ from typing import Literal
 import pytest
 
 from parallax.scheduling.layer_allocation import (
+    DynamicProgrammingLayerAllocator,
+    GapPatchDynamicNodeHandler,
     GreedyLayerAllocator,
+    LayerAllocationPlan,
     WaterFillingPipelineRebalancer,
 )
 from parallax.scheduling.model_info import ModelInfo
@@ -143,11 +142,60 @@ def test_water_filling_rebalance(num_layers: int, gpu_types: list[str], expected
         )
 
 
+def _test_gap_patch_rebalance(plan: LayerAllocationPlan):
+    """Sanity checks for GapPatch dynamic rebalancing.
+
+    - Validate heap top corresponds to node with minimal per-layer memory (hosting power)
+    - Join a new low-memory node and verify heap/layer load updates
+    - Remove the node and verify state is restored
+    """
+    assert plan.layer_loads_heap, "Layer loads heap should not be empty"
+    assert plan.node_id_to_node_info, "Plan should have node infos"
+    sample_node = next(iter(plan.node_id_to_node_info.values()))
+    model_info = sample_node.model_info
+
+    # Heap top should be hosted by node(s) with minimal per-layer memory
+    per_node_mem = {nid: info.per_layer_memory for nid, info in plan.node_id_to_node_info.items()}
+    min_mem = min(per_node_mem.values()) if per_node_mem else 0
+
+    top_load = plan.layer_loads_heap[0]
+    assert top_load.hosting_nodes, "Top load must have hosting nodes"
+    # Hosting set is unordered; ensure at least one host has minimal per-layer memory
+    top_hosts_min = min(per_node_mem[h] for h in top_load.hosting_nodes)
+    assert (
+        top_hosts_min == min_mem
+    ), f"Heap top not hosted by minimal memory among its hosts: got {top_hosts_min}, expect {min_mem}"
+
+    # Join a new small GPU (rtx4090) and verify increased hosting power for that layer
+    handler = GapPatchDynamicNodeHandler(model_info)
+
+    # Snapshot before join
+    before_layer_id = top_load.layer_id
+    before_mem = plan.layer_to_load[before_layer_id].current_memory_size
+
+    new_node = build_node_info("rtx4090", model_info, id_suffix="-gap")
+    handler.handle_node_join(plan, new_node)
+
+    # After join: the same lightest layer (or another) now has increased memory if replicated
+    after_mem = plan.layer_to_load[before_layer_id].current_memory_size
+    assert after_mem >= before_mem, "Layer hosting power should not decrease after replication join"
+    assert (
+        new_node.node_id in plan.layer_to_load[before_layer_id].hosting_nodes
+    ), "New node should host the lightest layer"
+
+    # Remove the node and ensure state is restored
+    handler.handle_node_leave(plan, new_node.node_id)
+    restored_mem = plan.layer_to_load[before_layer_id].current_memory_size
+    assert new_node.node_id not in plan.layer_to_load[before_layer_id].hosting_nodes
+    assert restored_mem <= after_mem and restored_mem == before_mem
+
+
 @pytest.mark.parametrize(
     "num_layers,counts,expected_ranges, strategy",
     [
         # Six A100-80g: expect two pipelines, 12 each per stage in creation order
         (36, (6, 0, 0, 0), [(0, 12), (12, 24), (24, 36), (0, 12), (12, 24), (24, 36)], "greedy"),
+        (36, (6, 0, 0, 0), [(0, 12), (12, 24), (24, 36), (0, 12), (12, 24), (24, 36)], "dp"),
         # 22 Layers, capacity (13, 13, 6, 6, 3, 3) -> greedy assigns (11, 11)
         (
             22,
@@ -157,6 +205,20 @@ def test_water_filling_rebalance(num_layers: int, gpu_types: list[str], expected
                 (11, 22),
             ],
             "greedy",
+        ),
+        # For DP, we expect two pipelines, 13 each per stage in creation order
+        (
+            22,
+            (2, 2, 0, 2),
+            [
+                (0, 13),
+                (13, 19),
+                (19, 22),
+                (0, 13),
+                (13, 19),
+                (19, 22),
+            ],
+            "dp",
         ),
         # 14 Layers, capacity (13, 5, 5, 3, 3) -> greedy assigns (9, 5)
         (
@@ -182,7 +244,7 @@ def test_water_filling_rebalance(num_layers: int, gpu_types: list[str], expected
         ),
     ],
 )
-def test_allocator_expected_plan(
+def test_allocator(
     num_layers: int,
     counts: tuple[int, int, int, int],
     expected_ranges: list[tuple[int, int]],
@@ -205,9 +267,13 @@ def test_allocator_expected_plan(
     for i in range(n_4090):
         nodes.append(build_node_info("rtx4090", model, id_suffix=f"-{i}"))
 
-    if strategy == "greedy":
-        allocator = GreedyLayerAllocator(model, nodes)
-    plan = allocator.allocate()
+    allocator = (
+        GreedyLayerAllocator(model, nodes)
+        if strategy == "greedy"
+        else DynamicProgrammingLayerAllocator(model, nodes)
+    )
+    plan = allocator.allocation_plan
+    _test_gap_patch_rebalance(plan)
 
     # Collect (start,end) per node in creation order
     actual_ranges: list[tuple[int, int]] = []
