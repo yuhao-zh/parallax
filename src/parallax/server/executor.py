@@ -156,7 +156,6 @@ class Executor:
                 raw_request = self.recv_from_ipc_socket.recv_pyobj(zmq.NOBLOCK)
                 # Do tokenization and form InitialRequest
                 req = self._encode_raw_request(raw_request)
-                print(req)
                 recv_reqs.append(req)
             except zmq.ZMQError:
                 break

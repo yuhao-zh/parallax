@@ -8,8 +8,8 @@ It is used to recv requests from http frontend and send prompts to executor.
 import multiprocessing as mp
 import uvicorn
 import zmq
+import zmq.asyncio
 import fastapi
-import logger
 
 from pydantic import BaseModel
 from http import HTTPStatus
@@ -17,17 +17,24 @@ from typing import Optional, Dict
 from contextlib import asynccontextmanager
 
 from parallax.utils.utils import get_zmq_socket
+from parallax.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class HTTPCommunicator:
-    def __init__(self, args):
+    def __init__(
+            self,
+            executor_input_ipc_name,
+            executor_output_ipc_name,
+        ):
         # Init inter-process communication
         context = zmq.asyncio.Context(2)
         self.send_to_executor = get_zmq_socket(
-            context, zmq.PUSH, args.executor_input_ipc, True
+            context, zmq.PUSH, executor_input_ipc_name, True
         )
         self.recv_from_executor = get_zmq_socket(
-            context, zmq.PULL, args.executor_output_ipc, True
+            context, zmq.PULL, executor_output_ipc_name, True
         )
     
     def send_requests(self, requests: Dict):
@@ -92,6 +99,8 @@ class ParallaxHttpServer:
     def __init__(self, args):
         self.host = args.host
         self.port = args.port
+        self.executor_input_ipc_name = args.executor_input_ipc
+        self.executor_output_ipc_name = args.executor_output_ipc
 
     def run(self):
         """
@@ -102,7 +111,10 @@ class ParallaxHttpServer:
         2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
         """
         global http_comm 
-        http_comm = HTTPCommunicator(args)
+        http_comm = HTTPCommunicator(
+            self.executor_input_ipc_name,
+            self.executor_output_ipc_name,
+        )
 
         try:
             uvicorn.run(
