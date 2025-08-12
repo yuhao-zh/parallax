@@ -7,6 +7,7 @@ and performance tuning.
 """
 
 import argparse
+import tempfile
 
 import mlx.core as mx
 
@@ -52,6 +53,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Parallax Executor - Distributed LLM Inference",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # IPC configuration
+    parser.add_argument(
+        "--executor-input-ipc",
+        type=str,
+        default=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+        help="Inter process communication name for executor input",
+    )
+
+    parser.add_argument(
+        "--executor-output-ipc",
+        type=str,
+        default=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+        help="Inter process communication name for executor output",
     )
 
     # HTTP server configuration
