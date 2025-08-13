@@ -444,7 +444,7 @@ class LayerAllocator(ABC):
         """Remove a node from the allocator."""
 
     @abstractmethod
-    def rebalance(self) -> Optional[LayerAllocationPlan]:
+    def rebalance(self) -> LayerAllocationPlan:
         """Rebalance the layers across the nodes."""
 
 
@@ -589,15 +589,17 @@ class GreedyLayerAllocator(LayerAllocator):
 
     def remove_node(self, node_id: str) -> None:
         """Remove a node from the allocator and re-calculates the allocation plan."""
-        self.nodes = [node for node in self.nodes if node.node_id != node_id]
-        self._dynamic_node_handler.handle_node_leave(self.allocation_plan, node_id)
+        if node_id in self.nodes:
+            self.nodes.remove(node_id)
+        if node_id in self.allocation_plan.node_assignments:
+            self._dynamic_node_handler.handle_node_leave(self.allocation_plan, node_id)
 
-    def rebalance(self) -> Optional[LayerAllocationPlan]:
+    def rebalance(self) -> LayerAllocationPlan:
         """Re-runs the allocation and rebalancing process."""
         if self._dynamic_node_handler.should_global_rebalance(self.allocation_plan):
             self.allocation_plan = self.allocate()
             return self.allocation_plan
-        return None
+        return self.allocation_plan
 
 
 class DynamicProgrammingLayerAllocator(LayerAllocator):
@@ -836,14 +838,15 @@ class DynamicProgrammingLayerAllocator(LayerAllocator):
 
     def remove_node(self, node_id: str) -> None:
         """Remove a node from the allocator and re-calculates the allocation plan."""
-        self.nodes = [node for node in self.nodes if node.node_id != node_id]
-        self._dynamic_node_handler.handle_node_leave(self.allocation_plan, node_id)
+        if node_id in self.nodes:
+            self.nodes.remove(node_id)
+        if node_id in self.allocation_plan.node_assignments:
+            self._dynamic_node_handler.handle_node_leave(self.allocation_plan, node_id)
 
-    def rebalance(self) -> Optional[LayerAllocationPlan]:
+    def rebalance(self) -> LayerAllocationPlan:
         """Re-runs the allocation and rebalancing process."""
         if self._dynamic_node_handler.should_global_rebalance(self.allocation_plan):
-            self._memo.clear()
             self._path.clear()
             self.allocation_plan = self.allocate()
             return self.allocation_plan
-        return None
+        return self.allocation_plan

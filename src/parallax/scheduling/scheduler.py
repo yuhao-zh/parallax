@@ -195,11 +195,16 @@ class Scheduler:
         """Add a node to allocation and refresh plan and materialized nodes."""
         self.node_infos[node_info.node_id] = node_info
         start_layer, end_layer = self.allocator.add_node(node_info)
-        self.materialize_node(node_info.node_id, start_layer, end_layer)
+        self.nodes[node_info.node_id] = self.materialize_node(
+            node_info.node_id, start_layer, end_layer
+        )
 
     def remove_node(self, node_id: str) -> None:
         """Remove a node from allocation and refresh plan and materialized nodes."""
+        if node_id not in self.nodes or node_id not in self.node_infos:
+            raise ValueError(f"Node {node_id} not found in nodes")
         self.allocator.remove_node(node_id)
+        del self.node_infos[node_id]
         del self.nodes[node_id]
 
     def rebalance(self) -> None:

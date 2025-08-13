@@ -1,4 +1,4 @@
-# pylint: disable=use-dict-literal, protected-access
+# pylint: disable=protected-access
 
 """
 Lightweight tests for the Scheduler orchestrator.
@@ -22,9 +22,7 @@ from .test_utils import build_model_info, build_node_infos_by_counts, geo_rtt_pr
 def test_scheduler_initialize_and_dispatch():
     """End-to-end: allocate, materialize, enqueue one request and dispatch it."""
     model = build_model_info(12)
-    # node_infos = build_node_infos(model, counts=(2, 1, 0))
-    node_infos = build_node_infos_by_counts(model, counts=dict(a100_80g=2, rtx5090=1, rtx4090=0))
-    # positions = {ni.node_id: (idx * 1.0, 0.0) for idx, ni in enumerate(node_infos)}
+    node_infos = build_node_infos_by_counts(model, counts={"a100-80g": 2, "rtx5090": 1})
     positions = {ni: (idx * 1.0, 0.0) for idx, ni in enumerate(node_infos)}
     sched = Scheduler(model, node_infos, strategy="dp", rtt_provider=geo_rtt_provider(positions))
 
@@ -89,20 +87,20 @@ def test_scheduler_warmup_truncate_internal():
 
 def test_scheduler_dynamic_add_remove_and_rebalance():
     """Adding/removing nodes should allow rebalancing and fresh materialization."""
-    model = build_model_info(16)
-    base_nodes = build_node_infos_by_counts(model, counts=dict(a100_80g=1, rtx5090=1, rtx4090=0))
+    model = build_model_info(15)
+    base_nodes = build_node_infos_by_counts(model, counts={"a100-80g": 1, "rtx5090": 1})
     sched = Scheduler(model, base_nodes, strategy="greedy")
     sched.initialize()
     before_num_assignments = len(sched.plan.node_assignments) if sched.plan else 0
 
     # Add a new node and rebalance
     new_info = NodeInfo(node_id="rtx4090-extra", tflops_fp16=82.6, memory_gb=12.0, model_info=model)
+
     sched.add_node(new_info)
     sched.rebalance()
     after_add_assignments = len(sched.plan.node_assignments) if sched.plan else 0
     assert after_add_assignments >= before_num_assignments
 
-    # Remove the node and rebalance
     sched.remove_node("rtx4090-extra")
     sched.rebalance()
     after_remove_assignments = len(sched.plan.node_assignments) if sched.plan else 0
