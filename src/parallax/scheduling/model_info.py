@@ -123,7 +123,8 @@ class ModelInfo:
                 ffn_params *= self.expected_num_activated_experts
             kv_cache_size = self.kv_cache_size
         else:
-            ffn_params *= self.num_local_experts
+            if self.num_local_experts is not None:
+                ffn_params *= self.num_local_experts
             kv_cache_size = 0
 
         return round(ffn_params + kv_cache_size + attention_params)

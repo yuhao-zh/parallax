@@ -20,59 +20,9 @@ from parallax.scheduling.layer_allocation import (
     LayerAllocationPlan,
     WaterFillingPipelineRebalancer,
 )
-from parallax.scheduling.model_info import ModelInfo
 from parallax.scheduling.node import NodeInfo
 
-
-def build_model_info(num_layers: int) -> ModelInfo:
-    """Build GPT-OSS model with arbitrary number of layers, real model has 36."""
-    return ModelInfo(
-        model_name=f"GPUOss-{num_layers}L",
-        head_size=64,
-        hidden_dim=2880,
-        intermediate_dim=2880,
-        num_attention_heads=64,
-        num_kv_heads=8,
-        vocab_size=201088,
-        num_layers=num_layers,
-        ffn_num_projections=3,
-        num_local_experts=128,
-        num_experts_per_tok=4,
-        batch_size=1,
-        target_seq_len=1,
-        source_seq_len=4096,
-        param_bytes_per_element=1,
-        cache_bytes_per_element=2,
-        embedding_bytes_per_element=2,
-    )
-
-
-def build_node_info(
-    gpu_type: Literal["a100-80g", "a100-40g", "rtx5090", "rtx4090"],
-    model_info: ModelInfo,
-    id_suffix: str = "",
-) -> NodeInfo:
-    """Build node info object for a given GPU type., assuming 50% of RAM is used to host params."""
-    if gpu_type == "a100-80g":
-        # Decoder Layer Capcity: 13; with embedding: 13
-        return NodeInfo(
-            node_id=f"a100-80g{id_suffix}", tflops_fp16=312.0, memory_gb=80.0, model_info=model_info
-        )
-    if gpu_type == "a100-40g":
-        # Decoder Layer Capcity: 6; with embedding: 6
-        return NodeInfo(
-            node_id=f"a100-40g{id_suffix}", tflops_fp16=312.0, memory_gb=40.0, model_info=model_info
-        )
-    if gpu_type == "rtx5090":
-        # Decoder Layer Capcity: 5; with embedding: 5
-        return NodeInfo(
-            node_id=f"rtx5090{id_suffix}", tflops_fp16=165.0, memory_gb=32.0, model_info=model_info
-        )
-    # 4090
-    # Decoder Layer Capcity: 4; with embedding: 3
-    return NodeInfo(
-        node_id=f"rtx4090{id_suffix}", tflops_fp16=82.6, memory_gb=24.0, model_info=model_info
-    )
+from .test_utils import build_model_info, build_node_info
 
 
 def test_capacity_sanity_check():

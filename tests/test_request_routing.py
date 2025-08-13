@@ -8,122 +8,14 @@ Covers:
 - Parametrized scenarios with different splits/overlaps
 """
 
-from dataclasses import dataclass
-from math import sqrt
-from typing import Iterable, List, Tuple
 
 import pytest
 
-from parallax.scheduling.model_info import ModelInfo
-from parallax.scheduling.node import Node, NodeInfo
+from parallax.scheduling.node import Node
 from parallax.scheduling.request_routing import DynamicProgrammingRouting
 
-
-def build_model(num_layers: int) -> ModelInfo:
-    """Construct a small `ModelInfo` for tests with given number of layers."""
-    return ModelInfo(
-        model_name=f"TestModel-{num_layers}L",
-        head_size=64,
-        hidden_dim=2048,
-        intermediate_dim=2048,
-        num_attention_heads=32,
-        num_kv_heads=8,
-        vocab_size=32000,
-        num_layers=num_layers,
-        ffn_num_projections=3,
-        batch_size=1,
-        target_seq_len=1,
-        source_seq_len=256,
-        param_bytes_per_element=1,
-        cache_bytes_per_element=1,
-        embedding_bytes_per_element=1,
-    )
-
-
-@dataclass
-class GeoNodeInfo(NodeInfo):
-    """Test-only NodeInfo with coordinates for RTT synthesis."""
-
-    x: float = 0.0
-    y: float = 0.0
-
-
-def build_node(
-    node_id: str,
-    model: ModelInfo,
-    tflops: float = 200.0,
-    mem_gb: float = 80.0,
-    x: float = 0.0,
-    y: float = 0.0,
-    mem_bandwidth_gbps: float = 100.0,
-) -> Node:
-    """Create a `Node` with `GeoNodeInfo` and optional coordinates."""
-    info = GeoNodeInfo(
-        node_id=node_id,
-        tflops_fp16=tflops,
-        memory_gb=mem_gb,
-        model_info=model,
-        x=x,
-        y=y,
-        memory_bandwidth_gbps=mem_bandwidth_gbps,
-    )
-    return Node(node_id=node_id, node_info=info)
-
-
-def compute_rtts_from_coords(nodes: Iterable[Node]) -> dict[tuple[str, str], float]:
-    """Map Euclidean distances between nodes' (x, y) to RTTs in [10, 200] ms.
-
-    Returns a symmetric mapping of (src_id, dst_id) -> RTT.
-    """
-    node_list = list(nodes)
-    if not node_list:
-        return {}
-    # Extract coords and ids
-    coords: dict[str, Tuple[float, float]] = {
-        n.node_id: (
-            float(getattr(n.node_info, "x", 0.0)),
-            float(getattr(n.node_info, "y", 0.0)),
-        )
-        for n in node_list
-    }
-    ids = [n.node_id for n in node_list]
-
-    # Max pairwise distance
-    max_dist = 0.0
-    for i, aid in enumerate(ids):
-        ax, ay = coords[aid]
-        for bid in ids[i + 1 :]:
-            bx, by = coords[bid]
-            d = sqrt((ax - bx) ** 2 + (ay - by) ** 2)
-            max_dist = max(max_dist, d)
-
-    def to_latency(d: float) -> float:
-        return 10.0 if max_dist <= 0 else 10.0 + 190.0 * (d / max_dist)
-
-    # Build RTT map
-    rtts: dict[tuple[str, str], float] = {(nid, nid): 10.0 for nid in ids}
-    for i, aid in enumerate(ids):
-        ax, ay = coords[aid]
-        for bid in ids[i + 1 :]:
-            bx, by = coords[bid]
-            d = sqrt((ax - bx) ** 2 + (ay - by) ** 2)
-            lat = to_latency(d)
-            rtts[(aid, bid)] = lat
-            rtts[(bid, aid)] = lat
-    return rtts
-
-
-def set_rtt_from_coords(nodes: List[Node]) -> None:
-    """Attach an RTT getter to each node based on their coordinates."""
-    rtts = compute_rtts_from_coords(nodes)
-
-    def getter(src: Node, dst: Node) -> float:
-        if src.node_id == dst.node_id:
-            return 0.0
-        return rtts.get((src.node_id, dst.node_id), 200.0)
-
-    for n in nodes:
-        n.rtt_getter = getter
+from .test_utils import build_model_info as build_model
+from .test_utils import build_node, set_rtt_from_coords
 
 
 def test_optimal_path_simple_chain():
@@ -206,15 +98,21 @@ def test_optimal_path_parametrized(
     "num_layers,segments,expected_turns",
     [
         # tail has dramatically larger I/O and close-enough y so small RTT
-        # 'head' should 'turn' to the tail ASAP
-        (10, [("head", 0, 6, 1.0, 0.0), ("tail", 4, 10, 3000.0, 0.01)], [("head", 4)]),
+        # 'head' should 'turn' to the tail ASAP (tail truncation)
+        (10, [("head", 0, 6, 1.0, 0.0), ("tail", 4, 10, 3000.0, 0.01)], [("head", 4, "tail")]),
+        # front truncation: path first uses node 'mid' at layer 3, so drop [0,3) on 'mid'
+        (
+            12,
+            [("head", 0, 6, 500.0, 0.0), ("mid", 2, 8, 1.0, 0.5), ("end", 7, 12, 500.0, 0.6)],
+            [("mid", 7, "tail"), ("mid", 6, "head")],
+        ),
         (8, [("solo", 0, 8, 250.0, 0.0)], []),
     ],
 )
 def test_turning_points(
     num_layers: int,
     segments: list[tuple[str, int, int, float, float]],
-    expected_turns: list[tuple[str, int]],
+    expected_turns: list[tuple[str, int, str]],
 ):
     """Parameterized turning-point detection across contiguous and overlap cases."""
     model = build_model(num_layers)
@@ -227,5 +125,5 @@ def test_turning_points(
     router = DynamicProgrammingRouting()
     set_rtt_from_coords(nodes)
     turns = router.find_turning_points(nodes, num_layers)
-    # Order of turning points is by layer progression; compare directly
-    assert turns == expected_turns
+    # Order-insensitive comparison: we only require the same set of truncation points
+    assert set(turns) == set(expected_turns)

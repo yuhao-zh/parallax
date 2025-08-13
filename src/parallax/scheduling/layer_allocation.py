@@ -338,7 +338,9 @@ class GapPatchDynamicNodeHandler(DynamicNodeHandler):
         self.model_info = model_info
         self.rebalance_threshold = rebalance_threshold
 
-    def handle_node_join(self, allocation_plan: LayerAllocationPlan, new_node: NodeInfo) -> None:
+    def handle_node_join(
+        self, allocation_plan: LayerAllocationPlan, new_node: NodeInfo
+    ) -> Tuple[int, int]:
         """Assign lightest layers to the new node greedily up to its capacity."""
 
         node_capacity = new_node.capacity_layers()
@@ -352,6 +354,7 @@ class GapPatchDynamicNodeHandler(DynamicNodeHandler):
         end_layer = min(start_layer + node_capacity, allocation_plan.num_total_layers)
 
         allocation_plan.add_to_allocation(start_layer, end_layer, new_node)
+        return start_layer, end_layer
 
     def handle_node_leave(
         self,
@@ -391,15 +394,11 @@ class GapPatchDynamicNodeHandler(DynamicNodeHandler):
             return False
 
         nodes = allocation_plan.node_id_to_node_info.values()
-        total_cluster_memory = sum(
-            node.total_memory for node in nodes if node.total_memory is not None
-        )
-        total_cluster_flops = sum(
-            node.total_flops for node in nodes if node.total_flops is not None
-        )
+        total_cluster_memory = sum(node.memory_gb for node in nodes)
+        total_cluster_flops = sum(node.tflops_fp16 for node in nodes)
 
         if total_cluster_memory == 0 or total_cluster_flops == 0:
-            return False
+            raise ValueError("Total cluster memory or flops is zero")
 
         loads = [
             self._calculate_combined_load(layer, total_cluster_memory, total_cluster_flops)
@@ -437,7 +436,7 @@ class LayerAllocator(ABC):
         """Allocate layers to nodes."""
 
     @abstractmethod
-    def add_node(self, node: NodeInfo) -> None:
+    def add_node(self, node: NodeInfo) -> Tuple[int, int]:
         """Add a node to the allocator."""
 
     @abstractmethod
@@ -445,7 +444,7 @@ class LayerAllocator(ABC):
         """Remove a node from the allocator."""
 
     @abstractmethod
-    def rebalance(self) -> LayerAllocationPlan:
+    def rebalance(self) -> Optional[LayerAllocationPlan]:
         """Rebalance the layers across the nodes."""
 
 
@@ -490,7 +489,8 @@ class GreedyLayerAllocator(LayerAllocator):
     def __init__(self, model_info: ModelInfo, nodes: List[NodeInfo]):
         super().__init__(model_info, nodes)
         self.nodes = self._sort_nodes_by_capacity()
-        self.rebalancer = WaterFillingPipelineRebalancer(model_info.num_layers)
+        self._rebalancer = WaterFillingPipelineRebalancer(model_info.num_layers)
+        self._dynamic_node_handler = GapPatchDynamicNodeHandler(model_info)
         self.allocation_plan: Optional[LayerAllocationPlan] = None
 
     # pylint: disable=too-many-locals, too-many-nested-blocks, too-many-branches
@@ -515,7 +515,6 @@ class GreedyLayerAllocator(LayerAllocator):
 
             while remaining_layers > 0 and available_nodes:
                 is_start = len(pipeline_nodes) == 0
-                is_end = False
                 # Look-ahead optimization, addition one account for LM head
                 look_ahead_possible = (
                     current_pipeline_total_capacity - remaining_layers >= num_total_layers + 1
@@ -541,18 +540,18 @@ class GreedyLayerAllocator(LayerAllocator):
 
                 if best_fit_idx != -1:
                     node_to_add = available_nodes.pop(best_fit_idx)
-                    is_end = True
                 else:
                     node_to_add = available_nodes.pop(0)
 
                 pipeline_nodes.append(node_to_add)
-
                 # Update running totals
-                node_capacity = node_to_add.capacity_layers(
-                    include_input_embed=is_start, include_lm_head=is_end
-                )
+                node_capacity = node_to_add.capacity_layers(include_input_embed=is_start)
                 remaining_layers -= node_capacity
                 if remaining_layers <= 0:
+                    # TODO: remove this
+                    if is_start:
+                        raise ValueError("Can't map full model on a single node")
+
                     remaining_layers += node_capacity
                     node_capacity = node_to_add.capacity_layers(
                         include_input_embed=is_start, include_lm_head=True
@@ -563,7 +562,7 @@ class GreedyLayerAllocator(LayerAllocator):
 
             if remaining_layers <= 0:
                 # Rebalance layers within the pipeline and merge into the global plan.
-                pipeline_plan = self.rebalancer.rebalance(pipeline_nodes)
+                pipeline_plan = self._rebalancer.rebalance(pipeline_nodes)
                 for node_id, assignment in pipeline_plan.node_assignments.items():
                     node_info = pipeline_plan.node_id_to_node_info[node_id]
                     allocation_plan.add_to_allocation(
@@ -574,24 +573,31 @@ class GreedyLayerAllocator(LayerAllocator):
                 available_nodes.extend(pipeline_nodes)
                 break
 
+        if not allocation_plan.node_assignments:
+            raise ValueError("No valid allocation found")
         self.allocation_plan = allocation_plan
         return allocation_plan
 
-    def add_node(self, node: NodeInfo) -> None:
+    def add_node(self, node: NodeInfo) -> Tuple[int, int]:
         """Add a node to the allocator and re-calculates the allocation plan."""
         self.nodes.append(node)
         self.nodes = self._sort_nodes_by_capacity()
-        self.rebalancer.handle_node_join(self.allocation_plan, node)
+        start_layer, end_layer = self._dynamic_node_handler.handle_node_join(
+            self.allocation_plan, node
+        )
+        return start_layer, end_layer
 
     def remove_node(self, node_id: str) -> None:
         """Remove a node from the allocator and re-calculates the allocation plan."""
         self.nodes = [node for node in self.nodes if node.node_id != node_id]
-        self.rebalancer.handle_node_leave(self.allocation_plan, node_id)
+        self._dynamic_node_handler.handle_node_leave(self.allocation_plan, node_id)
 
-    def rebalance(self) -> None:
+    def rebalance(self) -> Optional[LayerAllocationPlan]:
         """Re-runs the allocation and rebalancing process."""
-        if self.rebalancer.should_global_rebalance(self.allocation_plan):
+        if self._dynamic_node_handler.should_global_rebalance(self.allocation_plan):
             self.allocation_plan = self.allocate()
+            return self.allocation_plan
+        return None
 
 
 class DynamicProgrammingLayerAllocator(LayerAllocator):
@@ -641,6 +647,7 @@ class DynamicProgrammingLayerAllocator(LayerAllocator):
         self.alpha = alpha
         self._path: Dict[Tuple[int, Tuple[int, ...], int], Tuple] = {}
         self._rebalancer = WaterFillingPipelineRebalancer(model_info.num_layers)
+        self._dynamic_node_handler = GapPatchDynamicNodeHandler(model_info)
         self.allocation_plan: Optional[LayerAllocationPlan] = None
 
     # pylint: disable=too-many-locals, too-many-statements
@@ -821,20 +828,22 @@ class DynamicProgrammingLayerAllocator(LayerAllocator):
 
         return pipelines
 
-    def add_node(self, node: NodeInfo) -> None:
+    def add_node(self, node: NodeInfo) -> Tuple[int, int]:
         """Add a node to the allocator and re-calculates the allocation plan."""
         self.nodes.append(node)
         self.nodes = self._sort_nodes_by_capacity()
-        self._rebalancer.handle_node_join(self.allocation_plan, node)
+        return self._dynamic_node_handler.handle_node_join(self.allocation_plan, node)
 
     def remove_node(self, node_id: str) -> None:
         """Remove a node from the allocator and re-calculates the allocation plan."""
         self.nodes = [node for node in self.nodes if node.node_id != node_id]
-        self._rebalancer.handle_node_leave(self.allocation_plan, node_id)
+        self._dynamic_node_handler.handle_node_leave(self.allocation_plan, node_id)
 
-    def rebalance(self) -> None:
+    def rebalance(self) -> Optional[LayerAllocationPlan]:
         """Re-runs the allocation and rebalancing process."""
-        if self._rebalancer.should_global_rebalance(self.allocation_plan):
+        if self._dynamic_node_handler.should_global_rebalance(self.allocation_plan):
             self._memo.clear()
             self._path.clear()
             self.allocation_plan = self.allocate()
+            return self.allocation_plan
+        return None

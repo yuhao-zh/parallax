@@ -22,18 +22,15 @@ class RequestRoutingStrategy(ABC):
     """Base abstract class for request routing strategies."""
 
     @abstractmethod
-    def find_turning_points(self, nodes: List[Node], num_layers: int) -> List[Tuple[str, int]]:
-        """Find turning points for nodes with layer-level DP path.
+    def find_turning_points(self, nodes: List[Node], num_layers: int) -> List[Tuple[str, int, str]]:
+        """Find truncation points.
 
-        Turning points are points where the request decides to switch to a different node.
-        even if current node also hosts that next layer.
-
-        Args:
-            nodes: List of nodes.
-            num_layers: Number of layers.
-
-        Returns:
-            List of tuples (node_id, layer_index) for each turning point.
+        Turning points mark where shards can be trimmed based on optimal routing.
+        Returns a list of (node_id, layer_index, kind), where kind in {"head", "tail"}:
+        - (node, l, "tail"): the route switches away at layer l although node still
+          hosts l, so drop [l, end) on that node.
+        - (node, l, "head"): the route first uses this node at layer l (> start),
+          so drop [start, l) on that node.
         """
 
     @abstractmethod
@@ -52,11 +49,12 @@ class DynamicProgrammingRouting(RequestRoutingStrategy):
       minimum-latency node sequence and total latency.
     """
 
-    def find_turning_points(self, nodes: List[Node], num_layers: int) -> List[Tuple[str, int]]:
-        """Find turning points for nodes with layer-level DP path.
+    # pylint: disable=too-many-statements
+    def find_turning_points(self, nodes: List[Node], num_layers: int) -> List[Tuple[str, int, str]]:
+        """Find shard truncation points via layer-level DP.
 
-        DP state is (layer l, node i that hosts l). Node cost: per-layer exec latency.
-        Edge cost: RTT between nodes.
+        DP state is (layer l, node i that hosts l). Node cost uses the node's
+        per-layer latency proxy; edge cost uses RTT between nodes.
         """
         if num_layers <= 0 or not nodes:
             return []
@@ -112,8 +110,8 @@ class DynamicProgrammingRouting(RequestRoutingStrategy):
             path_idx.append(prev_i)
         path_idx.reverse()
 
-        # Identify turning points: when switching away from a node that still hosts layer l
-        turning: List[Tuple[str, int]] = []
+        # Identify turning points: tail truncations when switching away
+        turning: List[Tuple[str, int, str]] = []
         for l in range(1, len(path_idx)):
             prev_i = path_idx[l - 1]
             cur_i = path_idx[l]
@@ -121,7 +119,21 @@ class DynamicProgrammingRouting(RequestRoutingStrategy):
                 continue
             prev_node = nodes[prev_i]
             if prev_node.hosts_layer(l):
-                turning.append((nodes[prev_i].node_id, l))
+                turning.append((nodes[prev_i].node_id, l, "tail"))
+        # Identify front truncations: for each node on the path, if the first
+        # layer used is greater than its hosted start, we can drop the prefix
+        # [start, first_used_layer)
+        first_used: Dict[int, int] = {}
+        for l, idx in enumerate(path_idx):
+            if idx not in first_used:
+                first_used[idx] = l
+        for idx, l0 in first_used.items():
+            n = nodes[idx]
+            if n.current_layers is None:
+                continue
+            start, _ = n.current_layers
+            if l0 > start:
+                turning.append((n.node_id, l0, "head"))
         return turning
 
     def find_optimal_path(self, nodes: List[Node], num_layers: int) -> Tuple[List[str], float]:
