@@ -7,9 +7,14 @@ It is used to recv requests from http frontend and send prompts to executor.
 
 import multiprocessing as mp
 import uvicorn
+import uuid
+import time
+import sys
+import traceback
 import zmq
 import zmq.asyncio
 import fastapi
+import asyncio
 
 from pydantic import BaseModel
 from http import HTTPStatus
@@ -22,12 +27,30 @@ from parallax.utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-class HTTPCommunicator:
+def get_exception_traceback():
+    etype, value, tb = sys.exc_info()
+    err_str = "".join(traceback.format_exception(etype, value, tb))
+    return err_str
+
+async def print_exception_wrapper(func):
+    """
+    Sometimes an asyncio function does not print exception.
+    We do another wrapper to handle the exception.
+    """
+    try:
+        await func()
+    except Exception:
+        traceback = get_exception_traceback()
+        logger.error(f"TokenizerManager hit an exception: {traceback}")
+        sys.exit(1)
+
+class HTTPHandler:
     def __init__(
             self,
             executor_input_ipc_name,
             executor_output_ipc_name,
         ):
+        self.asyncio_tasks = set()
         # Init inter-process communication
         context = zmq.asyncio.Context(2)
         self.send_to_executor = get_zmq_socket(
@@ -36,21 +59,23 @@ class HTTPCommunicator:
         self.recv_from_executor = get_zmq_socket(
             context, zmq.PULL, executor_output_ipc_name, True
         )
-    
+        self.request_result = {}
+
     def send_requests(self, requests: Dict):
         self.send_to_executor.send_pyobj(requests)
-        
-    def recv_prompts(self):
-        msgs = []
+
+    async def _handle_loop(self):
+        """The event loop that handles returned requests"""
         while True:
-            try:
-                recv_msg = self.recv_from_executor.recv_pyobj(zmq.NOBLOCK)
-                msgs.append(recv_msg)
-            except zmq.ZMQError:
-                break
-            except Exception as e:
-                logger.exception(f"Error receiving http request: {e}")
-        return msgs
+            recv_dict = await self.recv_from_executor.recv_pyobj()
+            print("[ty]recv result", recv_dict)
+            rid = recv_dict["rid"]
+            output = recv_dict["output"]
+            self.request_result[rid] = output
+
+    async def create_handle_loop(self):
+        task_loop = asyncio.create_task(print_exception_wrapper(self._handle_loop))
+        await task_loop
 
 class ErrorResponse(BaseModel):
     object: str = "error"
@@ -67,18 +92,26 @@ def create_error_response(
     error = ErrorResponse(message=message, type=err_type, code=status_code.value)
     return fastapi.ORJSONResponse(content=error.model_dump(), status_code=error.code)
 
-def _create_error_response(e):
-    return fastapi.ORJSONResponse(
-        {"error": {"message": str(e)}}, status_code=HTTPStatus.BAD_REQUEST
-    )
-
-
 async def v1_chat_completions(raw_request: fastapi.Request):
     try:
         request_json = await raw_request.json()
     except Exception as e:
         return create_error_response("Invalid request body, error: ", str(e))
-    http_comm.send_requests(request_json)
+    request_id = f"chatcmpl-{uuid.uuid4()}"
+    request_json["rid"] = request_id
+    http_handler.request_result[request_id] = ""
+    http_handler.send_requests(request_json)
+    res = ""
+    while True:
+        try:
+            res = http_handler.request_result.get(request_id)
+            if (len(res) > 0):
+                print("[ty]res=", res)
+                break
+        except:
+            break
+
+    return res
 
 @asynccontextmanager
 async def lifespan(fast_api_app: fastapi.FastAPI):
@@ -102,6 +135,19 @@ class ParallaxHttpServer:
         self.executor_input_ipc_name = args.executor_input_ipc
         self.executor_output_ipc_name = args.executor_output_ipc
 
+    async def run_uvicorn(self):
+        config = uvicorn.Config(app,
+                                host=self.host,
+                                port=self.port,
+                                timeout_keep_alive=5,
+                                loop="uvloop",
+                            )
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    async def run_tasks(self):
+        await asyncio.gather(self.run_uvicorn(), http_handler.create_handle_loop())
+
     def run(self):
         """
         Launch A FastAPI server that routes requests to the executor.
@@ -110,28 +156,14 @@ class ParallaxHttpServer:
         1. The HTTP server and executor both run in the main process.
         2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
         """
-        global http_comm 
-        http_comm = HTTPCommunicator(
+        global http_handler
+        http_handler = HTTPHandler(
             self.executor_input_ipc_name,
             self.executor_output_ipc_name,
         )
 
-        try:
-            uvicorn.run(
-                app,
-                host=self.host,
-                port=self.port,
-                timeout_keep_alive=5,
-                loop="uvloop",
-            )
-        finally:
-            pass
+        asyncio.run(self.run_tasks())
 
 def launch_http_server(args):
     http_server = ParallaxHttpServer(args)
     mp.Process(target=http_server.run).start()
-
-if __name__ == "__main__":
-    from parallax.server.server_args import parse_args
-    args = parse_args()
-    launch_http_server(args)

@@ -155,7 +155,7 @@ class Executor:
             try:
                 raw_request = self.recv_from_ipc_socket.recv_pyobj(zmq.NOBLOCK)
                 # Do tokenization and form InitialRequest
-                req = self._encode_raw_request(raw_request)
+                req = self._handle_raw_request(raw_request)
                 recv_reqs.append(req)
             except zmq.ZMQError:
                 break
@@ -321,10 +321,10 @@ class Executor:
             "decode_batch": decode_batch,
         }
     
-    def _encode_raw_request(self, raw_request: Dict):
+    def _handle_raw_request(self, raw_request: Dict):
         assert "messages" in raw_request, "Request did not contain messages"
 
-        request_id = f"chatcmpl-{uuid.uuid4()}"
+        rid = raw_request["rid"]
         if self.tokenizer.chat_template:
             messages = raw_request["messages"]
             process_message_content(messages)
@@ -351,7 +351,7 @@ class Executor:
             sampling_params = SamplingParams()
         
         req = InitialRequest(
-            request_id=request_id,
+            request_id=rid,
             output_ids=None,
             input_ids=prompt,
             sampling_params=sampling_params,
@@ -384,9 +384,18 @@ class Executor:
                             f"Recieved Request {req.request_id} should be in cache manager"
                         )
 
-                    assert req.hidden_states is not None
-                    token_id = int(req.hidden_states[0])
-                    original_req.commit_new_token(token_id)
+                    assert req.next_token_id is not None
+                    original_req.commit_new_token(req.next_token_id)
+
+                    # detokenize and send to http server
+                    cur_text = self.tokenizer.decode(req.next_token_id)
+                    req_dict = {
+                        "output": cur_text,
+                        "rid": req.request_id,
+                    }
+                    if req.next_token_id == self.tokenizer.eos_token_id:
+                        req_dict["eos"] = True
+                    self.send_to_ipc_socket.send_pyobj(req_dict)
 
                     # Check for termination.
                     if self.scheduler.check_and_update_request_status(original_req):
@@ -441,6 +450,7 @@ class Executor:
                 request_id=request.request_id,
                 status=RequestStatus.DECODING,  # Last peer always changes status to DECODING
                 current_position=request.total_length + 1,
+                input_ids=request.input_ids,
                 hidden_states=hidden_states,
                 routing_table=request.routing_table,
             )
@@ -535,7 +545,9 @@ class Executor:
         while True:
             # 1. Ingest new requests from the http frontend
             if self.is_first_peer:
+                time.sleep(0.1)
                 http_requests = self.recv_requests_from_http()
+                self._handle_input_requests(http_requests)
 
             # 2. Ingest new requests from the RPC server
             incoming_requests = self.recv_requests_from_peer()

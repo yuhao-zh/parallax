@@ -34,13 +34,17 @@ def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.Forward
 
     # Collect all hidden_states and next_token_ids
     all_hidden_states = []
+    all_residual = []
 
     for request in requests:
         proto_req = forward_pb2.Req()
         proto_req.rid = request.request_id
         proto_req.output_length = request.current_position
+        proto_req.input_ids.extend(request.input_ids)
         proto_req.routing_table.extend(request.routing_table)
         forward_request.reqs.append(proto_req)
+        if request.next_token_id is not None:
+            forward_request.next_token_ids.append(request.next_token_id)
 
         # Assert that hidden_states is mlx array
         assert isinstance(
@@ -58,17 +62,26 @@ def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.Forward
             else:
                 # This is actual hidden states, collect for concatenation
                 all_hidden_states.append(request.hidden_states)
+                # Add a zero residual for gpu executors
+                residual = mx.zeros(request.hidden_states.shape, dtype=request.hidden_states.dtype)
+                all_residual.append(residual)
 
     # Concatenate all hidden_states into a single tensor if any exist
     if all_hidden_states:
         # Concatenate along the first dimension (batch dimension)
         concatenated_hidden_states = mx.concatenate(all_hidden_states, axis=0)
+        concatenated_residual = mx.concatenate(all_residual, axis=0)
 
         # Create a single named tensor for all hidden states
         named_tensor = forward_pb2.NamedTensor()
         named_tensor.name = "hidden_states"
         named_tensor.tensor.CopyFrom(tensor_to_proto(concatenated_hidden_states))
         forward_request.pp_proxy_tensors.tensors.append(named_tensor)
+        # Create a single named tensor for all residual
+        residual_tensor = forward_pb2.NamedTensor()
+        residual_tensor.name = "residual"
+        residual_tensor.tensor.CopyFrom(tensor_to_proto(concatenated_residual))
+        forward_request.pp_proxy_tensors.tensors.append(residual_tensor)
 
     return forward_request
 
