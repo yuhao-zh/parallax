@@ -1,8 +1,16 @@
 """
-This module contains the http server for Parallax.
+This module contains the http frontend server for Parallax.
+Two classes that handles a post request from the frontend service:
 
-It is used to recv requests from http frontend and send prompts to executor.
+  -- ParallaxHttpServer:
+    The uvicorn server that communicates with the frontend and posts responses
+    to users.
+    This module launches a subprocess.
 
+  -- HTTPHandler:
+    1.Gets requests from ParallaxHttpServer and maintains status of these requests.
+    2.Send raw requests by ipc to parallax executor.
+    3.Waits for ipc response from the executor and stores the results.
 """
 
 import multiprocessing as mp
@@ -45,6 +53,9 @@ async def print_exception_wrapper(func):
         sys.exit(1)
 
 class HTTPHandler:
+    """
+    A global handler that maintains raw requests from ParallaxHttpServer.
+    """
     def __init__(
             self,
             executor_input_ipc_name,
@@ -60,6 +71,7 @@ class HTTPHandler:
             context, zmq.PULL, executor_output_ipc_name, True
         )
         self.request_result = {}
+        self.request_finish = {}
 
     def send_requests(self, requests: Dict):
         self.send_to_executor.send_pyobj(requests)
@@ -68,12 +80,14 @@ class HTTPHandler:
         """The event loop that handles returned requests"""
         while True:
             recv_dict = await self.recv_from_executor.recv_pyobj()
-            print("[ty]recv result", recv_dict)
             rid = recv_dict["rid"]
             output = recv_dict["output"]
-            self.request_result[rid] = output
+            self.request_result[rid] += output
+            if output == "<|im_end|>":
+                self.request_finish[rid] = True
 
     async def create_handle_loop(self):
+        """Create asyncio event loop task function"""
         task_loop = asyncio.create_task(print_exception_wrapper(self._handle_loop))
         await task_loop
 
@@ -100,17 +114,17 @@ async def v1_chat_completions(raw_request: fastapi.Request):
     request_id = f"chatcmpl-{uuid.uuid4()}"
     request_json["rid"] = request_id
     http_handler.request_result[request_id] = ""
+    http_handler.request_finish[request_id] = False
     http_handler.send_requests(request_json)
     res = ""
     while True:
-        try:
-            res = http_handler.request_result.get(request_id)
-            if (len(res) > 0):
-                print("[ty]res=", res)
-                break
-        except:
+        await asyncio.sleep(0.1)
+        res = http_handler.request_result.get(request_id)
+        is_finish = http_handler.request_finish.get(request_id)
+        if is_finish:
             break
-
+    del http_handler.request_result[request_id]
+    del http_handler.request_finish[request_id]
     return res
 
 @asynccontextmanager
@@ -129,6 +143,11 @@ async def openai_v1_chat_completions(raw_request: fastapi.Request):
 
 
 class ParallaxHttpServer:
+    """
+    The frontend http server drived by asyncio.
+    Since uvicorn API runs an asyncio task, we need a new uvicorn
+    wrapper to run other async tasks.
+    """
     def __init__(self, args):
         self.host = args.host
         self.port = args.port
