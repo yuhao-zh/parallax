@@ -22,7 +22,9 @@ dependencies = [
   "hivemind @ git+https://github.com/learning-at-home/hivemind.git@53533289edfeb1f9b2f5917cbae66fe50cfa2548",
   "dijkstar",
   "uvicorn",
+  "uvloop",
   "fastapi",
+  "pydantic",
 ]
 
 [project.optional-dependencies]

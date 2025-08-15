@@ -96,7 +96,7 @@ class MLXModelLoader:
         Returns:
             A tuple containing the loaded sharded MLX model and its configuration dictionary.
         """
-        model_path, _ = get_model_path(self.model_path_str)
+        model_path = get_model_path(self.model_path_str)
         config = load_config(model_path)
         tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
 
