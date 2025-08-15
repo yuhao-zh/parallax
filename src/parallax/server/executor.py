@@ -205,10 +205,10 @@ class Executor:
         lengths = []
         for req in batched_requests:
             assert req.is_prefill, f"Request {req.request_id} is not a prefill request."
-            if hasattr(req, "input_ids"):
+            if self.is_first_peer:
                 assert (
-                    isinstance(req, InitialRequest) and self.is_first_peer
-                ), f"Request {req.request_id} should be in FirstPeer."
+                    hasattr(req, "input_ids")
+                ), f"Request {req.request_id} should has attribute input_ids in FirstPeer."
                 h.append(req.input_ids)
             else:
                 assert isinstance(
