@@ -126,7 +126,10 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
 
         current_hidden_states = None
         if status == RequestStatus.PREFILLING:
-            current_hidden_states = hidden_states[token_index : token_index + len(proto_req.input_ids)]
+            seq_len = len(proto_req.input_ids)
+            if (seq_len == 0):
+                seq_len = len(proto_req.input_ids) + proto_req.output_length
+            current_hidden_states = hidden_states[token_index : token_index + seq_len]
             token_index += len(proto_req.input_ids)
         elif status == RequestStatus.DECODING:
             current_hidden_states = hidden_states[token_index : token_index + 1]
