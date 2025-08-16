@@ -395,7 +395,8 @@ class Executor:
                     }
                     if req.next_token_id == self.tokenizer.eos_token_id:
                         req_dict["eos"] = True
-                    self.send_to_ipc_socket.send_pyobj(req_dict)
+                    if hasattr(self, "send_to_ipc_socket"):
+                        self.send_to_ipc_socket.send_pyobj(req_dict)
 
                     # Check for termination.
                     if self.scheduler.check_and_update_request_status(original_req):
@@ -614,6 +615,8 @@ class Executor:
         logger.info("Executor shutting down...")
         self.recv_from_peer_socket.close()
         self.send_to_peer_socket.close()
+        self.recv_from_ipc_socket.close()
+        self.send_to_ipc_socket.close()
         self.zmq_context.term()
         logger.info("Executor shutdown complete.")
 
