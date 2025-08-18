@@ -34,11 +34,13 @@ def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.Forward
 
     # Collect all hidden_states and next_token_ids
     all_hidden_states = []
+    all_residual = []
 
     for request in requests:
         proto_req = forward_pb2.Req()
         proto_req.rid = request.request_id
-        proto_req.output_length = request.current_position
+        proto_req.output_length = request.current_position - len(request.input_ids)
+        proto_req.input_ids.extend(request.input_ids)
         proto_req.routing_table.extend(request.routing_table)
         forward_request.reqs.append(proto_req)
 
@@ -58,17 +60,29 @@ def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.Forward
             else:
                 # This is actual hidden states, collect for concatenation
                 all_hidden_states.append(request.hidden_states)
+                # Add a zero residual for gpu executors
+                residual = mx.zeros(request.hidden_states.shape, dtype=request.hidden_states.dtype)
+                all_residual.append(residual)
+                # Pass the previous token_id to the next peer.
+                if request.next_token_id is not None:
+                    forward_request.next_token_ids.append(request.next_token_id)
 
     # Concatenate all hidden_states into a single tensor if any exist
     if all_hidden_states:
         # Concatenate along the first dimension (batch dimension)
         concatenated_hidden_states = mx.concatenate(all_hidden_states, axis=0)
+        concatenated_residual = mx.concatenate(all_residual, axis=0)
 
         # Create a single named tensor for all hidden states
         named_tensor = forward_pb2.NamedTensor()
         named_tensor.name = "hidden_states"
         named_tensor.tensor.CopyFrom(tensor_to_proto(concatenated_hidden_states))
         forward_request.pp_proxy_tensors.tensors.append(named_tensor)
+        # Create a single named tensor for all residual
+        residual_tensor = forward_pb2.NamedTensor()
+        residual_tensor.name = "residual"
+        residual_tensor.tensor.CopyFrom(tensor_to_proto(concatenated_residual))
+        forward_request.pp_proxy_tensors.tensors.append(residual_tensor)
 
     return forward_request
 
@@ -113,8 +127,11 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
 
         current_hidden_states = None
         if status == RequestStatus.PREFILLING:
-            current_hidden_states = hidden_states[token_index : token_index + current_position]
-            token_index += current_position
+            seq_len = len(proto_req.input_ids)
+            if seq_len == 0:
+                seq_len = len(proto_req.input_ids) + proto_req.output_length
+            current_hidden_states = hidden_states[token_index : token_index + seq_len]
+            token_index += len(proto_req.input_ids)
         elif status == RequestStatus.DECODING:
             current_hidden_states = hidden_states[token_index : token_index + 1]
             token_index += 1
@@ -129,6 +146,7 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
             request_id=proto_req.rid,
             current_position=current_position,
             status=status,
+            input_ids=list(proto_req.input_ids),
             hidden_states=current_hidden_states,
             routing_table=proto_req.routing_table,
             next_token_id=next_token_id,
@@ -138,6 +156,7 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
         requests.append(request)
 
     return requests
+
 
 def proto_to_sampling_params(proto: forward_pb2.SamplingParams) -> SamplingParams:
     """Convert protobuf message to SamplingParams."""
@@ -160,26 +179,28 @@ def proto_to_sampling_params(proto: forward_pb2.SamplingParams) -> SamplingParam
     )
     return sampling_params
 
+
 def sampling_params_to_proto(params: SamplingParams) -> forward_pb2.SamplingParams:
     """Convert SamplingParams to protobuf message."""
     proto = forward_pb2.SamplingParams()
 
     proto.max_new_tokens = params.max_new_tokens
     proto.min_new_tokens = params.min_new_tokens
-    proto.temperature=params.temperature
-    proto.top_p=params.top_p
-    proto.min_p=params.min_p
-    proto.top_k=params.top_k
+    proto.temperature = params.temperature
+    proto.top_p = params.top_p
+    proto.min_p = params.min_p
+    proto.top_k = params.top_k
     if params.stop_strs is not None:
         proto.stop_strs.extend(params.stop_strs)
     if params.stop_token_ids is not None:
         proto.stop_token_ids.extend(params.stop_token_ids)
-    proto.ignore_eos=params.ignore_eos
-    proto.repetition_penalty=params.repetition_penalty
-    proto.presence_penalty=params.presence_penalty
-    proto.frequency_penalty=params.frequency_penalty
-    proto.json_schema=params.json_schema
+    proto.ignore_eos = params.ignore_eos
+    proto.repetition_penalty = params.repetition_penalty
+    proto.presence_penalty = params.presence_penalty
+    proto.frequency_penalty = params.frequency_penalty
+    proto.json_schema = params.json_schema
     return proto
+
 
 def tensor_to_proto(mlx_tensor: mx.array) -> forward_pb2.Tensor:
     """Convert MLX array to protobuf Tensor using safetensor serialization."""

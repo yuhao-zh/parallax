@@ -20,6 +20,7 @@ import tempfile
 
 from parallax.p2p.server import launch_p2p_server
 from parallax.server.executor import Executor
+from parallax.server.http_server import launch_http_server
 from parallax.server.server_args import parse_args
 from parallax.utils.logging_config import get_logger
 
@@ -32,11 +33,16 @@ if __name__ == "__main__":
 
         args.recv_from_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
         args.send_to_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
+        args.executor_input_ipc = f"ipc://{tempfile.NamedTemporaryFile().name}"
+        args.executor_output_ipc = f"ipc://{tempfile.NamedTemporaryFile().name}"
 
         logger.info(f"recv_from_peer_addr: {args.recv_from_peer_addr}")
         logger.info(f"send_to_peer_addr: {args.send_to_peer_addr}")
+        logger.info(f"executor_input_addr: {args.executor_input_ipc}")
+        logger.info(f"executor_output_addr: {args.executor_output_ipc}")
 
         launch_p2p_server(args)
+        launch_http_server(args)
 
         executor = Executor.create_from_args(args)
         try:
