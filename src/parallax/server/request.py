@@ -67,8 +67,8 @@ from typing import List, Optional
 
 import mlx.core as mx
 
-from parallax.utils.logging_config import get_logger
 from parallax.server.sampling.sampling_params import SamplingParams
+from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -161,7 +161,7 @@ class InitialRequest(Request):
             request_id=request_id,
             status=status,
             prompt_len=len(input_ids) if input_ids else 0,
-            input_ids=input_ids
+            input_ids=input_ids,
         )
         self.prompt = prompt
 

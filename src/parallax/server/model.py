@@ -58,7 +58,9 @@ class ShardedModel(nn.Module):
             self.embed_tokens = None
             self.norm_in = None
 
-        self.layers = [block_class(config, layer_idx) for layer_idx in range(start_layer, end_layer)]
+        self.layers = [
+            block_class(config, layer_idx) for layer_idx in range(start_layer, end_layer)
+        ]
 
         if self.is_last_shard:
             self.norm = nn.RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
@@ -68,11 +70,11 @@ class ShardedModel(nn.Module):
             self.lm_head = None
 
     def logits_to_tokens(
-            self,
-            logits: mx.array,
-            lengths: Optional[mx.array] = None,
-            sampling_info: Optional[SamplingBatchInfo] = None,
-        ) -> mx.array:
+        self,
+        logits: mx.array,
+        lengths: Optional[mx.array] = None,
+        sampling_info: Optional[SamplingBatchInfo] = None,
+    ) -> mx.array:
         """Convert logits to token IDs with greedy decoding.
 
         Args:

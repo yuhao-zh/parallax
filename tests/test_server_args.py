@@ -101,7 +101,7 @@ class TestCreateExecutorConfig:
             micro_batch_ratio=2,
             scheduler_wait_ms=500,
             executor_input_ipc="///ipc/1",
-            executor_output_ipc="///ipc/2"
+            executor_output_ipc="///ipc/2",
         )
 
         config = create_executor_config(args)

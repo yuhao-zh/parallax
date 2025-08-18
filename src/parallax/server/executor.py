@@ -20,12 +20,11 @@ Executor handles
 
 import argparse
 import time
-import zmq
-import uuid
 from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
-from mlx_lm.server import process_message_content, convert_chat
+import zmq
+from mlx_lm.server import convert_chat, process_message_content
 
 from parallax.p2p.message_util import proto_to_request, request_to_proto
 from parallax.p2p.proto import forward_pb2
@@ -36,10 +35,10 @@ from parallax.server.request import (
     Request,
     RequestStatus,
 )
+from parallax.server.sampling.sampler import SamplingBatchInfo
+from parallax.server.sampling.sampling_params import SamplingParams
 from parallax.server.scheduler import Scheduler
 from parallax.server.shard_loader import MLXModelLoader
-from parallax.server.sampling.sampling_params import SamplingParams
-from parallax.server.sampling.sampler import SamplingBatchInfo
 from parallax.utils.logging_config import get_logger
 from parallax.utils.utils import (
     combine_padding_and_causal_masks,
@@ -163,7 +162,6 @@ class Executor:
             except Exception as e:
                 logger.exception(f"Error receiving http request: {e}")
         return recv_reqs
-            
 
     def recv_requests_from_peer(self) -> List[Request]:
         """Receives requests from the RPC server."""
@@ -207,8 +205,8 @@ class Executor:
         for req in batched_requests:
             assert req.is_prefill, f"Request {req.request_id} is not a prefill request."
             if self.is_first_peer:
-                assert (
-                    hasattr(req, "input_ids")
+                assert hasattr(
+                    req, "input_ids"
                 ), f"Request {req.request_id} should has attribute input_ids in FirstPeer."
                 h.append(req.input_ids)
             else:
@@ -321,7 +319,7 @@ class Executor:
             "prefill_batch": prefill_batch,
             "decode_batch": decode_batch,
         }
-    
+
     def _handle_raw_request(self, raw_request: Dict):
         assert "messages" in raw_request, "Request did not contain messages"
 
@@ -350,7 +348,7 @@ class Executor:
         else:
             # TODO
             sampling_params = SamplingParams()
-        
+
         req = InitialRequest(
             request_id=rid,
             output_ids=None,
@@ -535,7 +533,9 @@ class Executor:
         # Process last peer: need additional sampling + detokenization
         if return_decoded_tokens:
             sampling_info = SamplingBatchInfo.from_reqs(requests)
-            return mx.array(self.model_shard.logits_to_tokens(hidden_states, lengths, sampling_info))
+            return mx.array(
+                self.model_shard.logits_to_tokens(hidden_states, lengths, sampling_info)
+            )
 
         return hidden_states
 

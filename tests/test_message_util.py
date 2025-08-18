@@ -214,7 +214,7 @@ class TestMessageUtil:
         original_request = IntermediateRequest(
             request_id=self.request_id,
             current_position=self.current_position,
-            input_ids = [1, 2],
+            input_ids=[1, 2],
             status=RequestStatus.PREFILLING,
             hidden_states=hidden_states,
         )
@@ -242,7 +242,7 @@ class TestMessageUtil:
         original_request = IntermediateRequest(
             request_id=self.request_id,
             current_position=self.current_position,
-            input_ids = [42],
+            input_ids=[42],
             status=RequestStatus.DECODING,
             hidden_states=hidden_states,
         )

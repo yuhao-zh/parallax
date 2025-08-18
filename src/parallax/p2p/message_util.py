@@ -127,7 +127,7 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
         current_hidden_states = None
         if status == RequestStatus.PREFILLING:
             seq_len = len(proto_req.input_ids)
-            if (seq_len == 0):
+            if seq_len == 0:
                 seq_len = len(proto_req.input_ids) + proto_req.output_length
             current_hidden_states = hidden_states[token_index : token_index + seq_len]
             token_index += len(proto_req.input_ids)
@@ -155,6 +155,7 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
 
     return requests
 
+
 def proto_to_sampling_params(proto: forward_pb2.SamplingParams) -> SamplingParams:
     """Convert protobuf message to SamplingParams."""
     if proto is None:
@@ -176,26 +177,28 @@ def proto_to_sampling_params(proto: forward_pb2.SamplingParams) -> SamplingParam
     )
     return sampling_params
 
+
 def sampling_params_to_proto(params: SamplingParams) -> forward_pb2.SamplingParams:
     """Convert SamplingParams to protobuf message."""
     proto = forward_pb2.SamplingParams()
 
     proto.max_new_tokens = params.max_new_tokens
     proto.min_new_tokens = params.min_new_tokens
-    proto.temperature=params.temperature
-    proto.top_p=params.top_p
-    proto.min_p=params.min_p
-    proto.top_k=params.top_k
+    proto.temperature = params.temperature
+    proto.top_p = params.top_p
+    proto.min_p = params.min_p
+    proto.top_k = params.top_k
     if params.stop_strs is not None:
         proto.stop_strs.extend(params.stop_strs)
     if params.stop_token_ids is not None:
         proto.stop_token_ids.extend(params.stop_token_ids)
-    proto.ignore_eos=params.ignore_eos
-    proto.repetition_penalty=params.repetition_penalty
-    proto.presence_penalty=params.presence_penalty
-    proto.frequency_penalty=params.frequency_penalty
-    proto.json_schema=params.json_schema
+    proto.ignore_eos = params.ignore_eos
+    proto.repetition_penalty = params.repetition_penalty
+    proto.presence_penalty = params.presence_penalty
+    proto.frequency_penalty = params.frequency_penalty
+    proto.json_schema = params.json_schema
     return proto
+
 
 def tensor_to_proto(mlx_tensor: mx.array) -> forward_pb2.Tensor:
     """Convert MLX array to protobuf Tensor using safetensor serialization."""

@@ -2,7 +2,8 @@
 Sampling parameters of each request
 """
 
-from typing import Optional, List, Union
+from typing import List, Optional, Union
+
 
 class SamplingParams:
     """Sampling parameter class for a single request"""
@@ -49,21 +50,15 @@ class SamplingParams:
     def verify(self):
         """Basic verifications for the sampling parameters"""
         if self.temperature < 0.0:
-            raise ValueError(
-                f"temperature must be non-negetive, got {self.temperature}."
-            )
+            raise ValueError(f"temperature must be non-negetive, got {self.temperature}.")
         if not 0.0 < self.top_p <= 1.0:
             raise ValueError(f"top_p must be in (0, 1], got {self.top_p}.")
         if not 0.0 < self.min_p <= 1.0:
             raise ValueError(f"min_p must be in (0, 1], got {self.min_p}.")
         if not -2.0 <= self.frequency_penalty <= 2.0:
-            raise ValueError(
-                f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}."
-            )
+            raise ValueError(f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
-            raise ValueError(
-                f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
-            )
+            raise ValueError(f"presence_penalty must be in [-2, 2], got {self.presence_penalty}.")
         if not 0.0 <= self.repetition_penalty <= 2.0:
             raise ValueError(
                 f"repetition_penalty must be in [0, 2], got {self.repetition_penalty}."
