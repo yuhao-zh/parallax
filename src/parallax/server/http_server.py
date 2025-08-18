@@ -36,6 +36,7 @@ logger = get_logger(__name__)
 
 
 def get_exception_traceback():
+    """Traceback function to handle asyncio function errors"""
     etype, value, tb = sys.exc_info()
     err_str = "".join(traceback.format_exception(etype, value, tb))
     return err_str
@@ -54,7 +55,9 @@ async def print_exception_wrapper(func):
 
 class HTTPHandler:
     """
-    A global handler that maintains raw requests from ParallaxHttpServer.
+    A global handler that maintains raw requests. It has 2 main functions:
+    1.Interprocess communicate with the model executor.
+    2.Maintains the request -> prompts dict for ParallaxHTTPServer.
     """
     def __init__(
             self,
@@ -74,6 +77,7 @@ class HTTPHandler:
         self.request_finish = {}
 
     def send_requests(self, requests: Dict):
+        """Sends the request to model executor using IPC."""
         self.send_to_executor.send_pyobj(requests)
 
     async def _handle_loop(self):
@@ -92,6 +96,7 @@ class HTTPHandler:
         await task_loop
 
 class ErrorResponse(BaseModel):
+    """An Error data structure."""
     object: str = "error"
     message: str
     type: str
@@ -103,10 +108,12 @@ def create_error_response(
     err_type: str = "BadRequestError",
     status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
 ):
+    """Creates a json error response for the frontend."""
     error = ErrorResponse(message=message, type=err_type, code=status_code.value)
     return fastapi.ORJSONResponse(content=error.model_dump(), status_code=error.code)
 
 async def v1_chat_completions(raw_request: fastapi.Request):
+    """"""
     try:
         request_json = await raw_request.json()
     except Exception as e:
@@ -129,6 +136,10 @@ async def v1_chat_completions(raw_request: fastapi.Request):
 
 @asynccontextmanager
 async def lifespan(fast_api_app: fastapi.FastAPI):
+    """
+    A lifespan function for the uvicorn app.
+    Add in-life logic and shutdown logic in the future.
+    """
     yield
 
 # Fast API
@@ -139,6 +150,7 @@ app = fastapi.FastAPI(
 
 @app.post("/v1/chat/completions")
 async def openai_v1_chat_completions(raw_request: fastapi.Request):
+    """OpenAI v1/chat/complete post function"""
     return await v1_chat_completions(raw_request)
 
 
@@ -155,6 +167,10 @@ class ParallaxHttpServer:
         self.executor_output_ipc_name = args.executor_output_ipc
 
     async def run_uvicorn(self):
+        """
+        Since uvicorn.run() uses asyncio.run, we need another wrapper
+        to create a uvicorn asyncio task to run multiple tasks.
+        """
         config = uvicorn.Config(app,
                                 host=self.host,
                                 port=self.port,
@@ -165,6 +181,7 @@ class ParallaxHttpServer:
         await server.serve()
 
     async def run_tasks(self):
+        """Gather results of all asyncio tasks"""
         await asyncio.gather(self.run_uvicorn(), http_handler.create_handle_loop())
 
     def run(self):
@@ -184,5 +201,9 @@ class ParallaxHttpServer:
         asyncio.run(self.run_tasks())
 
 def launch_http_server(args):
+    """
+    Launch function of frontend server.
+    It creates a sub-process for the http server.
+    """
     http_server = ParallaxHttpServer(args)
     mp.Process(target=http_server.run).start()

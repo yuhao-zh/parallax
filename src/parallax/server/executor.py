@@ -148,8 +148,9 @@ class Executor:
     def create_from_args(cls, args: argparse.Namespace):
         """Create executor from command line arguments."""
         return cls(**create_executor_config(args))
-    
+
     def recv_requests_from_http(self) -> List[Request]:
+        """Receives requests from http frontend"""
         recv_reqs = []
         while True:
             try:

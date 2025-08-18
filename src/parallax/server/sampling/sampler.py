@@ -19,6 +19,8 @@ from parallax.server.sampling.sampling_params import SamplingParams
 
 @dataclasses.dataclass
 class SamplingBatchInfo:
+    """Maintains batched sampling information"""
+
     # Basic batched sampling params
     temperatures: mx.array
     top_ps: mx.array
@@ -33,6 +35,7 @@ class SamplingBatchInfo:
 
     @classmethod
     def from_reqs(cls, reqs: list[Request]):
+        """Retrieves sampling infos from a list of requests"""
         for r in reqs:
             if r.sampling_params is None:
                 r.sampling_params = SamplingParams()
@@ -65,6 +68,8 @@ class SamplingBatchInfo:
 
 
 class Sampler(nn.Module):
+    """Sampler that completes Topk/Topp sampling for logits"""
+
     def __call__(
         self,
         logits: mx.array,
@@ -102,6 +107,7 @@ def apply_top_k_top_p_min_p_sampling(
     min_ps: mx.array,
     need_min_p_sampling: bool
 ):
+    """Mlx compiled kernel for calculating topk/topp/minp sampling"""
     probs_idx = mx.argsort(-logits, axis=-1)
     probs_sort = mx.take_along_axis(logits, probs_idx, axis=-1)
     probs_sum = mx.cumsum(probs_sort, axis=-1)

@@ -9,7 +9,10 @@ from mlx_lm.sample_utils import apply_min_p, apply_top_k, apply_top_p
 from parallax.server.sampling.sampler import Sampler, SamplingBatchInfo
 
 class TestSampler(unittest.TestCase):
+    """Tests the correctness of topk/topp/minp sampling"""
+
     def test_sampling(self):
+        """Sampling test method"""
         temperatures = mx.array([0.5, 0.95, 1.0], dtype=mx.float32)
         top_ks = mx.array([3, 3, 1], dtype=mx.int32)
         top_ps = mx.array([0.8, 0.9, 1.0], dtype=mx.float32)

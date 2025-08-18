@@ -5,6 +5,8 @@ Sampling parameters of each request
 from typing import Optional, List, Union
 
 class SamplingParams:
+    """Sampling parameter class for a single request"""
+
     def __init__(
         self,
         max_new_tokens: int = 128,
@@ -45,6 +47,7 @@ class SamplingParams:
             self.top_k = 1
 
     def verify(self):
+        """Basic verifications for the sampling parameters"""
         if self.temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negetive, got {self.temperature}."
