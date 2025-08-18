@@ -446,15 +446,19 @@ class Executor:
         """
         # This peer is the last peer or a single node.
         if self.is_last_peer:
+            # Last peer decodes a token and sends it back to the first peer.
+            # The token is wrapped in an IntermediateRequest.
+            # For Single node, it directly returns the token With InitialRequest.
             assert isinstance(
                 request, (InitialRequest, IntermediateRequest)
             ), "Invalid request type for decoding."
             assert hidden_states.dtype == mx.uint32, "Must receive an output_id."
             next_token_id = int(hidden_states[0])
+            # Compatible to GPU tensor load format
             hidden_states = hidden_states.astype(mx.int32)
             return IntermediateRequest(
                 request_id=request.request_id,
-                status=RequestStatus.DECODING,
+                status=RequestStatus.DECODING,  # Last peer and single node always changes status to DECODING
                 current_position=request.total_length + 1,
                 input_ids=request.input_ids,
                 hidden_states=hidden_states,
