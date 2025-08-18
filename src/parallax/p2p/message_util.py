@@ -39,12 +39,10 @@ def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.Forward
     for request in requests:
         proto_req = forward_pb2.Req()
         proto_req.rid = request.request_id
-        proto_req.output_length = request.current_position
+        proto_req.output_length = request.current_position - len(request.input_ids)
         proto_req.input_ids.extend(request.input_ids)
         proto_req.routing_table.extend(request.routing_table)
         forward_request.reqs.append(proto_req)
-        if request.next_token_id is not None:
-            forward_request.next_token_ids.append(request.next_token_id)
 
         # Assert that hidden_states is mlx array
         assert isinstance(
@@ -65,6 +63,9 @@ def request_to_proto(requests: List[IntermediateRequest]) -> forward_pb2.Forward
                 # Add a zero residual for gpu executors
                 residual = mx.zeros(request.hidden_states.shape, dtype=request.hidden_states.dtype)
                 all_residual.append(residual)
+                # Pass the previous token_id to the next peer.
+                if request.next_token_id is not None:
+                    forward_request.next_token_ids.append(request.next_token_id)
 
     # Concatenate all hidden_states into a single tensor if any exist
     if all_hidden_states:
@@ -122,7 +123,7 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
 
     token_index = 0
     for index, proto_req in enumerate(proto_request.reqs):
-        current_position = proto_req.output_length
+        current_position = len(proto_req.input_ids) + proto_req.output_length
 
         current_hidden_states = None
         if status == RequestStatus.PREFILLING:
@@ -145,6 +146,7 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
             request_id=proto_req.rid,
             current_position=current_position,
             status=status,
+            input_ids=list(proto_req.input_ids),
             hidden_states=current_hidden_states,
             routing_table=proto_req.routing_table,
             next_token_id=next_token_id,

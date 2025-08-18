@@ -447,6 +447,8 @@ class Executor:
             ), "Last peer must receive an IntermediateRequest."
             assert hidden_states.dtype == mx.uint32, "Last peer must receive an output_id."
             next_token_id = int(hidden_states[0])
+            # Compatible to GPU tensor load format
+            hidden_states = hidden_states.astype(mx.int32)
             return IntermediateRequest(
                 request_id=request.request_id,
                 status=RequestStatus.DECODING,  # Last peer always changes status to DECODING
