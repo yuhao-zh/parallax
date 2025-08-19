@@ -293,7 +293,7 @@ class Executor:
         return {
             "h_or_tokens": padded_inputs,
             "cache": (k_batched, v_batched) if matched_prefix else None,
-            "lengths": mx.array(actual_lengths),
+            "lengths": mx.array(actual_lengths) if matched_prefix else mx.array(lengths),
             "mask": mask,
             "requests": batched_requests,
         }

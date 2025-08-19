@@ -186,8 +186,14 @@ def create_causal_mask(seq_len: int, total_len: int, dtype=mx.bfloat16) -> mx.ar
     Returns:
         mx.array: A square matrix with -1e9 on the upper triangle (excluding the diagonal).
     """
-    cached_zeros = mx.zeros((seq_len, total_len - seq_len), dtype)
+    assert (
+        total_len >= seq_len
+    ), f"Total lengths {total_len} should be no less than input sequence {seq_len}."
     mask = mx.triu(mx.full((seq_len, seq_len), -1e9, dtype), k=1)
+    if total_len == seq_len:
+        return mask
+    # total lengths is larger than input sequence length
+    cached_zeros = mx.zeros((seq_len, total_len - seq_len), dtype)
     final_mask = mx.concatenate([cached_zeros, mask], axis=1)
     return final_mask
 
