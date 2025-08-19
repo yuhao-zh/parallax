@@ -1,7 +1,7 @@
 # pylint: disable=too-many-locals
 """Utility functions."""
 
-from typing import List, Optional
+from typing import List
 
 import mlx.core as mx
 import numpy as np
@@ -51,6 +51,7 @@ def get_zmq_socket(context: zmq.Context, socket_type: zmq.SocketType, endpoint: 
 
     return socket
 
+
 def pad_prefix_caches(
     cache: List, input_lengths: List, dtype: mx.Dtype = mx.bfloat16
 ) -> tuple[mx.array, mx.array]:
@@ -91,6 +92,7 @@ def pad_prefix_caches(
     padded_batch = mx.stack(padded_tensors, axis=0)
     attention_mask = mx.array(k_masks, dtype=dtype)[:, None, None, :]
     return padded_batch, attention_mask
+
 
 def pad_inputs(
     pad_value: int, inputs: List, dtype: mx.Dtype = mx.bfloat16

@@ -273,8 +273,11 @@ class KVCacheManager:
                 key[..., :length, :], value[..., :length, :]
             )
         return True
-    
-    def add_matched_prefix_request(self, request: Request, key: mx.array, value: mx.array, length: int):
+
+    def add_matched_prefix_request(
+        self, request: Request, key: mx.array, value: mx.array, length: int
+    ):
+        """If a request matches prefix, add it back to the running kv-cache manager"""
         assert self.has_request(request.request_id), "request not in cache"
         if self.tokens_in_cache + self.round_up_to_step(length) > self.max_num_tokens:
             logger.warning(

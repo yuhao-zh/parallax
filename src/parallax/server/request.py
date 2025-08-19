@@ -103,7 +103,6 @@ class Request:
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
         self.prompt_len = prompt_len
-        self.input_ids = input_ids
         self.output_ids = output_ids or []
         self.input_ids = input_ids or []
         self.routing_table = routing_table
@@ -276,7 +275,6 @@ class IntermediateRequest(Request):
             raise ValueError(f"hidden_states cannot be None for unfinished request {request_id}.")
 
         self.current_position = current_position
-        self.input_ids = input_ids
         self.hidden_states = hidden_states
         self.next_token_id = next_token_id
         self.sampling_params = sampling_params
@@ -323,7 +321,6 @@ class IntermediateRequest(Request):
             input_ids=initial_request.input_ids,
             next_token_id=next_token_id,
             current_position=initial_request.total_length,
-            input_ids=initial_request.input_ids,
             hidden_states=hidden_states,
         )
 

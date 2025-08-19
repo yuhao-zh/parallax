@@ -128,7 +128,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--disable-prefix-cache", action="store_true", help="Disable prefix cache reuse"
+        "--enable-prefix-cache", action="store_true", help="Enable prefix cache reuse"
     )
 
     # Scheduler configuration

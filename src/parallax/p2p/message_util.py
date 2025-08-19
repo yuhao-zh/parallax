@@ -145,7 +145,6 @@ def proto_to_request(proto_request: forward_pb2.ForwardRequest) -> List[Intermed
         request = IntermediateRequest(
             request_id=proto_req.rid,
             current_position=current_position,
-            input_ids=list(proto_req.input_ids),
             status=status,
             input_ids=list(proto_req.input_ids),
             hidden_states=current_hidden_states,
