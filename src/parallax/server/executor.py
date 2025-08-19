@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
 import zmq
+from mlx_lm.server import convert_chat, process_message_content
 
 from parallax.p2p.message_util import proto_to_request, request_to_proto
 from parallax.p2p.proto import forward_pb2
@@ -35,6 +36,8 @@ from parallax.server.request import (
     Request,
     RequestStatus,
 )
+from parallax.server.sampling.sampler import SamplingBatchInfo
+from parallax.server.sampling.sampling_params import SamplingParams
 from parallax.server.scheduler import Scheduler
 from parallax.server.shard_loader import MLXModelLoader
 from parallax.utils.logging_config import get_logger
@@ -71,8 +74,12 @@ class Executor:
         kv_max_tokens_in_cache: Optional[int] = None,
         disable_prefix_cache: Optional[bool] = False,
         # Communication Configs
+        # P2P Communication Configs
         send_to_peer_addr: Optional[str] = None,
         recv_from_peer_addr: Optional[str] = None,
+        # IPC Communication Configs
+        executor_input_ipc_addr: Optional[str] = None,
+        executor_output_ipc_addr: Optional[str] = None,
     ):
         # Sharded Model
         self.shard_loader = MLXModelLoader(model_repo, start_layer=start_layer, end_layer=end_layer)
@@ -142,11 +149,34 @@ class Executor:
             self.send_to_peer_socket = get_zmq_socket(
                 self.zmq_context, zmq.PUSH, send_to_peer_addr, bind=False
             )
+        if executor_input_ipc_addr:
+            self.recv_from_ipc_socket = get_zmq_socket(
+                self.zmq_context, zmq.PULL, executor_input_ipc_addr, bind=False
+            )
+        if executor_output_ipc_addr:
+            self.send_to_ipc_socket = get_zmq_socket(
+                self.zmq_context, zmq.PUSH, executor_output_ipc_addr, bind=False
+            )
 
     @classmethod
     def create_from_args(cls, args: argparse.Namespace):
         """Create executor from command line arguments."""
         return cls(**create_executor_config(args))
+
+    def recv_requests_from_http(self) -> List[Request]:
+        """Receives requests from http frontend"""
+        recv_reqs = []
+        while True:
+            try:
+                raw_request = self.recv_from_ipc_socket.recv_pyobj(zmq.NOBLOCK)
+                # Do tokenization and form InitialRequest
+                req = self._handle_raw_request(raw_request)
+                recv_reqs.append(req)
+            except zmq.ZMQError:
+                break
+            except Exception as e:
+                logger.exception(f"Error receiving http request: {e}")
+        return recv_reqs
 
     def recv_requests_from_peer(self) -> List[Request]:
         """Receives requests from the RPC server."""
@@ -193,8 +223,10 @@ class Executor:
         matched_prefix = False
         for req in batched_requests:
             assert req.is_prefill, f"Request {req.request_id} is not a prefill request."
-            if isinstance(req, InitialRequest):
-                assert (self.is_first_peer), f"Request {req.request_id} should be in FirstPeer."
+            if self.is_first_peer:
+                assert hasattr(
+                    req, "input_ids"
+                ), f"Request {req.request_id} should has attribute input_ids in FirstPeer."
                 h.append(req.input_ids)
             else:
                 assert isinstance(
@@ -340,6 +372,45 @@ class Executor:
             "decode_batch": decode_batch,
         }
 
+    def _handle_raw_request(self, raw_request: Dict):
+        assert "messages" in raw_request, "Request did not contain messages"
+
+        rid = raw_request["rid"]
+        if self.tokenizer.chat_template:
+            messages = raw_request["messages"]
+            process_message_content(messages)
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                raw_request.get("tools") or None,
+                add_generation_prompt=True,
+                # **self.model_provider.cli_args.chat_template_args,  # TODO: add chat template
+            )
+        else:
+            prompt = convert_chat(raw_request["messages"], raw_request.get("role_mapping"))
+            prompt = self.tokenizer.encode(prompt)
+
+        max_new_tokens = raw_request.get("max_tokens")
+        if max_new_tokens is None:
+            max_new_tokens = 2048
+        max_total_length = len(prompt) + max_new_tokens
+
+        raw_sampling_params = raw_request.get("sampling_params")
+        if raw_sampling_params is None:
+            sampling_params = SamplingParams()
+        else:
+            # TODO
+            sampling_params = SamplingParams()
+
+        req = InitialRequest(
+            request_id=rid,
+            output_ids=None,
+            input_ids=prompt,
+            sampling_params=sampling_params,
+            max_new_tokens=max_new_tokens,
+            max_total_length=max_total_length,
+        )
+        return req
+
     def _handle_input_requests(self, requests: List[Request]):
         """Update requests states and status in scheduler and cache manager."""
         if not requests:
@@ -364,9 +435,19 @@ class Executor:
                             f"Recieved Request {req.request_id} should be in cache manager"
                         )
 
-                    assert req.hidden_states is not None
-                    token_id = int(req.hidden_states[0])
-                    original_req.commit_new_token(token_id)
+                    assert req.next_token_id is not None
+                    original_req.commit_new_token(req.next_token_id)
+
+                    # detokenize and send to http server
+                    cur_text = self.tokenizer.decode(req.next_token_id)
+                    req_dict = {
+                        "output": cur_text,
+                        "rid": req.request_id,
+                    }
+                    if req.next_token_id == self.tokenizer.eos_token_id:
+                        req_dict["eos"] = True
+                    if hasattr(self, "send_to_ipc_socket"):
+                        self.send_to_ipc_socket.send_pyobj(req_dict)
 
                     # Check for termination.
                     if self.scheduler.check_and_update_request_status(original_req):
@@ -420,12 +501,16 @@ class Executor:
                 request, IntermediateRequest
             ), "Last peer must receive an IntermediateRequest."
             assert hidden_states.dtype == mx.uint32, "Last peer must receive an output_id."
+            next_token_id = int(hidden_states[0])
+            # Compatible to GPU tensor load format
+            hidden_states = hidden_states.astype(mx.int32)
             return IntermediateRequest(
                 request_id=request.request_id,
                 status=RequestStatus.DECODING,  # Last peer always changes status to DECODING
                 current_position=request.total_length + 1,
                 input_ids=request.input_ids,
                 hidden_states=hidden_states,
+                next_token_id=next_token_id,
                 routing_table=request.routing_table,
             )
 
@@ -510,7 +595,10 @@ class Executor:
 
         # Process last peer: need additional sampling + detokenization
         if return_decoded_tokens:
-            return mx.array(self.model_shard.logits_to_tokens(hidden_states, lengths))
+            sampling_info = SamplingBatchInfo.from_reqs(requests)
+            return mx.array(
+                self.model_shard.logits_to_tokens(hidden_states, lengths, sampling_info)
+            )
 
         return hidden_states
 
@@ -522,21 +610,27 @@ class Executor:
         )
         mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
         while True:
-            # 1. Ingest new requests from the RPC server
+            # 1. Ingest new requests from the http frontend
+            if self.is_first_peer:
+                time.sleep(0.1)
+                http_requests = self.recv_requests_from_http()
+                self._handle_input_requests(http_requests)
+
+            # 2. Ingest new requests from the RPC server
             incoming_requests = self.recv_requests_from_peer()
             self._handle_input_requests(incoming_requests)
 
-            # 2. Check if we should form a batch
+            # 3. Check if we should form a batch
             if not self.scheduler.should_dispatch():
                 time.sleep(0.01)  # prevent busy waiting
                 continue
 
-            # 3. Form a batch from the scheduler's queue
+            # 4. Form a batch from the scheduler's queue
             batch_to_process = self.scheduler.form_batch()
             if not batch_to_process:
                 continue
 
-            # 4. Process the batch
+            # 5. Process the batch
             try:
                 prepared_inputs_dict = self._prepare_batch_inputs(batch_to_process)
 
@@ -549,14 +643,14 @@ class Executor:
                         output = self.process_batch(
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
                         )
-                        # 5. Prepare requests for the next stage in the pipeline
+                        # 6. Prepare requests for the next stage in the pipeline
                         next_batch = self._prepare_next_batch_requests(
                             requests=prepared_inputs["requests"],
                             hidden_states=output,
                             lengths=prepared_inputs["lengths"],
                         )
 
-                        # 6. Dispatch to the appropriate destination
+                        # 7. Dispatch to the appropriate destination
                         if self.is_last_peer and self.is_first_peer:
                             # Single node: handle locally
                             self._handle_input_requests(next_batch)
@@ -585,6 +679,8 @@ class Executor:
         logger.info("Executor shutting down...")
         self.recv_from_peer_socket.close()
         self.send_to_peer_socket.close()
+        self.recv_from_ipc_socket.close()
+        self.send_to_ipc_socket.close()
         self.zmq_context.term()
         logger.info("Executor shutdown complete.")
 
@@ -608,5 +704,7 @@ def create_executor_config(args):
         "scheduler_wait_ms": args.scheduler_wait_ms,
         "send_to_peer_addr": getattr(args, "send_to_peer_addr", None),
         "recv_from_peer_addr": getattr(args, "recv_from_peer_addr", None),
+        "executor_input_ipc_addr": args.executor_input_ipc,
+        "executor_output_ipc_addr": args.executor_output_ipc,
     }
     return config

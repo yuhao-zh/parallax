@@ -9,6 +9,7 @@ import mlx.core as mx
 from mlx import nn
 from mlx_lm.models.base import BaseModelArgs
 
+from parallax.server.sampling.sampler import Sampler, SamplingBatchInfo
 from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -57,7 +58,9 @@ class ShardedModel(nn.Module):
             self.embed_tokens = None
             self.norm_in = None
 
-        self.layers = [block_class(config, layer_idx) for layer_idx in range(start_layer, end_layer)]
+        self.layers = [
+            block_class(config, layer_idx) for layer_idx in range(start_layer, end_layer)
+        ]
 
         if self.is_last_shard:
             self.norm = nn.RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
@@ -66,12 +69,18 @@ class ShardedModel(nn.Module):
             self.norm = None
             self.lm_head = None
 
-    def logits_to_tokens(self, logits: mx.array, lengths: Optional[mx.array] = None) -> mx.array:
+    def logits_to_tokens(
+        self,
+        logits: mx.array,
+        lengths: Optional[mx.array] = None,
+        sampling_info: Optional[SamplingBatchInfo] = None,
+    ) -> mx.array:
         """Convert logits to token IDs with greedy decoding.
 
         Args:
             logits: (batch, target_len_padded, vocab_size), logits from final lm_head
             lengths: (batch,), int array of true lengths
+            sampling_info: sampling info of the batched requests
 
         Return:
             Generated tokens of shape (batch,).
@@ -91,7 +100,11 @@ class ShardedModel(nn.Module):
             last_token_logits = logits[:, -1, :]
 
         # last_token_logits now has shape (batch_size, vocab_size)
-        next_token_ids = mx.argmax(last_token_logits, axis=-1)
+        if sampling_info is None:
+            next_token_ids = mx.argmax(last_token_logits, axis=-1)
+        else:
+            sampler = Sampler()
+            next_token_ids = sampler(last_token_logits, sampling_info)
         return next_token_ids
 
     def __call__(

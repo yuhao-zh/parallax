@@ -406,9 +406,9 @@ class GradientServer:
                             value={
                                 "block_end_index": self.block_end_index,
                             },
-                            expiration_time=time.time() + 60 * 60,  # Valid for 60 seconds
+                            expiration_time=time.time() + 60,  # Valid for 60 seconds
                         )
-                        logger.info(f"Announced {self.node_id} on DHT")
+                        # logger.info(f"Announced {self.node_id} on DHT")
                     except Exception as e:
                         logger.warning(f"Failed to announce {self.node_id}: {e}")
 

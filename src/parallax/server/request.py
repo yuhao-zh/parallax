@@ -67,6 +67,7 @@ from typing import List, Optional
 
 import mlx.core as mx
 
+from parallax.server.sampling.sampling_params import SamplingParams
 from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -97,13 +98,16 @@ class Request:
         input_ids: Optional[List[int]] = None,
         output_ids: Optional[List[int]] = None,
         routing_table: Optional[List[str]] = [],
+        sampling_params: Optional[SamplingParams] = None,
     ):
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
         self.prompt_len = prompt_len
         self.input_ids = input_ids
         self.output_ids = output_ids or []
+        self.input_ids = input_ids or []
         self.routing_table = routing_table
+        self.sampling_params = sampling_params
 
     @property
     def is_finished(self) -> bool:
@@ -149,6 +153,7 @@ class InitialRequest(Request):
         request_id: Optional[str] = None,
         output_ids: Optional[List[int]] = None,
         input_ids: Optional[List[int]] = None,
+        sampling_params: Optional[SamplingParams] = None,
         max_new_tokens: int = 512,
         max_total_length: int = 1024,
         status: RequestStatus = RequestStatus.PREFILLING,
@@ -156,10 +161,12 @@ class InitialRequest(Request):
         if not prompt and not input_ids:
             raise ValueError("prompt or input_ids cannot be empty.")
         super().__init__(
-            request_id=request_id, status=status, prompt_len=len(input_ids) if input_ids else 0
+            request_id=request_id,
+            status=status,
+            prompt_len=len(input_ids) if input_ids else 0,
+            input_ids=input_ids,
         )
         self.prompt = prompt
-        self.input_ids = input_ids
 
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be at least 1.")
@@ -167,6 +174,7 @@ class InitialRequest(Request):
         self.max_total_length = max_total_length
         self.output_ids = output_ids or []
         self.hidden_states = None
+        self.sampling_params = sampling_params
 
         if len(self.output_ids) > 0 and self.status == RequestStatus.PREFILLING:
             raise ValueError(f"Cannot initialize with output_ids given {self.status}.")
@@ -250,8 +258,14 @@ class IntermediateRequest(Request):
         hidden_states: Optional[mx.array] = None,
         next_token_id: Optional[int] = None,
         routing_table: Optional[List[str]] = [],
+        sampling_params: Optional[SamplingParams] = None,
     ):
-        super().__init__(request_id=request_id, status=status, routing_table=routing_table)
+        super().__init__(
+            request_id=request_id,
+            status=status,
+            routing_table=routing_table,
+            input_ids=input_ids,
+        )
         # Hidden states from the previous peer's computation.
         # Shape:
         #   prefill: (prompt_len, hidden_dim)
@@ -265,6 +279,7 @@ class IntermediateRequest(Request):
         self.input_ids = input_ids
         self.hidden_states = hidden_states
         self.next_token_id = next_token_id
+        self.sampling_params = sampling_params
 
     @property
     def input_length(self) -> int:
@@ -297,10 +312,16 @@ class IntermediateRequest(Request):
         """
         if hidden_states is None:
             assert initial_request.is_finished, "Hidden states can't be None for unfinished request"
+        if initial_request.output_ids is None or len(initial_request.output_ids) == 0:
+            next_token_id = None
+        else:
+            next_token_id = initial_request.output_ids[-1]
 
         return IntermediateRequest(
             request_id=initial_request.request_id,
             status=initial_request.status,
+            input_ids=initial_request.input_ids,
+            next_token_id=next_token_id,
             current_position=initial_request.total_length,
             input_ids=initial_request.input_ids,
             hidden_states=hidden_states,

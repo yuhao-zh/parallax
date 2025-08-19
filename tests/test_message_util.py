@@ -47,13 +47,15 @@ class TestMessageUtil:
         assert proto_req.rid == self.request_id
         assert proto_req.output_length == self.current_position
 
-        # Verify hidden_states are in pp_proxy_tensors
-        assert len(forward_request.pp_proxy_tensors.tensors) == 1
-        named_tensor = forward_request.pp_proxy_tensors.tensors[0]
-        assert named_tensor.name == "hidden_states"
+        # Verify hidden_states and residual(0) are in pp_proxy_tensors
+        assert len(forward_request.pp_proxy_tensors.tensors) == 2
+        hidden_tensor = forward_request.pp_proxy_tensors.tensors[0]
+        assert hidden_tensor.name == "hidden_states"
+        residual_tensor = forward_request.pp_proxy_tensors.tensors[1]
+        assert residual_tensor.name == "residual"
 
         # Verify tensor data - safetensor contains shape and dtype info
-        tensor = named_tensor.tensor
+        tensor = hidden_tensor.tensor
         # Safetensor format doesn't set size and dtype in protobuf
         assert len(tensor.size) == 0  # size not set in safetensor format
         assert tensor.dtype == ""  # dtype not set in safetensor format
@@ -108,13 +110,15 @@ class TestMessageUtil:
         assert proto_req.rid == self.request_id
         assert proto_req.output_length == self.current_position
 
-        # Verify hidden_states are in pp_proxy_tensors
-        assert len(forward_request.pp_proxy_tensors.tensors) == 1
-        named_tensor = forward_request.pp_proxy_tensors.tensors[0]
-        assert named_tensor.name == "hidden_states"
+        # Verify hidden_states and residual(0) are in pp_proxy_tensors
+        assert len(forward_request.pp_proxy_tensors.tensors) == 2
+        hidden_tensor = forward_request.pp_proxy_tensors.tensors[0]
+        assert hidden_tensor.name == "hidden_states"
+        residual_tensor = forward_request.pp_proxy_tensors.tensors[1]
+        assert residual_tensor.name == "residual"
 
         # Verify tensor data - safetensor contains shape and dtype info
-        tensor = named_tensor.tensor
+        tensor = hidden_tensor.tensor
         # Safetensor format doesn't set size and dtype in protobuf
         assert len(tensor.size) == 0  # size not set in safetensor format
         assert tensor.dtype == ""  # dtype not set in safetensor format
@@ -171,12 +175,14 @@ class TestMessageUtil:
         assert len(forward_request.reqs) == 3
 
         # Verify that there's only one concatenated hidden_states tensor
-        assert len(forward_request.pp_proxy_tensors.tensors) == 1
-        named_tensor = forward_request.pp_proxy_tensors.tensors[0]
-        assert named_tensor.name == "hidden_states"
+        assert len(forward_request.pp_proxy_tensors.tensors) == 2
+        hidden_tensor = forward_request.pp_proxy_tensors.tensors[0]
+        assert hidden_tensor.name == "hidden_states"
+        residual_tensor = forward_request.pp_proxy_tensors.tensors[1]
+        assert residual_tensor.name == "residual"
 
         # Convert back to MLX tensor and verify concatenation
-        concatenated_tensor = proto_to_tensor(named_tensor.tensor)
+        concatenated_tensor = proto_to_tensor(hidden_tensor.tensor)
 
         # Expected concatenated tensor should be: [[1,2], [3,4], [5,6], [7,8], [9,10]]
         expected_concatenated = mx.concatenate(
@@ -208,6 +214,7 @@ class TestMessageUtil:
         original_request = IntermediateRequest(
             request_id=self.request_id,
             current_position=self.current_position,
+            input_ids=[1, 2],
             status=RequestStatus.PREFILLING,
             hidden_states=hidden_states,
         )
@@ -235,6 +242,7 @@ class TestMessageUtil:
         original_request = IntermediateRequest(
             request_id=self.request_id,
             current_position=self.current_position,
+            input_ids=[42],
             status=RequestStatus.DECODING,
             hidden_states=hidden_states,
         )
