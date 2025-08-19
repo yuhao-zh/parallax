@@ -463,10 +463,10 @@ class Executor:
                 input_ids=request.input_ids,
                 hidden_states=hidden_states,
                 next_token_id=next_token_id,
-                routing_table=getattr(request, "routing_table", None),
+                routing_table=request.routing_table,
             )
 
-        # This peer is the first or an intermediate peer.
+        # This peer is the first peer.
         if self.is_first_peer:
             assert isinstance(request, InitialRequest), "First peer must process an InitialRequest."
             if request.is_finished:
