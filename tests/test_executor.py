@@ -14,7 +14,7 @@ from parallax.server.request import InitialRequest
 
 MODEL_REPO = "mlx-community/Qwen3-0.6B-bf16"
 
-model_path = get_model_path(MODEL_REPO)
+model_path = get_model_path(MODEL_REPO)[0]
 ref_model, ref_config = load_model(model_path)
 ref_tokenizer = load_tokenizer(model_path, eos_token_ids=ref_config.get("eos_token_id", None))
 

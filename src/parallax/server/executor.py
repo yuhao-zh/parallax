@@ -386,13 +386,18 @@ class Executor:
                     assert req.next_token_id is not None
                     original_req.commit_new_token(req.next_token_id)
 
+                    will_exceed_limit = (
+                        original_req.output_length + 1 >= original_req.max_new_tokens
+                        or original_req.total_length + 1 >= original_req.max_total_length
+                    )
+
                     # detokenize and send to http server
                     cur_text = self.tokenizer.decode(req.next_token_id)
                     req_dict = {
                         "output": cur_text,
                         "rid": req.request_id,
                     }
-                    if req.next_token_id == self.tokenizer.eos_token_id:
+                    if req.next_token_id == self.tokenizer.eos_token_id or will_exceed_limit:
                         req_dict["eos"] = True
                     if hasattr(self, "send_to_ipc_socket"):
                         self.send_to_ipc_socket.send_pyobj(req_dict)
@@ -439,6 +444,23 @@ class Executor:
         Returns:
             A new Request object ready to be sent to the next destination.
         """
+        # This peer is the last peer or a single node.
+        if self.is_last_peer and self.is_first_peer:
+            assert isinstance(
+                request, (InitialRequest, IntermediateRequest)
+            ), "Invalid request type for decoding."
+            assert hidden_states.dtype == mx.uint32, "Must receive an output_id."
+            next_token_id = int(hidden_states[0])
+            hidden_states = hidden_states.astype(mx.int32)
+            return IntermediateRequest(
+                request_id=request.request_id,
+                status=RequestStatus.DECODING,
+                current_position=request.total_length + 1,
+                input_ids=request.input_ids,
+                hidden_states=hidden_states,
+                next_token_id=next_token_id,
+                routing_table=request.routing_table,
+            )
         if self.is_last_peer:
             # Last peer decodes a token and sends it back to the first peer.
             # The token is wrapped in an IntermediateRequest.
@@ -458,7 +480,6 @@ class Executor:
                 next_token_id=next_token_id,
                 routing_table=request.routing_table,
             )
-
         # This peer is the first or an intermediate peer.
         if self.is_first_peer:
             assert isinstance(request, InitialRequest), "First peer must process an InitialRequest."
