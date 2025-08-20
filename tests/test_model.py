@@ -18,7 +18,7 @@ REPO_ID = "mlx-community/Qwen3-0.6B-bf16"
 TOTAL_LAYERS = 28
 
 
-model_path = get_model_path(REPO_ID)
+model_path, _ = get_model_path(REPO_ID)
 ref_model, ref_config = load_model(model_path)
 ref_tokenizer = load_tokenizer(model_path, eos_token_ids=ref_config.get("eos_token_id", None))
 
