@@ -3,7 +3,6 @@
 Unit tests for the Executor class, using Qwen3-0.6B-bf16.
 """
 
-import mlx.core as mx
 import pytest
 from mlx_lm.generate import generate
 from mlx_lm.tokenizer_utils import load_tokenizer
@@ -29,14 +28,14 @@ def test_decode_pipeline_multiple_steps(start_layer, end_layer, num_decode_steps
         start_layer=start_layer,
         end_layer=end_layer,
         kv_cache_memory_fraction=0.1,
-        dtype=mx.bfloat16,
+        dtype="bfloat16",
     )
     executor_peer2 = Executor(
         model_repo=MODEL_REPO,
         start_layer=end_layer,
         end_layer=ref_config.get("num_hidden_layers"),
         kv_cache_memory_fraction=0.1,
-        dtype=mx.bfloat16,
+        dtype="bfloat16",
     )
 
     # 2. Setup initial requests for multiple prompts

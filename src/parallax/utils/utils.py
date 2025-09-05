@@ -6,7 +6,48 @@ from typing import List
 import mlx.core as mx
 import numpy as np
 import psutil
+import torch
 import zmq
+
+
+def is_cuda_available():
+    """Check backend supports cuda"""
+    return torch.cuda.is_available()
+
+
+def is_mps_available():
+    """Check backend supports mps"""
+    return torch.mps.is_available()
+
+
+def get_current_device():
+    """
+    Returns the backend device name.
+    Parallax currently supports cuda, mlx, cpu
+    """
+    device = "cpu"
+    if is_cuda_available():
+        device = "cuda"
+    if is_mps_available():
+        device = "mlx"
+    return device
+
+
+def get_device_dtype(dtype_str: str, device: str):
+    """Gets the real data type according to current device"""
+    if device == "cuda":
+        dtype_map = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }
+    else:
+        dtype_map = {
+            "float16": mx.float16,
+            "bfloat16": mx.bfloat16,
+            "float32": mx.float32,
+        }
+    return dtype_map[dtype_str]
 
 
 def get_zmq_socket(context: zmq.Context, socket_type: zmq.SocketType, endpoint: str, bind: bool):

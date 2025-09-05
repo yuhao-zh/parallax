@@ -282,7 +282,7 @@ class GradientServer:
                             logger.info(f"Set routing table: {routing_table}")
                             # exit when routing table is set as our node is static right now.
                             # TODO: remove this when we have dynamic node
-                            break
+                            # break
                     except dijkstar.NoPathError:
                         self.routing_table = None
                         logger.warning(

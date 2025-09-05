@@ -12,6 +12,8 @@ requires-python = ">=3.8"
 
 dependencies = [
   "mlx-lm==0.26.3",
+  "torch==2.8.0",
+  "sglang==0.4.10.post2",
   "msgpack>=1.0.7",
   "safetensors>=0.5.1",
   "numpy>=1.26",
