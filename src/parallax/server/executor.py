@@ -1,4 +1,4 @@
-# pylint: disable=too-many-locals,too-few-public-methods,too-many-statements,too-many-branches, broad-exception-caught, pointless-string-statement
+# pylint: disable=too-many-locals,too-few-public-methods,too-many-statements,too-many-branches, broad-exception-caught, pointless-string-statement, import-outside-toplevel
 """
 High-level executor for managing model shards, scheduler, and cache pool on each Peer.
 
@@ -23,10 +23,16 @@ import time
 from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
+import torch
 import zmq
 from mlx_lm.server import convert_chat, process_message_content
 
-from parallax.p2p.message_util import proto_to_request, request_to_proto
+from parallax.p2p.message_util import (
+    abort_request_to_proto,
+    proto_to_abort_request,
+    proto_to_request,
+    request_to_proto,
+)
 from parallax.p2p.proto import forward_pb2
 from parallax.server.kv_cache import KVCacheManager
 from parallax.server.radix_cache import RadixCache
@@ -44,6 +50,8 @@ from parallax.utils.logging_config import get_logger
 from parallax.utils.utils import (
     combine_padding_and_causal_masks,
     create_causal_mask,
+    get_current_device,
+    get_device_dtype,
     get_zmq_socket,
     pad_inputs,
     pad_prefix_caches,
@@ -61,7 +69,7 @@ class Executor:
         model_repo: str,
         start_layer: int,
         end_layer: int,
-        dtype: mx.Dtype = mx.float16,
+        dtype: str = "float16",
         # Scheduler Configs
         max_batch_size: int = 16,
         max_num_tokens_in_batch: int = 1024,
@@ -80,18 +88,44 @@ class Executor:
         # IPC Communication Configs
         executor_input_ipc_addr: Optional[str] = None,
         executor_output_ipc_addr: Optional[str] = None,
+        # GPU/SGLang Specialized Configs
+        attention_backend: Optional[str] = "torch_native",
     ):
-        # Sharded Model
-        self.shard_loader = MLXModelLoader(model_repo, start_layer=start_layer, end_layer=end_layer)
-        self.model_shard, self.config, self.tokenizer = self.shard_loader.load()
+        # Backend
+        self.device = get_current_device()
 
+        # Sharded Model
+        if self.device == "cuda":
+            from sglang.srt.managers.schedule_batch import ScheduleBatch
+
+            from parallax.sglang.model_runner import initialize_sgl_model_runner
+
+            self.model_runner, self.config, self.tokenizer = initialize_sgl_model_runner(
+                model_repo,
+                start_layer,
+                end_layer,
+                kv_cache_memory_fraction,
+                attention_backend,
+                kv_block_size,
+            )
+            # SGL KV Cache Manager is already initialized in ScheduleBatch
+            # TODO: Replace ScheduleBatch to Parallax inflight batch
+            self.running_batch = ScheduleBatch(reqs=[], batch_is_full=False)
+            self.cur_batch = None
+        else:
+            self.shard_loader = MLXModelLoader(
+                model_repo, start_layer=start_layer, end_layer=end_layer
+            )
+            self.model_shard, self.config, self.tokenizer = self.shard_loader.load()
+
+        self.finished_batch = []
         self.start_layer = start_layer
         self.end_layer = end_layer
         self.is_first_peer = start_layer == 0
         self.is_last_peer = end_layer == self.config.get("num_hidden_layers")
         self.num_shard_layers = end_layer - start_layer
 
-        self.dtype = dtype
+        self.dtype = get_device_dtype(dtype, self.device)
         self.num_key_value_heads = self.config.get("num_key_value_heads")
         self.head_dim = self.config.get("head_dim") or self.config.get(
             "hidden_size"
@@ -118,16 +152,18 @@ class Executor:
             tokenizer=self.tokenizer,
         )
 
-        # KV Cache Manager
-        self.kv_cache_manager = KVCacheManager(
-            block_size=kv_block_size,
-            num_kv_heads=self.num_key_value_heads,
-            head_dim=self.head_dim,
-            num_layers=self.num_shard_layers,
-            dtype=self.dtype,
-            cache_memory_fraction=kv_cache_memory_fraction,
-            max_num_tokens=kv_max_tokens_in_cache,
-        )
+        if self.device == "mlx":
+            # Other setup for MAC
+            self.kv_cache_manager = KVCacheManager(
+                block_size=kv_block_size,
+                num_kv_heads=self.num_key_value_heads,
+                head_dim=self.head_dim,
+                num_layers=self.num_shard_layers,
+                dtype=self.dtype,
+                cache_memory_fraction=kv_cache_memory_fraction,
+                max_num_tokens=kv_max_tokens_in_cache,
+            )
+            mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
 
         # Prefix Cache Manager
         self.prefix_cache = RadixCache(
@@ -188,11 +224,13 @@ class Executor:
                     # Create a new ForwardRequest instance and parse from bytes
                     forward_request = forward_pb2.ForwardRequest()
                     forward_request.ParseFromString(recv_req[1])
-                    recv_req = proto_to_request(forward_request)
+                    recv_req = proto_to_request(forward_request, self.device)
                     recv_reqs.extend(recv_req)
                 elif recv_req[0] == b"abort":
-                    # TODO: handle abort request
-                    pass
+                    abort_request = forward_pb2.AbortRequest()
+                    abort_request.ParseFromString(recv_req[1])
+                    recv_req = proto_to_abort_request(abort_request)
+                    recv_reqs.extend(recv_req)
                 else:
                     raise ValueError(f"Unknown request type: {recv_req[0]}")
                 # First peer is responsible for tokenization
@@ -209,7 +247,105 @@ class Executor:
                 logger.exception(f"Error receiving or deserializing request: {e}")
         return recv_reqs
 
-    def _prepare_prefill_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
+    def _prepare_cuda_prefill_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
+        """
+        Prepares inputs for SGLang model runner from a batch of prefill requests.
+        Returns: SGLang ScheduleBatch
+        """
+        from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
+
+        from parallax.sglang.batch_info import form_sgl_batch_prefill
+
+        batch_size = len(batched_requests)
+        if batch_size == 0:
+            return None
+        schedule_batch, forward_batch = form_sgl_batch_prefill(batched_requests, self.model_runner)
+        self.cur_batch = schedule_batch
+
+        pp_proxy_tensors = None
+        if not self.is_first_peer:
+            hidden_states = torch.cat(
+                [
+                    (
+                        req.hidden_states
+                        if req.hidden_states.ndim == 2
+                        else req.hidden_states.unsqueeze(0)
+                    )
+                    for req in batched_requests
+                ],
+                dim=0,
+            )
+            residual = torch.zeros(
+                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
+            )
+            pp_proxy_tensors = PPProxyTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                }
+            )
+        lengths = []
+        for req in batched_requests:
+            lengths.append(req.total_length)
+        return {
+            "forward_batch": forward_batch,
+            "pp_proxy_tensors": pp_proxy_tensors,
+            "lengths": torch.tensor(lengths, device=self.device),
+            "requests": batched_requests,
+        }
+
+    def _prepare_cuda_decode_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
+        """
+        Prepares inputs for SGLang model runner from a batch of decode requests.
+        Returns: SGLang ScheduleBatch
+        """
+        from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
+
+        from parallax.sglang.batch_info import form_sgl_batch_decode
+
+        batch_size = len(batched_requests)
+        if batch_size == 0:
+            return None
+
+        lengths = []
+        for req in batched_requests:
+            lengths.append(req.total_length)
+        forward_batch = form_sgl_batch_decode(
+            batched_requests,
+            self.model_runner,
+            self.running_batch,
+            self.is_first_peer,
+        )
+        pp_proxy_tensors = None
+        if not self.is_first_peer:
+            hidden_states = torch.cat(
+                [
+                    (
+                        req.hidden_states
+                        if req.hidden_states.ndim == 2
+                        else req.hidden_states.unsqueeze(0)
+                    )
+                    for req in batched_requests
+                ],
+                dim=0,
+            )
+            residual = torch.zeros(
+                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
+            )
+            pp_proxy_tensors = PPProxyTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                }
+            )
+        return {
+            "forward_batch": forward_batch,
+            "pp_proxy_tensors": pp_proxy_tensors,
+            "lengths": torch.tensor(lengths, device=self.device),
+            "requests": batched_requests,
+        }
+
+    def _prepare_mlx_prefill_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
         """Prepares inputs for ShardedModel from a batch of prefill requests."""
         batch_size = len(batched_requests)
         if batch_size == 0:
@@ -298,7 +434,9 @@ class Executor:
             "requests": batched_requests,
         }
 
-    def _prepare_decode_batch(self, batched_requests: List[Request]) -> Optional[Dict[str, Any]]:
+    def _prepare_mlx_decode_batch(
+        self, batched_requests: List[Request]
+    ) -> Optional[Dict[str, Any]]:
         """Prepares inputs for ShardedModel from a batch of decode requests."""
         batch_size = len(batched_requests)
         if batch_size == 0:
@@ -379,8 +517,12 @@ class Executor:
                 prefill_reqs.append(req)
             elif req.is_decoding:
                 decode_reqs.append(req)
-        prefill_batch = self._prepare_prefill_batch(prefill_reqs)
-        decode_batch = self._prepare_decode_batch(decode_reqs)
+        if self.device == "cuda":
+            prefill_batch = self._prepare_cuda_prefill_batch(prefill_reqs)
+            decode_batch = self._prepare_cuda_decode_batch(decode_reqs)
+        else:
+            prefill_batch = self._prepare_mlx_prefill_batch(prefill_reqs)
+            decode_batch = self._prepare_mlx_decode_batch(decode_reqs)
         if prefill_batch is None and decode_batch is None:
             return None
         return {
@@ -427,9 +569,72 @@ class Executor:
         )
         return req
 
+    def _handle_cuda_input_requests(self, requests: List[Request]):
+        """
+        Cuda specialized handle function.
+        The main difference is to remove all the kv cache operations.
+        """
+        from parallax.sglang.batch_info import release_cuda_request
+
+        if self.is_first_peer:
+            # First peer can receive InitialRequests from the client RPC,
+            # or IntermediateRequests from the last peer.
+            for req in requests:
+                if isinstance(req, InitialRequest):
+                    self.scheduler.enque_request(req)
+                elif isinstance(req, IntermediateRequest):
+                    original_req = self.scheduler.get_running_request(req.request_id)
+                    if original_req is None:
+                        raise ValueError(
+                            f"Recieved Request {req.request_id} should be in request pool"
+                        )
+
+                    assert req.next_token_id is not None
+                    original_req.commit_new_token(req.next_token_id)
+
+                    # detokenize and send to http server
+                    cur_text = self.tokenizer.decode(req.next_token_id)
+                    req_dict = {
+                        "output": cur_text,
+                        "rid": req.request_id,
+                    }
+                    if req.next_token_id == self.tokenizer.eos_token_id:
+                        req_dict["eos"] = True
+                    if hasattr(self, "send_to_ipc_socket"):
+                        self.send_to_ipc_socket.send_pyobj(req_dict)
+
+                    # Check for termination.
+                    if self.scheduler.check_and_update_request_status(original_req):
+                        logger.info(f"Releasing resources for finished request {req.request_id}")
+                        release_cuda_request(self.running_batch, req.request_id)
+                        if not self.is_last_peer:
+                            self.finished_batch.append(req)
+                    else:
+                        self.scheduler.enque_request(original_req)
+                else:
+                    raise TypeError(f"First peer received unexpected request type: {type(req)}")
+        else:
+            # Intermediate and Last peers receive IntermediateRequests from the previous peer.
+            for req in requests:
+                assert isinstance(
+                    req, IntermediateRequest
+                ), "Non-first peers must receive IntermediateRequests."
+                if req.is_finished or req.hidden_states is None:
+                    self.scheduler.evict_request(req.request_id, req.status)
+                    release_cuda_request(self.running_batch, req.request_id)
+                    if not self.is_last_peer:
+                        self.finished_batch.append(req)
+                else:
+                    # This is an active request, add it to the scheduler queue to be processed.
+                    self.scheduler.enque_request(req)
+
     def _handle_input_requests(self, requests: List[Request]):
         """Update requests states and status in scheduler and cache manager."""
         if not requests:
+            return
+
+        if self.device == "cuda":
+            self._handle_cuda_input_requests(requests)
             return
 
         if self.is_first_peer:
@@ -454,13 +659,18 @@ class Executor:
                     assert req.next_token_id is not None
                     original_req.commit_new_token(req.next_token_id)
 
+                    will_exceed_limit = (
+                        original_req.output_length + 1 >= original_req.max_new_tokens
+                        or original_req.total_length + 1 >= original_req.max_total_length
+                    )
+
                     # detokenize and send to http server
                     cur_text = self.tokenizer.decode(req.next_token_id)
                     req_dict = {
                         "output": cur_text,
                         "rid": req.request_id,
                     }
-                    if req.next_token_id == self.tokenizer.eos_token_id:
+                    if req.next_token_id == self.tokenizer.eos_token_id or will_exceed_limit:
                         req_dict["eos"] = True
                     if hasattr(self, "send_to_ipc_socket"):
                         self.send_to_ipc_socket.send_pyobj(req_dict)
@@ -469,6 +679,8 @@ class Executor:
                     if self.scheduler.check_and_update_request_status(original_req):
                         logger.info(f"Releasing resources for finished request {req.request_id}")
                         self.kv_cache_manager.release_request(original_req.request_id)
+                        if not self.is_last_peer:
+                            self.finished_batch.append(req)
                     else:
                         self.scheduler.enque_request(original_req)
                 else:
@@ -493,13 +705,15 @@ class Executor:
                         f"memory usage: {mx.get_active_memory() / 1024**3 :.3f} GB"
                     )
                     self.scheduler.evict_request(req.request_id, req.status)
+                    if not self.is_last_peer:
+                        self.finished_batch.append(req)
                 else:
                     # This is an active request, add it to the scheduler queue to be processed.
                     self.scheduler.enque_request(req)
                     if not self.kv_cache_manager.has_request(req.request_id):
                         self.kv_cache_manager.add_request(req, req.total_length)
 
-    def _prepare_next_single_request(self, request: Request, hidden_states: mx.array) -> Request:
+    def _prepare_next_single_request(self, request: Request, hidden_states: Any) -> Request:
         """Handle request state changes both inter and intra peers.
 
         This function prepares the request object to be sent to the *next* peer in the
@@ -512,16 +726,47 @@ class Executor:
         Returns:
             A new Request object ready to be sent to the next destination.
         """
+        # This peer is the last peer or a single node.
+        if self.is_last_peer and self.is_first_peer:
+            assert isinstance(
+                request, (InitialRequest, IntermediateRequest)
+            ), "Invalid request type for decoding."
+            if self.device == "cuda":
+                assert hidden_states.dtype in (
+                    torch.int64,
+                    torch.int32,
+                ), "Single node must generate an output_id."
+                next_token_id = int(hidden_states[0])
+            else:
+                assert hidden_states.dtype == mx.uint32, "Single node must generate an output_id."
+                next_token_id = int(hidden_states[0])
+                hidden_states = hidden_states.astype(mx.int32)
+            return IntermediateRequest(
+                request_id=request.request_id,
+                status=RequestStatus.DECODING,
+                current_position=request.total_length + 1,
+                input_ids=request.input_ids,
+                hidden_states=hidden_states,
+                next_token_id=next_token_id,
+                routing_table=request.routing_table,
+            )
         if self.is_last_peer:
             # Last peer decodes a token and sends it back to the first peer.
             # The token is wrapped in an IntermediateRequest.
             assert isinstance(
                 request, IntermediateRequest
             ), "Last peer must receive an IntermediateRequest."
-            assert hidden_states.dtype == mx.uint32, "Last peer must receive an output_id."
-            next_token_id = int(hidden_states[0])
-            # Compatible to GPU tensor load format
-            hidden_states = hidden_states.astype(mx.int32)
+            if self.device == "cuda":
+                assert hidden_states.dtype in (
+                    torch.int64,
+                    torch.int32,
+                ), "Last peer must generate an output_id."
+                next_token_id = int(hidden_states[0])
+            else:
+                assert hidden_states.dtype == mx.uint32, "Last peer must generate an output_id."
+                next_token_id = int(hidden_states[0])
+                # Compatible to GPU tensor load format
+                hidden_states = hidden_states.astype(mx.int32)
             return IntermediateRequest(
                 request_id=request.request_id,
                 status=RequestStatus.DECODING,  # Last peer always changes status to DECODING
@@ -531,7 +776,6 @@ class Executor:
                 next_token_id=next_token_id,
                 routing_table=request.routing_table,
             )
-
         # This peer is the first or an intermediate peer.
         if self.is_first_peer:
             assert isinstance(request, InitialRequest), "First peer must process an InitialRequest."
@@ -544,10 +788,11 @@ class Executor:
         return IntermediateRequest.from_intermediate_request(request, hidden_states)
 
     def _prepare_next_batch_requests(
-        self, requests: List[Request], hidden_states: mx.array, lengths: mx.array
+        self, requests: List[Request], hidden_states: Any, lengths: Any
     ) -> List[Request]:
         """Prepares a batch of requests for the next stage of the pipeline."""
         batched_requests = []
+        pre_length = 0
         for i, src_request in enumerate(requests):
             if self.is_last_peer:
                 # Last peer gets a 1D array of token IDs
@@ -555,28 +800,64 @@ class Executor:
             else:
                 # Other peers get a 3D array of hidden states
                 true_length = int(lengths[i])
-                hidden_state_for_req = hidden_states[i, :true_length, :]
+                if hidden_states.ndim == 3:
+                    hidden_state_for_req = hidden_states[i, :true_length, :]
+                else:
+                    hidden_state_for_req = hidden_states[pre_length : pre_length + true_length, :]
+                pre_length += true_length
 
             next_req = self._prepare_next_single_request(src_request, hidden_state_for_req)
             batched_requests.append(next_req)
 
         return batched_requests
 
-    def process_batch(
+    def _process_batch_cuda(
         self, prepared_inputs: Dict[str, Any], return_decoded_tokens: bool = True
-    ) -> mx.array:
+    ):
         """
-        Process a batch of requests.
-
-        Args:
-            prepared_inputs: A dictionary containing the prepared inputs for the ShardedModel.
-            return_decoded_tokens: Whether to return decoded tokens.
-
-        Returns:
-            A tensor of shape (B, L, D) containing the hidden states for the next peer.
-            or (B,) containing the decoded tokens.
+        Process a batch of requests in CUDA.
         """
+        assert "forward_batch" in prepared_inputs, "forward_batch should be in cuda prepared inputs"
+        assert (
+            "pp_proxy_tensors" in prepared_inputs
+        ), "pp_proxy_tensors should be in cuda prepared inputs"
+        forward_batch = prepared_inputs["forward_batch"]
+        pp_proxy_tensors = prepared_inputs["pp_proxy_tensors"]
+        logits_output, _ = self.model_runner.forward(
+            forward_batch=forward_batch,
+            pp_proxy_tensors=pp_proxy_tensors,
+        )
 
+        if self.cur_batch:
+            if self.cur_batch.forward_mode.is_extend():
+                # Merge the new batch into the running batch
+                if not self.cur_batch.is_empty():
+                    if self.running_batch.is_empty():
+                        self.running_batch = self.cur_batch
+                    else:
+                        # Merge running_batch with prefill batch
+                        self.running_batch.merge_batch(self.cur_batch)
+            else:
+                # Set decode req conditions
+                for req in self.cur_batch.reqs:
+                    req.ready = False
+            self.cur_batch = None
+
+        if return_decoded_tokens:
+            next_token_ids = self.model_runner.sample(logits_output, forward_batch)
+            return next_token_ids
+        # Currently hack the result of (hidden_state + residual) here for GPU
+        final_hidden_states = (
+            logits_output.tensors["hidden_states"] + logits_output.tensors["residual"]
+        )
+        return final_hidden_states
+
+    def _process_batch_mlx(
+        self, prepared_inputs: Dict[str, Any], return_decoded_tokens: bool = True
+    ):
+        """
+        Process a batch of requests in MLX.
+        """
         # Run model and get updated cache
         hidden_states, (k_caches, v_caches) = self.model_shard(
             h_or_tokens=prepared_inputs["h_or_tokens"],
@@ -584,7 +865,6 @@ class Executor:
             lengths=prepared_inputs["lengths"],
             mask=prepared_inputs["mask"],
         )
-        return_decoded_tokens = return_decoded_tokens and self.is_last_peer
         # k_caches shape: (num_layers, B, num_kv_heads, L_padded, head_dim)
         logger.debug(
             f"Processed batch with {len(prepared_inputs['requests'])} requests, "
@@ -621,13 +901,32 @@ class Executor:
 
         return hidden_states
 
+    def process_batch(
+        self, prepared_inputs: Dict[str, Any], return_decoded_tokens: bool = True
+    ) -> mx.array:
+        """
+        Process a batch of requests.
+
+        Args:
+            prepared_inputs: A dictionary containing the prepared inputs for the ShardedModel.
+            return_decoded_tokens: Whether to return decoded tokens.
+
+        Returns:
+            A tensor of shape (B, L, D) containing the hidden states for the next peer.
+            or (B,) containing the decoded tokens.
+        """
+        if self.device == "cuda":
+            ret = self._process_batch_cuda(prepared_inputs, return_decoded_tokens)
+        else:
+            ret = self._process_batch_mlx(prepared_inputs, return_decoded_tokens)
+        return ret
+
     def run_loop(self):
         # pylint: disable=too-many-nested-blocks
         """The main loop of the executor."""
         logger.info(
             f"Executor for layers [{self.start_layer}, {self.end_layer}) starting run loop..."
         )
-        mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
         while True:
             # 1. Ingest new requests from the http frontend
             if self.is_first_peer:
@@ -639,17 +938,24 @@ class Executor:
             incoming_requests = self.recv_requests_from_peer()
             self._handle_input_requests(incoming_requests)
 
-            # 3. Check if we should form a batch
+            # 3. Send finished batch to next peer
+            if len(self.finished_batch) > 0 and self.is_first_peer:
+                self.send_to_peer_socket.send_multipart(
+                    [b"abort", abort_request_to_proto(self.finished_batch).SerializeToString()]
+                )
+                self.finished_batch = []
+
+            # 4. Check if we should form a batch
             if not self.scheduler.should_dispatch():
                 time.sleep(0.01)  # prevent busy waiting
                 continue
 
-            # 4. Form a batch from the scheduler's queue
+            # 5. Form a batch from the scheduler's queue
             batch_to_process = self.scheduler.form_batch()
             if not batch_to_process:
                 continue
 
-            # 5. Process the batch
+            # 6. Process the batch
             try:
                 prepared_inputs_dict = self._prepare_batch_inputs(batch_to_process)
 
@@ -662,21 +968,24 @@ class Executor:
                         output = self.process_batch(
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
                         )
-                        # 6. Prepare requests for the next stage in the pipeline
+                        # 7. Prepare requests for the next stage in the pipeline
                         next_batch = self._prepare_next_batch_requests(
                             requests=prepared_inputs["requests"],
                             hidden_states=output,
                             lengths=prepared_inputs["lengths"],
                         )
 
-                        # 7. Dispatch to the appropriate destination
+                        # 8. Dispatch to the appropriate destination
                         if self.is_last_peer and self.is_first_peer:
                             # Single node: handle locally
                             self._handle_input_requests(next_batch)
                         else:
                             # Send output to next peer
                             self.send_to_peer_socket.send_multipart(
-                                [b"forward", request_to_proto(next_batch).SerializeToString()]
+                                [
+                                    b"forward",
+                                    request_to_proto(next_batch, self.device).SerializeToString(),
+                                ]
                             )
                             logger.info(
                                 f"Processed batch of type {batch_type} with {len(next_batch)} requests "
@@ -687,8 +996,13 @@ class Executor:
                 logger.exception(f"Error processing batch: {e}")
                 # Naive error handling: release and evict all requests in the batch
                 for req in batch_to_process:
-                    self.kv_cache_manager.release_request(req.request_id)
                     self.scheduler.evict_request(req.request_id, req.status)
+                    if self.device == "cuda":
+                        from parallax.sglang.batch_info import release_cuda_request
+
+                        release_cuda_request(self.running_batch, req.request_id)
+                    else:
+                        self.kv_cache_manager.release_request(req.request_id)
 
     def run_loop_in_background(self):
         """Run the executor loop in the background."""
@@ -725,5 +1039,6 @@ def create_executor_config(args):
         "recv_from_peer_addr": getattr(args, "recv_from_peer_addr", None),
         "executor_input_ipc_addr": args.executor_input_ipc,
         "executor_output_ipc_addr": args.executor_output_ipc,
+        "attention_backend": args.attention_backend,
     }
     return config

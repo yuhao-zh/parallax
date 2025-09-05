@@ -47,12 +47,10 @@ class TestMessageUtil:
         assert proto_req.rid == self.request_id
         assert proto_req.output_length == self.current_position
 
-        # Verify hidden_states and residual(0) are in pp_proxy_tensors
-        assert len(forward_request.pp_proxy_tensors.tensors) == 2
+        # Verify hidden_states in pp_proxy_tensors
+        assert len(forward_request.pp_proxy_tensors.tensors) == 1
         hidden_tensor = forward_request.pp_proxy_tensors.tensors[0]
         assert hidden_tensor.name == "hidden_states"
-        residual_tensor = forward_request.pp_proxy_tensors.tensors[1]
-        assert residual_tensor.name == "residual"
 
         # Verify tensor data - safetensor contains shape and dtype info
         tensor = hidden_tensor.tensor
@@ -110,34 +108,16 @@ class TestMessageUtil:
         assert proto_req.rid == self.request_id
         assert proto_req.output_length == self.current_position
 
-        # Verify hidden_states and residual(0) are in pp_proxy_tensors
-        assert len(forward_request.pp_proxy_tensors.tensors) == 2
+        # Verify hidden_states and in pp_proxy_tensors
+        assert len(forward_request.pp_proxy_tensors.tensors) == 1
         hidden_tensor = forward_request.pp_proxy_tensors.tensors[0]
         assert hidden_tensor.name == "hidden_states"
-        residual_tensor = forward_request.pp_proxy_tensors.tensors[1]
-        assert residual_tensor.name == "residual"
 
         # Verify tensor data - safetensor contains shape and dtype info
         tensor = hidden_tensor.tensor
         # Safetensor format doesn't set size and dtype in protobuf
         assert len(tensor.size) == 0  # size not set in safetensor format
         assert tensor.dtype == ""  # dtype not set in safetensor format
-
-    def test_request_to_proto_assertion_error(self):
-        """Test that assertion error is raised for non-mlx array hidden_states."""
-        # Create IntermediateRequest with numpy array instead of mlx array
-        hidden_states = np.array([[1.0, 2.0], [3.0, 4.0]])
-
-        request = IntermediateRequest(
-            request_id=self.request_id,
-            current_position=self.current_position,
-            status=RequestStatus.PREFILLING,
-            hidden_states=hidden_states,
-        )
-
-        # Should raise assertion error
-        with pytest.raises(AssertionError):
-            request_to_proto([request])
 
     def test_request_to_proto_multiple_requests_concatenation(self):
         """Test that multiple requests' hidden_states are concatenated into a single tensor."""
@@ -175,11 +155,9 @@ class TestMessageUtil:
         assert len(forward_request.reqs) == 3
 
         # Verify that there's only one concatenated hidden_states tensor
-        assert len(forward_request.pp_proxy_tensors.tensors) == 2
+        assert len(forward_request.pp_proxy_tensors.tensors) == 1
         hidden_tensor = forward_request.pp_proxy_tensors.tensors[0]
         assert hidden_tensor.name == "hidden_states"
-        residual_tensor = forward_request.pp_proxy_tensors.tensors[1]
-        assert residual_tensor.name == "residual"
 
         # Convert back to MLX tensor and verify concatenation
         concatenated_tensor = proto_to_tensor(hidden_tensor.tensor)

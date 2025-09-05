@@ -84,8 +84,9 @@ class HTTPHandler:
             recv_dict = await self.recv_from_executor.recv_pyobj()
             rid = recv_dict["rid"]
             output = recv_dict["output"]
-            self.request_result[rid] += output
-            if output == "<|im_end|>":
+            if rid in self.request_result:
+                self.request_result[rid] += output
+            if recv_dict.get("eos", False) or output == "<|im_end|>":
                 self.request_finish[rid] = True
 
     async def create_handle_loop(self):

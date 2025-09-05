@@ -282,7 +282,7 @@ class GradientServer:
                             logger.info(f"Set routing table: {routing_table}")
                             # exit when routing table is set as our node is static right now.
                             # TODO: remove this when we have dynamic node
-                            break
+                            # break
                     except dijkstar.NoPathError:
                         self.routing_table = None
                         logger.warning(
@@ -446,7 +446,7 @@ def launch_p2p_server(args):
     # Extra kwargs for server
     kwargs = {"host_maddrs": host_maddrs, "announce_maddrs": announce_maddrs}
 
-    model_config = load_config(get_model_path(args.model_path))
+    model_config = load_config(get_model_path(args.model_path)[0])
     server = GradientServer(
         recv_from_peer_addr=args.recv_from_peer_addr,
         send_to_peer_addr=args.send_to_peer_addr,

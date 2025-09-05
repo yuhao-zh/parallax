@@ -54,18 +54,13 @@ Decode:
         generates and sends `output_id` to the first Peer.
 
 TODO:
-    1. For now we only supports Greedy Decoding,
-        we need to add sampling sampling params and passing logits;
-    2. Add support for multiple output_ids in a single step (e.g. beam width, top-k sampling, etc.);
-    3. Accepts more generation configs like repetition penalties.
-    4. Decouple different HW: mx.array to np.ndarray.
+    1. Add support for multiple output_ids in a single step (e.g. beam width, top-k sampling, etc.);
+    2. Accepts more generation configs like repetition penalties.
 """
 
 import uuid
 from enum import Enum
-from typing import List, Optional
-
-import mlx.core as mx
+from typing import Any, List, Optional
 
 from parallax.server.sampling.sampling_params import SamplingParams
 from parallax.utils.logging_config import get_logger
@@ -106,7 +101,7 @@ class Request:
         self.output_ids = output_ids or []
         self.input_ids = input_ids or []
         self.routing_table = routing_table
-        self.sampling_params = sampling_params
+        self.sampling_params = sampling_params or SamplingParams()
 
     @property
     def is_finished(self) -> bool:
@@ -164,6 +159,7 @@ class InitialRequest(Request):
             status=status,
             prompt_len=len(input_ids) if input_ids else 0,
             input_ids=input_ids,
+            sampling_params=sampling_params,
         )
         self.prompt = prompt
 
@@ -173,7 +169,6 @@ class InitialRequest(Request):
         self.max_total_length = max_total_length
         self.output_ids = output_ids or []
         self.hidden_states = None
-        self.sampling_params = sampling_params
 
         if len(self.output_ids) > 0 and self.status == RequestStatus.PREFILLING:
             raise ValueError(f"Cannot initialize with output_ids given {self.status}.")
@@ -254,7 +249,7 @@ class IntermediateRequest(Request):
         current_position: int,
         status: RequestStatus = RequestStatus.PREFILLING,
         input_ids: Optional[List[int]] = None,
-        hidden_states: Optional[mx.array] = None,
+        hidden_states: Optional[Any] = None,
         next_token_id: Optional[int] = None,
         routing_table: Optional[List[str]] = [],
         sampling_params: Optional[SamplingParams] = None,
@@ -264,6 +259,7 @@ class IntermediateRequest(Request):
             status=status,
             routing_table=routing_table,
             input_ids=input_ids,
+            sampling_params=sampling_params,
         )
         # Hidden states from the previous peer's computation.
         # Shape:
@@ -277,7 +273,6 @@ class IntermediateRequest(Request):
         self.current_position = current_position
         self.hidden_states = hidden_states
         self.next_token_id = next_token_id
-        self.sampling_params = sampling_params
 
     @property
     def input_length(self) -> int:
@@ -292,7 +287,7 @@ class IntermediateRequest(Request):
 
     @classmethod
     def from_initial_request(
-        cls, initial_request: InitialRequest, hidden_states: Optional[mx.array] = None
+        cls, initial_request: InitialRequest, hidden_states: Optional[Any] = None
     ) -> "IntermediateRequest":
         """Convert an InitialRequest to an IntermediateRequest.
 
@@ -322,11 +317,14 @@ class IntermediateRequest(Request):
             next_token_id=next_token_id,
             current_position=initial_request.total_length,
             hidden_states=hidden_states,
+            sampling_params=initial_request.sampling_params,
         )
 
     @classmethod
     def from_intermediate_request(
-        cls, old_request: "IntermediateRequest", new_hidden_states: mx.array
+        cls,
+        old_request: "IntermediateRequest",
+        new_hidden_states: Any,
     ) -> "IntermediateRequest":
         """
         Creates a new IntermediateRequest from an old one, with updated hidden states.
@@ -340,6 +338,7 @@ class IntermediateRequest(Request):
             next_token_id=old_request.next_token_id,
             hidden_states=new_hidden_states,
             routing_table=old_request.routing_table,
+            sampling_params=old_request.sampling_params,
         )
 
     def __repr__(self):

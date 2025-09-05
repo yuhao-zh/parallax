@@ -8,38 +8,9 @@ and performance tuning.
 
 import argparse
 
-import mlx.core as mx
-
 from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
-
-
-def parse_dtype(dtype_str: str) -> mx.Dtype:
-    """
-    Parse dtype string to MLX dtype.
-
-    Args:
-        dtype_str: String representation of dtype (e.g., 'float16', 'bfloat16', 'float32')
-
-    Returns:
-        MLX dtype object
-
-    Raises:
-        ValueError: If dtype string is not supported
-    """
-    dtype_map = {
-        "float16": mx.float16,
-        "bfloat16": mx.bfloat16,
-        "float32": mx.float32,
-    }
-
-    if dtype_str not in dtype_map:
-        raise ValueError(
-            f"Unsupported dtype: {dtype_str}. Supported dtypes: {list(dtype_map.keys())}"
-        )
-
-    return dtype_map[dtype_str]
 
 
 def parse_args() -> argparse.Namespace:
@@ -159,6 +130,15 @@ def parse_args() -> argparse.Namespace:
         "--scheduler-wait-ms", type=int, default=500, help="Scheduler wait time in milliseconds"
     )
 
+    # GPU/SGLang specialized configuration
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        default="torch_native",
+        choices=["torch_native", "flashinfer", "triton", "fa3"],
+        help="Choose the GPU attention kernels",
+    )
+
     # Logging and debugging
     parser.add_argument(
         "--log-level",
@@ -171,9 +151,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
-
-    # Parse dtype directly
-    args.dtype = parse_dtype(args.dtype)
 
     # Validate arguments
     validate_args(args)
@@ -221,3 +198,12 @@ def validate_args(args: argparse.Namespace) -> None:
     # Validate KV cache tokens
     if args.kv_max_tokens_in_cache is not None and args.kv_max_tokens_in_cache <= 0:
         raise ValueError("kv_max_tokens_in_cache must be positive if specified")
+
+    # Validate supported dtypes
+    dtype_list = [
+        "float16",
+        "bfloat16",
+        "float32",
+    ]
+    if args.dtype not in dtype_list:
+        raise ValueError(f"Unsupported dtype: {args.dtype}. Supported dtypes: {dtype_list}")
