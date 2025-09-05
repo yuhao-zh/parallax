@@ -98,6 +98,10 @@ def parse_args() -> argparse.Namespace:
         "--kv-block-size", type=int, default=64, help="Block size for KV cache management"
     )
 
+    parser.add_argument(
+        "--enable-prefix-cache", action="store_true", help="Enable prefix cache reuse"
+    )
+
     # Scheduler configuration
     parser.add_argument(
         "--max-batch-size", type=int, default=16, help="Maximum batch size for processing requests"

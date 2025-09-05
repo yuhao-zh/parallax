@@ -1,4 +1,4 @@
-# pylint: disable=too-many-locals,too-few-public-methods,too-many-statements,too-many-branches, broad-exception-caught, pointless-string-statement, import-outside-toplevel
+# pylint: disable=too-many-locals,too-few-public-methods,too-many-statements,too-many-branches,too-many-lines,broad-exception-caught,pointless-string-statement,import-outside-toplevel
 """
 High-level executor for managing model shards, scheduler, and cache pool on each Peer.
 
@@ -35,6 +35,7 @@ from parallax.p2p.message_util import (
 )
 from parallax.p2p.proto import forward_pb2
 from parallax.server.kv_cache import KVCacheManager
+from parallax.server.radix_cache import RadixCache
 from parallax.server.request import (
     InitialRequest,
     IntermediateRequest,
@@ -53,6 +54,7 @@ from parallax.utils.utils import (
     get_device_dtype,
     get_zmq_socket,
     pad_inputs,
+    pad_prefix_caches,
 )
 
 logger = get_logger(__name__)
@@ -78,6 +80,8 @@ class Executor:
         kv_block_size: int = 64,
         kv_cache_memory_fraction: float = 0.8,
         kv_max_tokens_in_cache: Optional[int] = None,
+        enable_prefix_cache: Optional[bool] = False,
+        # Communication Configs
         # P2P Communication Configs
         send_to_peer_addr: Optional[str] = None,
         recv_from_peer_addr: Optional[str] = None,
@@ -126,6 +130,7 @@ class Executor:
         self.head_dim = self.config.get("head_dim") or self.config.get(
             "hidden_size"
         ) // self.config.get("num_attention_heads")
+        self.enable_prefix_cache = enable_prefix_cache
 
         if self.tokenizer.pad_token_id is None:
             self.pad_token_id = self.tokenizer.eos_token_id
@@ -159,6 +164,16 @@ class Executor:
                 max_num_tokens=kv_max_tokens_in_cache,
             )
             mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
+
+        # Prefix Cache Manager
+        self.prefix_cache = RadixCache(
+            num_kv_heads=self.num_key_value_heads,
+            head_dim=self.head_dim,
+            num_layers=self.num_shard_layers,
+            dtype=self.dtype,
+            page_size=1,
+            max_num_tokens=kv_max_tokens_in_cache,
+        )
 
         # Communication Related
         self.zmq_context = zmq.Context()
@@ -338,6 +353,10 @@ class Executor:
 
         h = []
         lengths = []
+        actual_lengths = []
+        k_caches = []
+        v_caches = []
+        matched_prefix = False
         for req in batched_requests:
             assert req.is_prefill, f"Request {req.request_id} is not a prefill request."
             if self.is_first_peer:
@@ -352,18 +371,65 @@ class Executor:
                 h.append(req.hidden_states)
             lengths.append(req.total_length)
 
+            if self.enable_prefix_cache:
+                self.prefix_cache.update_req_to_token(req.request_id, req.input_ids)
+                value, node = self.prefix_cache.match_prefix(req.input_ids[:-1])
+                if value:
+                    kv = self.prefix_cache.fetch_kv_cache(node)
+                    k_caches.append(kv[0])
+                    v_caches.append(kv[1])
+                    assert len(value) == (
+                        kv[0].shape[2]
+                    ), f"Mached prefix length{len(value)} mismatches kv cache length {kv[0].shape[2]}."
+                    matched_prefix = True
+                    self.kv_cache_manager.add_matched_prefix_request(req, kv[0], kv[1], len(value))
+                    actual_lengths.append(req.total_length - len(value))
+                else:
+                    k_caches.append(
+                        mx.zeros(
+                            [
+                                self.prefix_cache.num_layers,
+                                self.prefix_cache.num_kv_heads,
+                                0,
+                                self.prefix_cache.head_dim,
+                            ],
+                            dtype=self.dtype,
+                        )
+                    )
+                    v_caches.append(
+                        mx.zeros(
+                            [
+                                self.prefix_cache.num_layers,
+                                self.prefix_cache.num_kv_heads,
+                                0,
+                                self.prefix_cache.head_dim,
+                            ],
+                            dtype=self.dtype,
+                        )
+                    )
+                    actual_lengths.append(req.total_length)
+
         if self.is_first_peer:
             padded_inputs, padding_mask = pad_inputs(self.pad_token_id, h, self.dtype)
         else:
             padded_inputs, padding_mask = pad_inputs(0, h, self.dtype)
 
-        causal_mask = create_causal_mask(padded_inputs.shape[1])
-        mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
+        k_batched = None
+        v_batched = None
+        if matched_prefix:
+            k_batched, k_padding_mask = pad_prefix_caches(k_caches, lengths, self.dtype)
+            v_batched, _ = pad_prefix_caches(v_caches, lengths, self.dtype)
+            padding_mask = k_padding_mask
+            causal_mask = create_causal_mask(padded_inputs.shape[1], max(lengths))
+            mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
+        else:
+            causal_mask = create_causal_mask(padded_inputs.shape[1], padded_inputs.shape[1])
+            mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
 
         return {
             "h_or_tokens": padded_inputs,
-            "cache": None,
-            "lengths": mx.array(lengths),
+            "cache": (k_batched, v_batched) if matched_prefix else None,
+            "lengths": mx.array(actual_lengths) if matched_prefix else mx.array(lengths),
             "mask": mask,
             "requests": batched_requests,
         }
@@ -391,6 +457,8 @@ class Executor:
                 assert isinstance(req, IntermediateRequest)
                 assert req.hidden_states is not None and req.hidden_states.shape[0] == 1
                 h_list.append(req.hidden_states)
+            if self.enable_prefix_cache:
+                self.prefix_cache.update_req_to_token(req.request_id, list([req.next_token_id]))
 
             num_tokens_in_cache = self.kv_cache_manager.request_length(req.request_id)
             cache_lengths.append(num_tokens_in_cache)
@@ -625,6 +693,11 @@ class Executor:
                     req, IntermediateRequest
                 ), "Non-first peers must receive IntermediateRequests."
                 if req.is_finished or req.hidden_states is None:
+                    if self.enable_prefix_cache:
+                        keys, values = self.kv_cache_manager.gather_kv_cache(req.request_id)
+                        self.prefix_cache.cache_finished_request(req, keys, values)
+                        self.prefix_cache.evict_request(req.request_id)
+
                     self.kv_cache_manager.release_request(req.request_id)
                     logger.info(
                         f"Released resources for finished request {req.request_id}, "
@@ -812,6 +885,13 @@ class Executor:
                 continue
         self.kv_cache_manager.update_requests(requests, k_caches, v_caches, lengths)
 
+        # Update prefix cache.
+        if self.enable_prefix_cache:
+            for _, req in enumerate(requests):
+                if req.is_prefill:
+                    keys, values = self.kv_cache_manager.gather_kv_cache(req.request_id)
+                    self.prefix_cache.cache_unfinished_request(req, keys, values)
+
         # Process last peer: need additional sampling + detokenization
         if return_decoded_tokens:
             sampling_info = SamplingBatchInfo.from_reqs(requests)
@@ -950,6 +1030,7 @@ def create_executor_config(args):
         "kv_block_size": args.kv_block_size,
         "kv_cache_memory_fraction": args.kv_cache_memory_fraction,
         "kv_max_tokens_in_cache": args.kv_max_tokens_in_cache,
+        "enable_prefix_cache": args.enable_prefix_cache,
         "max_num_tokens_in_batch": args.max_num_tokens_in_batch,
         "prefill_priority": args.prefill_priority,
         "micro_batch_ratio": args.micro_batch_ratio,

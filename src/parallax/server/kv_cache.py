@@ -223,6 +223,8 @@ class KVCacheManager:
         self.tokens_in_cache += self.request_num_tokens(request.request_id)
         return True
 
+    # def add_request_with_prefix_cache():
+
     def release_request(self, request_id: str) -> bool:
         """
         Releases the request from the cache.
@@ -270,4 +272,20 @@ class KVCacheManager:
             self.tokens_in_cache += self.request_caches[request.request_id].update(
                 key[..., :length, :], value[..., :length, :]
             )
+        return True
+
+    def add_matched_prefix_request(
+        self, request: Request, key: mx.array, value: mx.array, length: int
+    ):
+        """If a request matches prefix, add it back to the running kv-cache manager"""
+        assert self.has_request(request.request_id), "request not in cache"
+        if self.tokens_in_cache + self.round_up_to_step(length) > self.max_num_tokens:
+            logger.warning(
+                f"can't add request {request.request_id} to cache: "
+                f"{self.tokens_in_cache} + {length} > {self.max_num_tokens}"
+            )
+            return False
+        self.tokens_in_cache += self.request_caches[request.request_id].update(
+            key[..., :length, :], value[..., :length, :]
+        )
         return True

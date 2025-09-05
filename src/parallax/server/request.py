@@ -91,12 +91,14 @@ class Request:
         status: RequestStatus = RequestStatus.PREFILLING,
         prompt_len: int = 0,
         input_ids: Optional[List[int]] = None,
+        output_ids: Optional[List[int]] = None,
         routing_table: Optional[List[str]] = [],
         sampling_params: Optional[SamplingParams] = None,
     ):
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
         self.prompt_len = prompt_len
+        self.output_ids = output_ids or []
         self.input_ids = input_ids or []
         self.routing_table = routing_table
         self.sampling_params = sampling_params or SamplingParams()
@@ -333,6 +335,7 @@ class IntermediateRequest(Request):
             status=old_request.status,
             current_position=old_request.total_length,
             input_ids=old_request.input_ids,
+            next_token_id=old_request.next_token_id,
             hidden_states=new_hidden_states,
             routing_table=old_request.routing_table,
             sampling_params=old_request.sampling_params,
@@ -343,6 +346,7 @@ class IntermediateRequest(Request):
             f"request_id={self.request_id}",
             f"status={self.status}",
             f"current_position={self.current_position}",
+            f"input_ids={self.input_ids}",
             f"hidden_states={self.hidden_states}",
         ]
 
