@@ -1,4 +1,4 @@
-# pylint: disable=too-many-locals,too-few-public-methods,too-many-statements,too-many-branches, broad-exception-caught, pointless-string-statement, import-outside-toplevel
+# pylint: disable=too-many-locals,too-few-public-methods,too-many-statements,too-many-branches,too-many-lines,broad-exception-caught,pointless-string-statement,import-outside-toplevel
 """
 High-level executor for managing model shards, scheduler, and cache pool on each Peer.
 
