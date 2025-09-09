@@ -8,7 +8,7 @@ arguments needed by decentralized inference.
 import logging
 import os
 import random
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Dict, Any
 
 import sglang
 import sglang.srt.distributed.parallel_state
@@ -39,10 +39,10 @@ from sglang.srt.utils import (
     get_available_gpu_memory,
     get_bool_env_var,
     is_npu,
-    maybe_offload_to_cpu,
     monkey_patch_p2p_access_check,
 )
 from torch.distributed import Backend
+from sglang.srt.layers.moe import initialize_moe_config
 
 logger = logging.getLogger(__name__)
 
@@ -216,12 +216,8 @@ class ParallaxModelRunner(SGLModelRunner):
             )
 
             initialize_dp_attention(
-                enable_dp_attention=self.server_args.enable_dp_attention,
-                tp_rank=self.tp_rank,
-                tp_size=self.tp_size,
-                dp_size=self.server_args.dp_size,
-                moe_dense_tp_size=self.server_args.moe_dense_tp_size,
-                pp_size=self.server_args.pp_size,
+                self.server_args,
+                self.model_config,
             )
 
         min_per_gpu_memory = get_available_gpu_memory(
@@ -428,22 +424,30 @@ def monkey_patch_make_layers(
     pp_size: Optional[int] = None,
     prefix: str = "",
     return_tuple: bool = True,
+    offloader_kwargs: Dict[str, Any] = {},
 ) -> Tuple[int, int, torch.nn.ModuleList]:
     """A monkey patch to replace sglang.srt.utils.make_layers"""
     # circula imports
     from sglang.srt.distributed import get_pp_group
     from sglang.srt.layers.utils import PPMissingLayer
+    from sglang.srt.offloader import get_offloader
 
     assert not pp_size or num_hidden_layers >= pp_size
     start_layer, end_layer = get_pp_group().pp_start_layer, get_pp_group().pp_end_layer
 
     modules = torch.nn.ModuleList(
         [PPMissingLayer(return_tuple=return_tuple) for _ in range(start_layer)]
+        + get_offloader().wrap_modules(
+            (
+                layer_fn(idx=idx, prefix=add_prefix(idx, prefix))
+                for idx in range(start_layer, end_layer)
+            ),
+            **offloader_kwargs,
+        )
         + [
-            maybe_offload_to_cpu(layer_fn(idx=idx, prefix=add_prefix(idx, prefix)))
-            for idx in range(start_layer, end_layer)
+            PPMissingLayer(return_tuple=return_tuple)
+            for _ in range(end_layer, num_hidden_layers)
         ]
-        + [PPMissingLayer(return_tuple=return_tuple) for _ in range(end_layer, num_hidden_layers)]
     )
     if pp_rank is None or pp_size is None:
         return modules
@@ -452,7 +456,7 @@ def monkey_patch_make_layers(
 
 def form_sgl_server_args(
     model_path: str,
-    dtype: torch.dtype = torch.bfloat16,
+    dtype: str = "bfloat16",
     attention_backend: str = "torch_native",
     kv_block_size: int = 64,
 ):
@@ -462,6 +466,7 @@ def form_sgl_server_args(
         dtype=dtype,
         attention_backend=attention_backend,
         page_size=kv_block_size,
+        mem_fraction_static=0.85,
     )
     return sgl_server_args
 
@@ -497,7 +502,7 @@ def initialize_sgl_model_runner(
     model_path = get_model_path(original_model_path)[0]
     config = load_config(model_path)
     tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
-    dtype = config.get("torch_dtype")
+    dtype = config.get("torch_dtype", "bfloat16")
     nccl_port = random.randint(4000, 5000)
 
     server_args = form_sgl_server_args(
@@ -506,9 +511,15 @@ def initialize_sgl_model_runner(
         attention_backend,
         kv_block_size,
     )
+    initialize_moe_config(server_args)
+    quant_method = None
+    if (quantization_config := config.get("quantization_config", None)) is not None:
+        quant_method = quantization_config.get("quant_method")
     model_config = ModelConfig(
         model_path=original_model_path,
         model_override_args="{}",
+        dtype=dtype,
+        quantization=quant_method,
     )
     model_config.tie_word_embeddings = False
     model_runner = ParallaxModelRunner(

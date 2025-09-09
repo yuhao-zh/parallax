@@ -75,7 +75,6 @@ def form_sgl_batch_prefill(
         model_config=model_runner.model_config,
         enable_overlap=False,
         spec_algorithm=SpeculativeAlgorithm.NONE,
-        enable_custom_logit_processor=False,
     )
     schedule_batch.prepare_for_extend()
     model_worker_batch = schedule_batch.get_model_worker_batch()
@@ -113,6 +112,7 @@ def select_batch(
         ret.multimodal_inputs = [origin_batch.multimodal_inputs[i] for i in keep_indices]
     ret.req_pool_indices = origin_batch.req_pool_indices[keep_indices_device]
     ret.seq_lens = origin_batch.seq_lens[keep_indices_device]
+    ret.orig_seq_lens = origin_batch.orig_seq_lens[keep_indices_device]
 
     if origin_batch.out_cache_loc is not None:
         ret.out_cache_loc = origin_batch.out_cache_loc[keep_indices_device]
@@ -183,6 +183,7 @@ def form_sgl_batch_decode(
     # TODO: this is a hack to make the seq_lens correct due to select_batch is not refference running batch's seq_lens
     # need to fix this
     running_batch.seq_lens[ready_indices] += 1
+    running_batch.orig_seq_lens[ready_indices] += 1
 
     model_worker_batch = ret.get_model_worker_batch()
     ForwardBatch.init_new(model_worker_batch, model_runner)

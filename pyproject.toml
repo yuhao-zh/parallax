@@ -13,7 +13,7 @@ requires-python = ">=3.8"
 dependencies = [
   "mlx-lm==0.26.3",
   "torch==2.8.0",
-  "sglang==0.4.10.post2",
+  "sglang[runtime_common]==0.5.1.post3",
   "msgpack>=1.0.7",
   "safetensors>=0.5.1",
   "numpy>=1.26",
@@ -22,7 +22,7 @@ dependencies = [
   "httpx",
   "protobuf==6.31.1",
   "hivemind @ git+https://github.com/learning-at-home/hivemind.git@53533289edfeb1f9b2f5917cbae66fe50cfa2548",
-  "dijkstar",
+  "dijkstar==2.6.0",
   "uvicorn",
   "uvloop",
   "fastapi",
