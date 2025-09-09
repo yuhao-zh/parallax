@@ -537,11 +537,16 @@ class Executor:
         if self.tokenizer.chat_template:
             messages = raw_request["messages"]
             process_message_content(messages)
+            chat_template_kwargs = raw_request.get("chat_template_kwargs", {})
+            # check extra_body for backward compatibility
+            if "extra_body" in raw_request and "chat_template_kwargs" in raw_request["extra_body"]:
+                chat_template_kwargs.update(raw_request["extra_body"]["chat_template_kwargs"])
+
             prompt = self.tokenizer.apply_chat_template(
                 messages,
                 raw_request.get("tools") or None,
                 add_generation_prompt=True,
-                # **self.model_provider.cli_args.chat_template_args,  # TODO: add chat template
+                **chat_template_kwargs,
             )
         else:
             prompt = convert_chat(raw_request["messages"], raw_request.get("role_mapping"))

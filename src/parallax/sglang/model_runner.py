@@ -8,7 +8,7 @@ arguments needed by decentralized inference.
 import logging
 import os
 import random
-from typing import List, Optional, Tuple, Union, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import sglang
 import sglang.srt.distributed.parallel_state
@@ -30,6 +30,7 @@ from sglang.srt.layers.dp_attention import (
     get_attention_tp_group,
     initialize_dp_attention,
 )
+from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.model_executor.model_runner import ModelRunner as SGLModelRunner
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
@@ -42,7 +43,6 @@ from sglang.srt.utils import (
     monkey_patch_p2p_access_check,
 )
 from torch.distributed import Backend
-from sglang.srt.layers.moe import initialize_moe_config
 
 logger = logging.getLogger(__name__)
 
@@ -444,10 +444,7 @@ def monkey_patch_make_layers(
             ),
             **offloader_kwargs,
         )
-        + [
-            PPMissingLayer(return_tuple=return_tuple)
-            for _ in range(end_layer, num_hidden_layers)
-        ]
+        + [PPMissingLayer(return_tuple=return_tuple) for _ in range(end_layer, num_hidden_layers)]
     )
     if pp_rank is None or pp_size is None:
         return modules

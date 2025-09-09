@@ -48,6 +48,20 @@ from hivemind.p2p import PeerID
 
 logger = logging.getLogger(__name__)
 
+# Global HTTP client for reuse
+_http_client = None
+
+
+async def get_http_client():
+    """Get or create a shared HTTP client"""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(3),  # 3 second timeout
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=100),
+        )
+    return _http_client
+
 
 class ServerState(enum.Enum):
     """Server state enum."""
@@ -88,11 +102,11 @@ def send_notify(notify_url, block_start_index, block_end_index, request, status)
     if notify_url is not None:
 
         async def send_async(notify_url, payload):
-            async with httpx.AsyncClient() as client:
-                try:
-                    await client.post(notify_url, json=payload)
-                except Exception:
-                    pass
+            try:
+                client = await get_http_client()
+                await client.post(notify_url, json=payload)
+            except Exception as e:
+                logger.exception(f"Error in send_async: {e}")
 
         if not hasattr(send_notify, "async_worker"):
             send_notify.async_worker = AsyncWorker()
@@ -346,13 +360,17 @@ class GradientServer:
                         "completed",
                     )
 
-                    response = response.result()
-                    logger.info(
-                        f"Forwarding data to {next_peer_id}, "
-                        f"total size: {len(message_body) / (1024 * 1024):.3f} MB, "
-                        f"cost time: {(time.time() - start) * 1000:.3f} ms, "
-                        f"speed: {len(message_body) / (time.time() - start) / (1024 * 1024):.3f} MB/s"
-                    )
+                    try:
+                        response = response.result(timeout=60)
+                        logger.info(
+                            f"Forwarding data to {next_peer_id}, "
+                            f"total size: {len(message_body) / (1024 * 1024):.3f} MB, "
+                            f"cost time: {(time.time() - start) * 1000:.3f} ms, "
+                            f"speed: {len(message_body) / (time.time() - start) / (1024 * 1024):.3f} MB/s"
+                        )
+                    except Exception as e:
+                        logger.exception(f"Error in rpc_pp_forward: {e}")
+
                 elif message_type == b"abort":
                     abort_request = forward_pb2.AbortRequest()
                     abort_request.ParseFromString(message_body)
