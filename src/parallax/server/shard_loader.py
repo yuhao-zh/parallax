@@ -170,6 +170,8 @@ class MLXModelLoader:
                     ):
                         is_needed = True
                         remapped_key = key.replace("model.", "", 1)
+                        if model_shard.is_last_shard and config.get("tie_word_embeddings", False):
+                            shard_weights["lm_head.weight"] = mx.array(f.get_tensor(key))
                     elif model_shard.is_last_shard:
                         if "model.norm" in key:
                             is_needed = True
@@ -178,7 +180,7 @@ class MLXModelLoader:
                             is_needed = True
                             remapped_key = key
                         elif (
-                            config.get("tie_word_embeddings", True)
+                            config.get("tie_word_embeddings", False)
                             and "embed" in key
                             and key.startswith("model.embed_tokens")
                         ):
