@@ -518,7 +518,8 @@ def initialize_sgl_model_runner(
         dtype=dtype,
         quantization=quant_method,
     )
-    model_config.tie_word_embeddings = False
+    # TODO: Fix me
+    model_config.hf_config.tie_word_embeddings = False
     model_runner = ParallaxModelRunner(
         model_config=model_config,
         mem_fraction_static=kv_cache_memory_fraction,
@@ -535,3 +536,4 @@ def initialize_sgl_model_runner(
         pp_end_layer=end_layer,
     )
     return model_runner, config, tokenizer
+
