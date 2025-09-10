@@ -120,8 +120,11 @@ def proto_to_hidden_states(
 
     hidden_states = None
     for named_tensor in proto.tensors:
-        if named_tensor.name == "hidden_states":
-            hidden_states = proto_to_tensor(named_tensor.tensor, device)
+        if named_tensor.name == "hidden_states" or named_tensor.name == "residual":
+            if hidden_states is None:
+                hidden_states = proto_to_tensor(named_tensor.tensor, device)
+            else:
+                hidden_states = hidden_states + proto_to_tensor(named_tensor.tensor, device)
     return hidden_states
 
 
