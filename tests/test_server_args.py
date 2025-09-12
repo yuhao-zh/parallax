@@ -91,6 +91,7 @@ class TestCreateExecutorConfig:
             executor_input_ipc="///ipc/1",
             executor_output_ipc="///ipc/2",
             attention_backend="torch_native",
+            moe_runner_backend="auto",
         )
 
         config = create_executor_config(args)

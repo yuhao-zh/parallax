@@ -1,3 +1,4 @@
+# pylint: disable=no-else-return
 """
 This module contains the http frontend server for Parallax.
 Two classes that handles a post request from the frontend service:
@@ -14,17 +15,22 @@ Two classes that handles a post request from the frontend service:
 """
 
 import asyncio
+import json
 import multiprocessing as mp
 import sys
+import time
 import traceback
 import uuid
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, Optional
 
+import aiohttp
 import fastapi
 import uvicorn
 import zmq
 import zmq.asyncio
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.datastructures import State
 
@@ -54,6 +60,28 @@ async def print_exception_wrapper(func):
         sys.exit(1)
 
 
+@dataclass
+class HTTPRequestInfo:
+    """HTTP Request information"""
+
+    id: str
+    text: str = ""
+    stream: bool = False
+    finish_reason: str = None
+    object: str = "chat.completion"
+    model: str = "default"
+    create_time: float = 0.0
+    update_time: float = 0.0
+    logprobs: float = None
+    matched_stop: int = None
+    # usage
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    # helper
+    is_finish: bool = False
+    stream_offset: int = 0
+
+
 class HTTPHandler:
     """
     A global handler that maintains raw requests. It has 2 main functions:
@@ -71,12 +99,132 @@ class HTTPHandler:
         context = zmq.asyncio.Context(2)
         self.send_to_executor = get_zmq_socket(context, zmq.PUSH, executor_input_ipc_name, True)
         self.recv_from_executor = get_zmq_socket(context, zmq.PULL, executor_output_ipc_name, True)
-        self.request_result = {}
-        self.request_finish = {}
+        self.processing_requests: Dict[str, HTTPRequestInfo] = {}
+
+    def create_request(self, request: Dict):
+        """Creates a new request information"""
+        rid = request["rid"]
+        stream = request.get("stream", False)
+        model = request.get("model", "default")
+        chat_object = "chat.completion.chunk" if stream else "chat.completion"
+        create_time = time.time()
+        update_time = create_time
+        request_info = HTTPRequestInfo(
+            id=rid,
+            stream=stream,
+            model=model,
+            object=chat_object,
+            create_time=create_time,
+            update_time=update_time,
+        )
+        self.processing_requests[rid] = request_info
+
+    def release_request(self, rid: str):
+        """Releases the request resources"""
+        del self.processing_requests[rid]
 
     def send_requests(self, requests: Dict):
         """Sends the request to model executor using IPC."""
         self.send_to_executor.send_pyobj(requests)
+
+    def _generate_stream_helper(self, rid, is_first, is_last):
+        """generate_stream_response helper function"""
+        request_info = self.processing_requests[rid]
+        if is_first:
+            role = "assistant"
+            content = ""
+        elif is_last:
+            content = None
+            role = None
+        else:
+            text_length = len(request_info.text)
+            content = request_info.text[request_info.stream_offset :]
+            request_info.stream_offset = text_length
+            role = None
+        response = {
+            "id": rid,
+            "object": request_info.object,
+            "model": request_info.model,
+            "created": request_info.create_time,
+            "choices": [
+                {
+                    "index": 0,
+                    "logprobs": request_info.logprobs,
+                    "finish_reason": request_info.finish_reason,
+                    "matched_stop": request_info.matched_stop,
+                },
+            ],
+            "usage": None,
+        }
+        choice = response["choices"][0]
+        choice["delta"] = {
+            "role": role,
+            "content": content,
+            "reasoning_content": None,
+            "tool_calls": None,
+        }
+        response_json = json.dumps(response, separators=(",", ":"))
+        response_str = f"data: {response_json}\n\n"
+        return response_str.encode()
+
+    def generate_stream_response(self, rid):
+        """Generates a streaming response"""
+        try:
+            first_flag = True
+            first_resposne = self._generate_stream_helper(rid, True, False)
+
+            # Intermediate response
+            while True:
+                request_info = self.processing_requests[rid]
+                if request_info.is_finish:
+                    break
+                text_length = len(request_info.text)
+                if text_length == request_info.stream_offset:
+                    continue
+                response = self._generate_stream_helper(rid, False, False)
+                if first_flag:
+                    first_flag = False
+                    response = first_resposne + response
+                yield response
+
+            # Finish response
+            last_response = self._generate_stream_helper(rid, False, True)
+            last_response = last_response + b"data: [DONE]\n\n"
+            yield last_response
+        except (asyncio.CancelledError, aiohttp.ClientError, Exception):
+            pass
+
+    def generate_non_stream_response(self, rid):
+        """Generates a non-streaming response"""
+        request_info = self.processing_requests[rid]
+        response = {
+            "id": rid,
+            "object": request_info.object,
+            "model": request_info.model,
+            "created": request_info.create_time,
+            "choices": [
+                {
+                    "index": 0,
+                    "logprobs": request_info.logprobs,
+                    "finish_reason": request_info.finish_reason,
+                    "matched_stop": request_info.matched_stop,
+                },
+            ],
+            "usage": {
+                "prompt_tokens": request_info.prompt_tokens,
+                "total_tokens": request_info.prompt_tokens + request_info.completion_tokens,
+                "completion_tokens": request_info.completion_tokens,
+                "prompt_tokens_details": None,
+            },
+        }
+        choice = response["choices"][0]
+        choice["messages"] = {
+            "role": "assistant",
+            "content": request_info.text,
+            "reasoning_content": None,
+            "tool_calls": None,
+        }
+        return response
 
     async def _handle_loop(self):
         """The event loop that handles returned requests"""
@@ -84,10 +232,23 @@ class HTTPHandler:
             recv_dict = await self.recv_from_executor.recv_pyobj()
             rid = recv_dict["rid"]
             output = recv_dict["output"]
-            if rid in self.request_result:
-                self.request_result[rid] += output
-            if recv_dict.get("eos", False) or output == "<|im_end|>":
-                self.request_finish[rid] = True
+            if rid in self.processing_requests:
+                request_info = self.processing_requests[rid]
+                request_info.update_time = time.time()
+                if recv_dict.get("eos", False) or output == "<|im_end|>":
+                    request_info.finish_reason = "stop"
+                    request_info.matched_stop = 0
+                    request_info.is_finish = True
+                elif recv_dict.get("length", False):
+                    request_info.text += output
+                    if len(output) > 0:
+                        request_info.completion_tokens += 1
+                    request_info.finish_reason = "length"
+                    request_info.is_finish = True
+                else:
+                    request_info.text += output
+                    if len(output) > 0:
+                        request_info.completion_tokens += 1
 
     async def create_handle_loop(self):
         """Create asyncio event loop task function"""
@@ -112,7 +273,7 @@ def create_error_response(
 ):
     """Creates a json error response for the frontend."""
     error = ErrorResponse(message=message, type=err_type, code=status_code.value)
-    return fastapi.ORJSONResponse(content=error.model_dump(), status_code=error.code)
+    return ORJSONResponse(content=error.model_dump(), status_code=error.code)
 
 
 # Fast API
@@ -138,21 +299,32 @@ async def v1_chat_completions(raw_request: fastapi.Request):
         request_json = await raw_request.json()
     except Exception as e:
         return create_error_response("Invalid request body, error: ", str(e))
-    request_id = f"chatcmpl-{uuid.uuid4()}"
+    request_id = str(uuid.uuid4())
     request_json["rid"] = request_id
-    app.state.http_handler.request_result[request_id] = ""
-    app.state.http_handler.request_finish[request_id] = False
+    app.state.http_handler.create_request(request_json)
     app.state.http_handler.send_requests(request_json)
-    res = ""
-    while True:
-        await asyncio.sleep(0.1)
-        res = app.state.http_handler.request_result.get(request_id)
-        is_finish = app.state.http_handler.request_finish.get(request_id)
-        if is_finish:
-            break
-    del app.state.http_handler.request_result[request_id]
-    del app.state.http_handler.request_finish[request_id]
-    return res
+    req = app.state.http_handler.processing_requests.get(request_id)
+    is_stream = req.stream
+
+    if is_stream:
+        return StreamingResponse(
+            app.state.http_handler.generate_stream_response(request_id),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+    else:
+        while True:
+            await asyncio.sleep(0.01)
+            req = app.state.http_handler.processing_requests.get(request_id)
+            is_finish = req.is_finish
+            if is_finish:
+                break
+        response = app.state.http_handler.generate_non_stream_response(request_id)
+        app.state.http_handler.release_request(request_id)
+        return ORJSONResponse(status_code=200, content=response)
 
 
 @app.post("/v1/chat/completions")

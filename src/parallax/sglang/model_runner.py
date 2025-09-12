@@ -456,6 +456,7 @@ def form_sgl_server_args(
     dtype: str = "bfloat16",
     attention_backend: str = "torch_native",
     kv_block_size: int = 64,
+    moe_runner_backend="auto",
 ):
     """Creates a SGL ServerArgs object"""
     sgl_server_args = ServerArgs(
@@ -464,6 +465,7 @@ def form_sgl_server_args(
         attention_backend=attention_backend,
         page_size=kv_block_size,
         mem_fraction_static=0.85,
+        moe_runner_backend=moe_runner_backend,
     )
     return sgl_server_args
 
@@ -487,6 +489,7 @@ def initialize_sgl_model_runner(
     kv_cache_memory_fraction: float,
     attention_backend: str,
     kv_block_size: int,
+    moe_runner_backend: str,
 ):
     """
     Creates a SGL ModelRunner object.
@@ -507,6 +510,7 @@ def initialize_sgl_model_runner(
         dtype,
         attention_backend,
         kv_block_size,
+        moe_runner_backend,
     )
     initialize_moe_config(server_args)
     quant_method = None
@@ -536,4 +540,3 @@ def initialize_sgl_model_runner(
         pp_end_layer=end_layer,
     )
     return model_runner, config, tokenizer
-
