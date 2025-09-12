@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, Optional
 
+import aiohttp
 import fastapi
 import uvicorn
 import zmq
@@ -168,27 +169,30 @@ class HTTPHandler:
 
     def generate_stream_response(self, rid):
         """Generates a streaming response"""
-        first_flag = True
-        first_resposne = self._generate_stream_helper(rid, True, False)
+        try:
+            first_flag = True
+            first_resposne = self._generate_stream_helper(rid, True, False)
 
-        # Intermediate response
-        while True:
-            request_info = self.processing_requests[rid]
-            if request_info.is_finish:
-                break
-            text_length = len(request_info.text)
-            if text_length == request_info.stream_offset:
-                continue
-            response = self._generate_stream_helper(rid, False, False)
-            if first_flag:
-                first_flag = False
-                response = first_resposne + response
-            yield response
+            # Intermediate response
+            while True:
+                request_info = self.processing_requests[rid]
+                if request_info.is_finish:
+                    break
+                text_length = len(request_info.text)
+                if text_length == request_info.stream_offset:
+                    continue
+                response = self._generate_stream_helper(rid, False, False)
+                if first_flag:
+                    first_flag = False
+                    response = first_resposne + response
+                yield response
 
-        # Finish response
-        last_response = self._generate_stream_helper(rid, False, True)
-        last_response = last_response + b"data: [DONE]\n\n"
-        yield last_response
+            # Finish response
+            last_response = self._generate_stream_helper(rid, False, True)
+            last_response = last_response + b"data: [DONE]\n\n"
+            yield last_response
+        except (asyncio.CancelledError, aiohttp.ClientError, Exception):
+            pass
 
     def generate_non_stream_response(self, rid):
         """Generates a non-streaming response"""
@@ -234,6 +238,12 @@ class HTTPHandler:
                 if recv_dict.get("eos", False) or output == "<|im_end|>":
                     request_info.finish_reason = "stop"
                     request_info.matched_stop = 0
+                    request_info.is_finish = True
+                elif recv_dict.get("length", False):
+                    request_info.text += output
+                    if len(output) > 0:
+                        request_info.completion_tokens += 1
+                    request_info.finish_reason = "length"
                     request_info.is_finish = True
                 else:
                     request_info.text += output

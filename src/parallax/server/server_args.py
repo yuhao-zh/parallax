@@ -139,6 +139,21 @@ def parse_args() -> argparse.Namespace:
         help="Choose the GPU attention kernels",
     )
 
+    parser.add_argument(
+        "--moe-runner-backend",
+        type=str,
+        default="auto",
+        choices=[
+            "auto",
+            "triton",
+            "triton_kernel",
+            "flashinfer_trtllm",
+            "flashinfer_cutlass",
+            "flashinfer_mxfp4",
+        ],
+        help="Choose the GPU moe kernels",
+    )
+
     # Logging and debugging
     parser.add_argument(
         "--log-level",

@@ -90,6 +90,7 @@ class Executor:
         executor_output_ipc_addr: Optional[str] = None,
         # GPU/SGLang Specialized Configs
         attention_backend: Optional[str] = "torch_native",
+        moe_runner_backend: Optional[str] = "auto",
     ):
         # Backend
         self.device = get_current_device()
@@ -107,6 +108,7 @@ class Executor:
                 kv_cache_memory_fraction,
                 attention_backend,
                 kv_block_size,
+                moe_runner_backend,
             )
             # SGL KV Cache Manager is already initialized in ScheduleBatch
             # TODO: Replace ScheduleBatch to Parallax inflight batch
@@ -597,17 +599,6 @@ class Executor:
                     assert req.next_token_id is not None
                     original_req.commit_new_token(req.next_token_id)
 
-                    # detokenize and send to http server
-                    cur_text = self.tokenizer.decode(req.next_token_id)
-                    req_dict = {
-                        "output": cur_text,
-                        "rid": req.request_id,
-                    }
-                    if req.next_token_id == self.tokenizer.eos_token_id:
-                        req_dict["eos"] = True
-                    if hasattr(self, "send_to_ipc_socket"):
-                        self.send_to_ipc_socket.send_pyobj(req_dict)
-
                     # Check for termination.
                     if self.scheduler.check_and_update_request_status(original_req):
                         logger.info(f"Releasing resources for finished request {req.request_id}")
@@ -616,6 +607,19 @@ class Executor:
                             self.finished_batch.append(req)
                     else:
                         self.scheduler.enque_request(original_req)
+
+                    # detokenize and send to http server
+                    cur_text = self.tokenizer.decode(req.next_token_id)
+                    req_dict = {
+                        "output": cur_text,
+                        "rid": req.request_id,
+                    }
+                    if req.next_token_id == self.tokenizer.eos_token_id:
+                        req_dict["eos"] = True
+                    if original_req.status == RequestStatus.FINISHED_MAX_LENGTH:
+                        req_dict["length"] = True
+                    if hasattr(self, "send_to_ipc_socket"):
+                        self.send_to_ipc_socket.send_pyobj(req_dict)
                 else:
                     raise TypeError(f"First peer received unexpected request type: {type(req)}")
         else:
@@ -669,17 +673,6 @@ class Executor:
                         or original_req.total_length + 1 >= original_req.max_total_length
                     )
 
-                    # detokenize and send to http server
-                    cur_text = self.tokenizer.decode(req.next_token_id)
-                    req_dict = {
-                        "output": cur_text,
-                        "rid": req.request_id,
-                    }
-                    if req.next_token_id == self.tokenizer.eos_token_id or will_exceed_limit:
-                        req_dict["eos"] = True
-                    if hasattr(self, "send_to_ipc_socket"):
-                        self.send_to_ipc_socket.send_pyobj(req_dict)
-
                     # Check for termination.
                     if self.scheduler.check_and_update_request_status(original_req):
                         logger.info(f"Releasing resources for finished request {req.request_id}")
@@ -688,6 +681,19 @@ class Executor:
                             self.finished_batch.append(req)
                     else:
                         self.scheduler.enque_request(original_req)
+
+                    # detokenize and send to http server
+                    cur_text = self.tokenizer.decode(req.next_token_id)
+                    req_dict = {
+                        "output": cur_text,
+                        "rid": req.request_id,
+                    }
+                    if req.next_token_id == self.tokenizer.eos_token_id or will_exceed_limit:
+                        req_dict["eos"] = True
+                    if original_req.status == RequestStatus.FINISHED_MAX_LENGTH:
+                        req_dict["length"] = True
+                    if hasattr(self, "send_to_ipc_socket"):
+                        self.send_to_ipc_socket.send_pyobj(req_dict)
                 else:
                     raise TypeError(f"First peer received unexpected request type: {type(req)}")
 
@@ -935,7 +941,6 @@ class Executor:
         while True:
             # 1. Ingest new requests from the http frontend
             if self.is_first_peer:
-                time.sleep(0.1)
                 http_requests = self.recv_requests_from_http()
                 self._handle_input_requests(http_requests)
 
@@ -1045,5 +1050,6 @@ def create_executor_config(args):
         "executor_input_ipc_addr": args.executor_input_ipc,
         "executor_output_ipc_addr": args.executor_output_ipc,
         "attention_backend": args.attention_backend,
+        "moe_runner_backend": args.moe_runner_backend,
     }
     return config
