@@ -168,10 +168,10 @@ class HTTPHandler:
 
     def generate_stream_response(self, rid):
         """Generates a streaming response"""
-        # 1.First empty response
-        yield self._generate_stream_helper(rid, True, False)
+        first_flag = True
+        first_resposne = self._generate_stream_helper(rid, True, False)
 
-        # 2.Intermediate response
+        # Intermediate response
         while True:
             request_info = self.processing_requests[rid]
             if request_info.is_finish:
@@ -179,11 +179,16 @@ class HTTPHandler:
             text_length = len(request_info.text)
             if text_length == request_info.stream_offset:
                 continue
-            yield self._generate_stream_helper(rid, False, False)
+            response = self._generate_stream_helper(rid, False, False)
+            if first_flag:
+                first_flag = False
+                response = first_resposne + response
+            yield response
 
-        # 3.Finish response
-        yield self._generate_stream_helper(rid, False, True)
-        yield b"data: [DONE]\n\n"
+        # Finish response
+        last_response = self._generate_stream_helper(rid, False, True)
+        last_response = last_response + b"data: [DONE]\n\n"
+        yield last_response
 
     def generate_non_stream_response(self, rid):
         """Generates a non-streaming response"""
