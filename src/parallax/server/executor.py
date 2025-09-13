@@ -563,8 +563,14 @@ class Executor:
         if raw_sampling_params is None:
             sampling_params = SamplingParams()
         else:
-            # TODO
+            # TODO: Support more sampling params
             sampling_params = SamplingParams()
+            if "temperature" in raw_sampling_params:
+                sampling_params.temperature = raw_sampling_params["temperature"]
+            if "top_k" in raw_sampling_params:
+                sampling_params.top_k = raw_sampling_params["top_k"]
+            if "top_p" in raw_sampling_params:
+                sampling_params.top_p = raw_sampling_params["top_p"]
 
         req = InitialRequest(
             request_id=rid,
@@ -574,6 +580,8 @@ class Executor:
             max_new_tokens=max_new_tokens,
             max_total_length=max_total_length,
         )
+        if "routing_table" in raw_request:
+            req.routing_table = raw_request["routing_table"]
         return req
 
     def _handle_cuda_input_requests(self, requests: List[Request]):
@@ -667,6 +675,8 @@ class Executor:
 
                     assert req.next_token_id is not None
                     original_req.commit_new_token(req.next_token_id)
+                    if len(req.routing_table) > 0:
+                        original_req.routing_table = req.routing_table
 
                     will_exceed_limit = (
                         original_req.output_length + 1 >= original_req.max_new_tokens
@@ -1045,8 +1055,8 @@ def create_executor_config(args):
         "prefill_priority": args.prefill_priority,
         "micro_batch_ratio": args.micro_batch_ratio,
         "scheduler_wait_ms": args.scheduler_wait_ms,
-        "send_to_peer_addr": getattr(args, "send_to_peer_addr", None),
-        "recv_from_peer_addr": getattr(args, "recv_from_peer_addr", None),
+        "send_to_peer_addr": "ipc:///tmp/parallax_p2p_send_to_peer",
+        "recv_from_peer_addr": "ipc:///tmp/parallax_p2p_recv_from_peer",
         "executor_input_ipc_addr": args.executor_input_ipc,
         "executor_output_ipc_addr": args.executor_output_ipc,
         "attention_backend": args.attention_backend,

@@ -11,7 +11,8 @@ readme = "README.md"
 requires-python = ">=3.8"
 
 dependencies = [
-  "mlx-lm==0.26.3",
+  "mlx-lm==0.26.4",
+  "mlx==0.28.0",
   "torch==2.8.0",
   "sglang[runtime_common]==0.5.1.post3",
   "msgpack>=1.0.7",
@@ -21,12 +22,12 @@ dependencies = [
   "psutil>=5.9.5",
   "httpx",
   "protobuf==6.31.1",
-  "hivemind @ git+https://github.com/learning-at-home/hivemind.git@53533289edfeb1f9b2f5917cbae66fe50cfa2548",
   "dijkstar==2.6.0",
   "uvicorn",
   "uvloop",
   "fastapi",
   "pydantic",
+  "lattica @ git+https://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@github.com/OpenEdgeHQ/p2p-lattica.git#subdirectory=bindings/python",
 ]
 
 [project.optional-dependencies]

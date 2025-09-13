@@ -9,7 +9,6 @@ It is used to handle the communication between the peers, and communicate with t
 
 # pylint: disable=wrong-import-position,wrong-import-order,missing-function-docstring,broad-exception-caught,too-many-locals,too-many-branches,too-many-statements
 
-import builtins
 import dataclasses
 import enum
 import logging
@@ -21,30 +20,11 @@ from typing import List, Optional
 import dijkstar
 import httpx
 import zmq
-from mlx_lm.utils import get_model_path, load_config
+from lattica import ConnectionHandler, Lattica, rpc_method, rpc_stream
 
 from parallax.p2p.proto import forward_pb2
 from parallax.p2p.utils import AsyncWorker
 from parallax.utils.utils import get_zmq_socket
-
-# set hivemind grpc message size to 1GB
-_original_import = builtins.__import__
-
-
-def patched_import(name, *args, **kwargs):
-    module = _original_import(name, *args, **kwargs)
-    if name == "hivemind.p2p.p2p_daemon_bindings.control":
-        if hasattr(module, "DEFAULT_MAX_MSG_SIZE"):
-            module.DEFAULT_MAX_MSG_SIZE = 2**30
-    return module
-
-
-builtins.__import__ = patched_import
-
-from hivemind import DHT, P2PContext
-from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
-from hivemind.moe.server.connection_handler import ConnectionHandler
-from hivemind.p2p import PeerID
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +101,7 @@ class TransformerConnectionHandler(ConnectionHandler):
 
     def __init__(
         self,
-        dht: DHT,
+        lattica: Lattica,
         recv_from_peer_addr: str,
         send_to_peer_addr: str,
         block_start_index: int,
@@ -129,7 +109,7 @@ class TransformerConnectionHandler(ConnectionHandler):
         notify_url: Optional[str] = None,
     ):
         # Initialize the base class
-        super().__init__(dht, {})
+        super().__init__(lattica)
         self.recv_from_peer_addr = recv_from_peer_addr
         self.send_to_peer_addr = send_to_peer_addr
         self.block_start_index = block_start_index
@@ -145,10 +125,10 @@ class TransformerConnectionHandler(ConnectionHandler):
             )
         return self._recv_from_peer
 
-    async def rpc_pp_forward(
+    @rpc_stream
+    def rpc_pp_forward(
         self,
         request: forward_pb2.ForwardRequest,
-        context: P2PContext,  # pylint: disable=unused-argument
     ) -> forward_pb2.ForwardResponse:
         """Handle forward pass request with explicit proxy tensors support"""
         try:
@@ -160,10 +140,10 @@ class TransformerConnectionHandler(ConnectionHandler):
             logger.exception(f"Error in rpc_pp_forward: {e}")
         return forward_pb2.ForwardResponse()
 
-    async def rpc_abort(
+    @rpc_method
+    def rpc_abort(
         self,
         request: forward_pb2.AbortRequest,
-        context: P2PContext,  # pylint: disable=unused-argument
     ) -> forward_pb2.AbortResponse:
         try:
             self.recv_from_peer.send_multipart([b"abort", request.SerializeToString()])
@@ -184,55 +164,59 @@ class GradientServer:
         recv_from_peer_addr: str,
         send_to_peer_addr: str,
         initial_peers: List[str] = [],
+        relay_servers: List[str] = [],
         block_start_index: int = 0,
         block_end_index: int = 1,
         hidden_layers: int = 128,
         dht_prefix: str = "gradient",
+        host_maddrs: List[str] = [],
+        announce_maddrs: List[str] = [],
         notify_url: str = None,
-        **kwargs,
     ):
         self.recv_from_peer_addr = recv_from_peer_addr
         self.send_to_peer_addr = send_to_peer_addr
         self.initial_peers = initial_peers
+        self.relay_servers = relay_servers
         self.block_start_index = block_start_index
         self.block_end_index = block_end_index
         self.hidden_layers = hidden_layers
         self.dht_prefix = dht_prefix
+        self.host_maddrs = host_maddrs
+        self.announce_maddrs = announce_maddrs
         self.notify_url = notify_url
-        self.kwargs = kwargs
 
-        self.node_id = f"{dht_prefix}_{block_start_index}"
-        self.dht = None
+        self.node_id = f"{dht_prefix}_announce"
+        self.lattica = None
         self.routing_table = None
         self.routing_table_update_interval = 10
         self.server_info = ServerInfo(state=ServerState.JOINING)
-        self.stop_event = threading.Event()
         self.stubs = {}
 
     def run(self):
-        """Initialize DHT network connection"""
+        self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
+
+        if len(self.relay_servers) > 0:
+            logger.info(f"Using relay servers: {self.relay_servers}")
+            self.lattica.with_relay_servers(self.relay_servers).with_dcutr(True)
+
+        if len(self.announce_maddrs) > 0:
+            logger.info(f"Using announce maddrs: {self.announce_maddrs}")
+            self.lattica.with_external_addrs(self.announce_maddrs)
+
         if len(self.initial_peers) > 0:
-            logger.info(f"Connecting to DHT network, initial peers: {self.initial_peers}")
-        else:
-            logger.info("No initial peers provided, start a new DHT network")
+            logger.info(f"Using initial peers: {self.initial_peers}")
+            self.lattica.with_bootstraps(self.initial_peers)
 
-        self.dht = DHT(
-            initial_peers=self.initial_peers, start=True, client_mode=False, **self.kwargs
-        )
-        visible_maddrs = [str(addr) for addr in self.dht.get_visible_maddrs()]
-        logger.info(f"Server visible addresses: {visible_maddrs}")
-
-        self.p2p = RemoteExpertWorker.run_coroutine(self.dht.replicate_p2p())
+        self.lattica.build()
 
         self.connection_handler = TransformerConnectionHandler(
-            dht=self.dht,
+            lattica=self.lattica,
             recv_from_peer_addr=self.recv_from_peer_addr,
             send_to_peer_addr=self.send_to_peer_addr,
             block_start_index=self.block_start_index,
             block_end_index=self.block_end_index,
             notify_url=self.notify_url,
-        )
-        self.connection_handler.run_in_background()  # sub-process
+        )  # thread
         self.start_node_announcer()  # thread
         self.start_routing_table_updater()  # thread
         self.start_node_sender()  # main loop
@@ -241,31 +225,24 @@ class GradientServer:
         """Find available servers in the DHT network"""
         # Find all announced blocks
         server_blocks = []
-        for block_index in range(self.hidden_layers):
-            block_announced_key = f"{self.dht_prefix}_{block_index}"
-            block_servers = self.dht.get(block_announced_key)
-            if block_servers is None:
-                continue
-            for peer_id, value in block_servers.value.items():
-                server_blocks.append(
-                    {
-                        "peer_id": peer_id,
-                        "block_start_index": block_index,
-                        "block_end_index": value.value["block_end_index"],
-                    }
-                )
-
-        if len(server_blocks) == 1:
-            # TODO: restart dht
-            logger.warning("Only one server found, this is not normal, need to restart dht")
+        block_announced_key = f"{self.dht_prefix}_announce"
+        block_servers = self.lattica.get(block_announced_key)
+        if block_servers is None:
+            return []
+        for peer_id, value in block_servers.value.items():
+            server_blocks.append(
+                {
+                    "peer_id": peer_id,
+                    "block_start_index": value.value["block_start_index"],
+                    "block_end_index": value.value["block_end_index"],
+                }
+            )
 
         return server_blocks
 
     def get_stub(self, peer_id):
         if peer_id not in self.stubs:
-            self.stubs[peer_id] = TransformerConnectionHandler.get_stub(
-                self.p2p, PeerID.from_base58(peer_id)
-            )
+            self.stubs[peer_id] = self.connection_handler.get_stub(peer_id)
         return self.stubs[peer_id]
 
     def start_routing_table_updater(self):
@@ -278,8 +255,6 @@ class GradientServer:
                         start_index = server["block_start_index"]
                         end_index = server["block_end_index"]
                         peer_id = server["peer_id"]
-
-                        # TODO: set weight based on distance between indices, e.g. network latency
                         graph.add_edge(start_index, end_index, (1, peer_id))
                     try:
                         path = dijkstar.find_path(
@@ -288,15 +263,10 @@ class GradientServer:
                             self.hidden_layers,
                             cost_func=lambda u, v, e, prev_path: e[0],
                         )
-                        routing_table = [self.dht.peer_id.to_base58()] + [
-                            edge[1] for edge in path.edges
-                        ]
+                        routing_table = [self.lattica.peer_id()] + [edge[1] for edge in path.edges]
                         if self.routing_table != routing_table:
                             self.routing_table = routing_table
                             logger.info(f"Set routing table: {routing_table}")
-                            # exit when routing table is set as our node is static right now.
-                            # TODO: remove this when we have dynamic node
-                            break
                     except dijkstar.NoPathError:
                         self.routing_table = None
                         logger.warning(
@@ -338,20 +308,24 @@ class GradientServer:
                                 self.block_start_index == 0
                             ), "Request routing table is not set for non-head rank"
                             req.routing_table.extend(self.routing_table)
+                            logger.info(
+                                f"Set routing table {self.routing_table} for request {req.rid}"
+                            )
                         # Assume all requests have same routing table
                         routing_table = list(req.routing_table)
 
                     try:
-                        self_index = routing_table.index(self.dht.peer_id.to_base58())
+                        self_index = routing_table.index(self.lattica.peer_id())
                     except ValueError as exc:
                         raise RuntimeError("Can not find self in the routing table") from exc
 
                     next_peer_id = routing_table[(self_index + 1) % len(routing_table)]
                     stub = self.get_stub(next_peer_id)
                     start = time.time()
-                    response = RemoteExpertWorker.run_coroutine(
-                        stub.rpc_pp_forward(forward_request), return_future=True
-                    )
+                    logger.info(f"Start forwarding data to {next_peer_id}")
+                    future = stub.rpc_pp_forward(forward_request)
+                    response = future.result()
+                    logger.info(f"Forward request response: {response}")
                     send_notify(
                         self.notify_url,
                         self.block_start_index,
@@ -360,16 +334,12 @@ class GradientServer:
                         "completed",
                     )
 
-                    try:
-                        response = response.result(timeout=60)
-                        logger.info(
-                            f"Forwarding data to {next_peer_id}, "
-                            f"total size: {len(message_body) / (1024 * 1024):.3f} MB, "
-                            f"cost time: {(time.time() - start) * 1000:.3f} ms, "
-                            f"speed: {len(message_body) / (time.time() - start) / (1024 * 1024):.3f} MB/s"
-                        )
-                    except Exception as e:
-                        logger.exception(f"Error in rpc_pp_forward: {e}")
+                    logger.info(
+                        f"Forwarding data to {next_peer_id}, "
+                        f"total size: {len(message_body) / (1024 * 1024):.3f} MB, "
+                        f"cost time: {(time.time() - start) * 1000:.3f} ms, "
+                        f"speed: {len(message_body) / (time.time() - start) / (1024 * 1024):.3f} MB/s"
+                    )
 
                 elif message_type == b"abort":
                     abort_request = forward_pb2.AbortRequest()
@@ -389,7 +359,7 @@ class GradientServer:
                         routing_table = list(req.routing_table)
 
                     try:
-                        self_index = routing_table.index(self.dht.peer_id.to_base58())
+                        self_index = routing_table.index(self.lattica.peer_id())
                     except ValueError as exc:
                         raise RuntimeError("Can not find self in the routing table") from exc
 
@@ -400,9 +370,8 @@ class GradientServer:
                             logger.info(
                                 f"Send abort request: {[r.rid for r in abort_request.reqs]} to: {peer_id}"
                             )
-                            RemoteExpertWorker.run_coroutine(
-                                stub.rpc_abort(abort_request), return_future=True
-                            )
+                            response = stub.rpc_abort(abort_request)
+                            logger.info(f"Abort request response: {response}")
                 else:
                     logger.error(f"Unknown message type: {message_type}")
 
@@ -418,15 +387,15 @@ class GradientServer:
                 while not self.stop_event.is_set():
                     # Announce the range ID
                     try:
-                        self.dht.store(
+                        self.lattica.store(
                             key=self.node_id,
-                            subkey=self.dht.peer_id.to_string(),
+                            subkey=self.lattica.peer_id(),
                             value={
+                                "block_start_index": self.block_start_index,
                                 "block_end_index": self.block_end_index,
                             },
                             expiration_time=time.time() + 60,  # Valid for 60 seconds
                         )
-                        # logger.info(f"Announced {self.node_id} on DHT")
                     except Exception as e:
                         logger.warning(f"Failed to announce {self.node_id}: {e}")
 
@@ -436,46 +405,43 @@ class GradientServer:
                 logger.exception(f"Module announcer thread error: {e}")
 
         # Start announcer thread
+        self.stop_event = threading.Event()
         self.announcer = threading.Thread(target=_announcer_thread, daemon=True)
         self.announcer.start()
 
 
-def launch_p2p_server(args):
-    host_maddrs = args.host_maddrs
-    dht_port = args.dht_port
+def launch_p2p_server(
+    initial_peers: List[str],
+    relay_servers: List[str],
+    pp_start_layer: int,
+    pp_end_layer: int,
+    hidden_layers: int,
+    dht_port: Optional[int],
+    dht_prefix: str,
+    host_maddrs: Optional[List[str]],
+    announce_maddrs: List[str],
+    notify_url: str,
+):
     if dht_port is not None:
-        assert host_maddrs is None, "You can't use --port and --host_maddrs at the same time"
+        assert host_maddrs is None, "You can't use --dht-port and --host-maddrs at the same time"
     else:
         dht_port = 0
     if host_maddrs is None:
         host_maddrs = [f"/ip4/0.0.0.0/tcp/{dht_port}", f"/ip6/::/tcp/{dht_port}"]
 
-    announce_maddrs = args.announce_maddrs
-    public_ip = args.public_ip
-    if public_ip is not None:
-        assert (
-            announce_maddrs is None
-        ), "You can't use --public_ip and --announce_maddrs at the same time"
-        assert (
-            dht_port != 0
-        ), "Please specify a fixed non-zero --port when you use --public_ip (e.g., --port 31337)"
-        announce_maddrs = [f"/ip4/{public_ip}/tcp/{dht_port}"]
-
-    # Extra kwargs for server
-    kwargs = {"host_maddrs": host_maddrs, "announce_maddrs": announce_maddrs}
-
-    model_config = load_config(get_model_path(args.model_path)[0])
+    # Run the server in a separate thread to keep the main thread free for event loop
     server = GradientServer(
-        recv_from_peer_addr=args.recv_from_peer_addr,
-        send_to_peer_addr=args.send_to_peer_addr,
-        initial_peers=args.initial_peers,
-        hidden_layers=model_config.get("num_hidden_layers", 256),
-        block_start_index=args.start_layer,
-        block_end_index=args.end_layer,
-        dht_prefix=args.dht_prefix,
-        notify_url=args.notify_url,
-        **kwargs,
+        recv_from_peer_addr="ipc:///tmp/parallax_p2p_recv_from_peer",
+        send_to_peer_addr="ipc:///tmp/parallax_p2p_send_to_peer",
+        initial_peers=initial_peers,
+        relay_servers=relay_servers,
+        block_start_index=pp_start_layer,
+        block_end_index=pp_end_layer,
+        hidden_layers=hidden_layers,
+        dht_prefix=dht_prefix,
+        host_maddrs=host_maddrs,
+        announce_maddrs=announce_maddrs,
+        notify_url=notify_url,
     )
-
     # Start the server
     mp.Process(target=server.run).start()

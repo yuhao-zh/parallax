@@ -27,7 +27,7 @@ from parallax.utils.logging_config import get_logger
 logger = get_logger("parallax.launch")
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method("fork", force=True)
+    multiprocessing.set_start_method("spawn", force=True)
     try:
         args = parse_args()
 
@@ -41,10 +41,22 @@ if __name__ == "__main__":
         logger.info(f"executor_input_addr: {args.executor_input_ipc}")
         logger.info(f"executor_output_addr: {args.executor_output_ipc}")
 
-        launch_p2p_server(args)
         launch_http_server(args)
 
         executor = Executor.create_from_args(args)
+
+        launch_p2p_server(
+            initial_peers=args.initial_peers,
+            relay_servers=args.relay_servers,
+            pp_start_layer=args.start_layer,
+            pp_end_layer=args.end_layer,
+            hidden_layers=executor.config.get("num_hidden_layers"),
+            dht_port=args.dht_port,
+            dht_prefix=args.dht_prefix,
+            host_maddrs=args.host_maddrs,
+            announce_maddrs=args.announce_maddrs,
+            notify_url=args.notify_url,
+        )
         try:
             executor.run_loop()
         except KeyboardInterrupt:

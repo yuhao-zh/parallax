@@ -46,6 +46,7 @@ def request_to_proto(
         proto_req.output_length = request.current_position - len(request.input_ids)
         proto_req.input_ids.extend(request.input_ids)
         proto_req.routing_table.extend(request.routing_table)
+        proto_req.sampling_params.CopyFrom(sampling_params_to_proto(request.sampling_params))
         forward_request.reqs.append(proto_req)
 
         # Check if hidden_states contains a single token_id (from Last Peer to First Peer)
@@ -225,7 +226,8 @@ def sampling_params_to_proto(params: SamplingParams) -> forward_pb2.SamplingPara
     proto.repetition_penalty = params.repetition_penalty
     proto.presence_penalty = params.presence_penalty
     proto.frequency_penalty = params.frequency_penalty
-    proto.json_schema = params.json_schema
+    if params.json_schema is not None:
+        proto.json_schema = params.json_schema
     return proto
 
 

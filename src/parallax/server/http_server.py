@@ -123,9 +123,9 @@ class HTTPHandler:
         """Releases the request resources"""
         del self.processing_requests[rid]
 
-    def send_requests(self, requests: Dict):
+    def send_request(self, request: Dict):
         """Sends the request to model executor using IPC."""
-        self.send_to_executor.send_pyobj(requests)
+        self.send_to_executor.send_pyobj(request)
 
     def _generate_stream_helper(self, rid, is_first, is_last):
         """generate_stream_response helper function"""
@@ -302,7 +302,7 @@ async def v1_chat_completions(raw_request: fastapi.Request):
     request_id = str(uuid.uuid4())
     request_json["rid"] = request_id
     app.state.http_handler.create_request(request_json)
-    app.state.http_handler.send_requests(request_json)
+    app.state.http_handler.send_request(request_json)
     req = app.state.http_handler.processing_requests.get(request_id)
     is_stream = req.stream
 

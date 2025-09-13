@@ -318,6 +318,7 @@ class IntermediateRequest(Request):
             current_position=initial_request.total_length,
             hidden_states=hidden_states,
             sampling_params=initial_request.sampling_params,
+            routing_table=initial_request.routing_table,
         )
 
     @classmethod
@@ -348,6 +349,7 @@ class IntermediateRequest(Request):
             f"current_position={self.current_position}",
             f"input_ids={self.input_ids}",
             f"hidden_states={self.hidden_states}",
+            f"routing_table={self.routing_table}",
         ]
 
         if self.hidden_states is not None:

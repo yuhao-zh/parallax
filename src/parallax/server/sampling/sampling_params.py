@@ -15,7 +15,7 @@ class SamplingParams:
         temperature: float = 1.0,
         top_p: float = 1.0,
         min_p: float = 0.0,
-        top_k: int = -1.0,
+        top_k: int = -1,
         stop_token_ids: Optional[List[int]] = None,
         ignore_eos: bool = False,
         stop_strs: Optional[Union[str, List[str]]] = None,

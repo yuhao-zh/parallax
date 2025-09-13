@@ -9,6 +9,7 @@ TODO: Add penalizer support.
 """
 
 import dataclasses
+from functools import partial
 
 import mlx.core as mx
 from mlx import nn
@@ -90,7 +91,7 @@ class Sampler(nn.Module):
         return batch_next_token_ids
 
 
-@mx.compile
+@partial(mx.compile, inputs=mx.random.state, outputs=mx.random.state)
 def apply_top_k_top_p_min_p_sampling(
     logits: mx.array,
     top_ks: mx.array,

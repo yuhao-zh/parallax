@@ -64,9 +64,9 @@ jobs:
             ],
             "stream": false,
             "max_tokens": 1024,
-            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": false},
             "sampling_params": {
-                "skip_special_tokens": false
+                "top_k": 3
             }
         }'
         kill $PID 2>/dev/null || true
