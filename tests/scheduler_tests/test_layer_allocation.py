@@ -21,6 +21,8 @@ from scheduling.layer_allocation import (
 from scheduling.model_info import ModelInfo
 from scheduling.node import Node, NodeHardwareInfo
 
+from .test_utils import build_model_info
+
 
 def _build_node(gpu_type: str, model: ModelInfo, id_suffix: str = "") -> Node:
     hw_map = {
@@ -31,26 +33,6 @@ def _build_node(gpu_type: str, model: ModelInfo, id_suffix: str = "") -> Node:
     }
     hw = hw_map[gpu_type]
     return Node(node_id=hw.node_id, hardware=hw, model_info=model)
-
-
-def build_model_info(num_layers: int) -> ModelInfo:
-    """Build a model config used across tests (matches allocation tests)."""
-    return ModelInfo(
-        model_name=f"GPUOss-{num_layers}L",
-        head_size=64,
-        hidden_dim=2880,
-        intermediate_dim=2880,
-        num_attention_heads=64,
-        num_kv_heads=8,
-        vocab_size=201088,
-        num_layers=num_layers,
-        ffn_num_projections=3,
-        num_local_experts=128,
-        num_experts_per_tok=4,
-        param_bytes_per_element=1,
-        cache_bytes_per_element=2,
-        embedding_bytes_per_element=2,
-    )
 
 
 def test_capacity_sanity_check():

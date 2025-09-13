@@ -98,7 +98,9 @@ class ModelInfo:
             2 * self.ffn_num_projections * target_seq_len * self.hidden_dim * self.intermediate_dim
         )
         # Sparse MoE FFN, if applicable
-        expected_experts = self.expected_num_activated_experts(batch_size, target_seq_len)
+        expected_experts = self.expected_num_activated_experts(
+            batch_size=batch_size, target_seq_len=target_seq_len
+        )
         if expected_experts is not None:
             ffn_flops *= expected_experts
 
@@ -134,10 +136,14 @@ class ModelInfo:
             * self.intermediate_dim
         )
         if roofline:
-            expected_experts = self.expected_num_activated_experts(batch_size, target_seq_len)
+            expected_experts = self.expected_num_activated_experts(
+                batch_size=batch_size, target_seq_len=target_seq_len
+            )
             if expected_experts is not None:
                 ffn_params *= expected_experts
-            kv_cache_size = self.per_layer_kv_cache_size(batch_size, source_seq_len)
+            kv_cache_size = self.per_layer_kv_cache_size(
+                batch_size=batch_size, source_seq_len=source_seq_len
+            )
         else:
             if self.num_local_experts is not None:
                 ffn_params *= self.num_local_experts

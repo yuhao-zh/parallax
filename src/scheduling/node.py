@@ -195,7 +195,7 @@ class Node:
         num_kv_tokens_can_host = floor(
             self.hardware.memory_gb * 1024 * 1024 * 1024 * self.kv_cache_ratio / kv_size
         )
-        return min(self.max_requests, floor(num_kv_tokens_can_host / self.max_sequence_length))
+        return min(self.max_concurrent_requests, floor(num_kv_tokens_can_host / self.max_sequence_length))
 
     @property
     def num_current_layers(self) -> int:
@@ -336,10 +336,9 @@ class Node:
 
         Interprets `current_layers` as a half-open interval [start, end).
         """
-        if self.current_layers is None:
+        if self.start_layer is None or self.end_layer is None:
             return False
-        start_layer, end_layer = self.current_layers
-        return start_layer <= layer_id < end_layer
+        return self.start_layer <= layer_id < self.end_layer
 
     def add_request(self):
         """Add a request to this node."""
