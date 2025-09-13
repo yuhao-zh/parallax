@@ -153,9 +153,13 @@ class BaseLayerAllocator:
             return False
         return True
 
-    def initialize(self) -> None:
-        """Static assignment based on existing nodes. For cold-start and global rebalancing."""
-        return
+    def initialize(self) -> bool:
+        """Static assignment based on existing nodes. For cold-start and global rebalancing.
+
+        Returns:
+            True if at least one full pipeline (covering [0, num_total_layers)) was allocated.
+        """
+        return False
 
     def allocate(self, node: Node, start_layer: int, end_layer: int) -> None:
         """Allocate a node to a specific layer range."""
@@ -220,6 +224,10 @@ class BaseLayerAllocator:
         loads. If this value exceeds a configurable threshold, it indicates
         significant imbalance and returns True.
         """
+
+        # If we don't currently have a full pipeline covering [0, L), force rebalance
+        if not self.has_full_pipeline():
+            return True
 
         layer_heap = self.layer_loads_heap
         if len(layer_heap) < 2:
@@ -375,6 +383,19 @@ class BaseLayerAllocator:
                 f"Assignment did not cover all layers: assigned {start_layer} of {total_layers}"
             )
 
+    def list_node_allocations(self) -> List[Tuple[str, int, int]]:
+        """List current per-node layer allocations as (node_id, start_layer, end_layer).
+
+        Nodes without an allocation are omitted. Results are sorted by start_layer.
+        """
+        allocations: List[Tuple[str, int, int]] = []
+        for node in self.nodes:
+            if node.start_layer is None or node.end_layer is None:
+                continue
+            allocations.append((node.node_id, int(node.start_layer), int(node.end_layer)))
+        allocations.sort(key=lambda x: (x[1], x[2], x[0]))
+        return allocations
+
     def get_lightest_layer(self) -> Optional[LayerLoad]:
         """Return the current lightest-hosted layer from the heap, if any."""
         if not self.layer_loads_heap:
@@ -407,13 +428,46 @@ class BaseLayerAllocator:
         if total_cluster_memory == 0 or total_cluster_flops == 0:
             return 0.0
 
-        normalized_memory = layer.current_memory_size / total_cluster_memory
-        normalized_flops = layer.current_flops / total_cluster_flops
+        normalized_memory = layer.current_kv_size / total_cluster_memory
+        normalized_flops = layer.current_compute / total_cluster_flops
 
         return (
             self.layer_hosting_power_memory_score * normalized_memory
             + (1 - self.layer_hosting_power_memory_score) * normalized_flops
         )
+
+    def has_full_pipeline(self) -> bool:
+        """Return True if there exists at least one pipeline covering [0, num_total_layers).
+
+        Checks whether we can chain contiguous node allocations starting at 0 to reach L.
+        """
+        total_layers = self.num_total_layers
+        # Build map from start -> max end among nodes starting at that start
+        start_to_max_end: Dict[int, int] = {}
+        for node in self.nodes:
+            if node.start_layer is None or node.end_layer is None:
+                continue
+            s, e = node.start_layer, node.end_layer
+            if s < 0 or e <= s:
+                continue
+            if s not in start_to_max_end or e > start_to_max_end[s]:
+                start_to_max_end[s] = e
+
+        current_end = 0
+        steps = 0
+        # Greedily hop by contiguous starts until we cover all layers or fail
+        while True:
+            if current_end == total_layers:
+                return True
+            if steps > len(start_to_max_end) + 1:
+                return False
+            if current_end not in start_to_max_end:
+                return False
+            next_end = start_to_max_end[current_end]
+            if next_end <= current_end:
+                return False
+            current_end = next_end
+            steps += 1
 
 
 class GreedyLayerAllocator(BaseLayerAllocator):
@@ -474,7 +528,7 @@ class GreedyLayerAllocator(BaseLayerAllocator):
         )
 
     # pylint: disable=too-many-locals, too-many-nested-blocks, too-many-branches
-    def initialize(self) -> None:
+    def initialize(self) -> bool:
         """
         Allocate layers to nodes greedily to maximize the number of pipelines.
 
@@ -549,7 +603,8 @@ class GreedyLayerAllocator(BaseLayerAllocator):
                 break
 
         if not any_assigned:
-            raise ValueError("No valid allocation found")
+            return False
+        return True
 
 
 class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
@@ -611,13 +666,13 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
         self._path: Dict[Tuple[int, Tuple[int, ...], int], Tuple] = {}
 
     # pylint: disable=too-many-locals, too-many-statements
-    def initialize(self) -> None:
+    def initialize(self) -> bool:
         num_nodes = len(self.nodes)
         num_layers = int(self.model_info.num_layers)
         total_cap = sum(node.get_decoder_layer_capacity() for node in self.nodes)
 
         if num_layers <= 0 or num_nodes == 0 or total_cap < num_layers:
-            raise ValueError("No valid allocation found")
+            return False
         # used for pruning
         suffix_sum = [0] * (num_nodes + 1)
         for i in range(num_nodes - 1, -1, -1):
@@ -721,7 +776,7 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
                     best_path = dict(path)
 
         if best_num_pipes is None or best_num_pipes == 0:
-            raise ValueError("No valid allocation found")
+            return False
         self._path = best_path
         pipelines = self._backtrack(best_num_pipes, num_nodes)
 
@@ -730,7 +785,7 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
             if not pl_nodes:
                 continue
             self.adjust_pipeline_layers(pl_nodes, assume_sorted=False)
-        # No return value; nodes updated in-place
+        return True
 
     def _backtrack(self, best_num_pipes: int, num_nodes: int) -> List[List[Node]]:
         # Reconstruct pipelines

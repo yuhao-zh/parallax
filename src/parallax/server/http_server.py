@@ -28,8 +28,8 @@ import zmq.asyncio
 from pydantic import BaseModel
 from starlette.datastructures import State
 
-from parallax.utils.logging_config import get_logger
 from parallax.utils.utils import get_zmq_socket
+from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 

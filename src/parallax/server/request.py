@@ -63,7 +63,7 @@ from enum import Enum
 from typing import Any, List, Optional
 
 from parallax.server.sampling.sampling_params import SamplingParams
-from parallax.utils.logging_config import get_logger
+from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 

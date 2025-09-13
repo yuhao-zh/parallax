@@ -9,6 +9,11 @@ version = "0.0.1"
 description = "Decentralised pipeline-parallel LLM serving with MLX-LM + Hivemind"
 readme = "README.md"
 requires-python = ">=3.8"
+packages = [
+  { include = "parallax", from = "src" },
+  { include = "scheduling", from = "src" },
+  { include = "parallax_utils", from = "src" },
+]
 
 dependencies = [
   "mlx-lm==0.26.3",

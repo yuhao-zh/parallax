@@ -536,4 +536,3 @@ def initialize_sgl_model_runner(
         pp_end_layer=end_layer,
     )
     return model_runner, config, tokenizer
-

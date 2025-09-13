@@ -21,7 +21,7 @@ from parallax.server.request import Request
 from parallax.server.sampling.sampling_params import (
     SamplingParams as ParallaxSamplingParams,
 )
-from parallax.utils.logging_config import get_logger
+from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 

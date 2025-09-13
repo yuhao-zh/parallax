@@ -195,7 +195,9 @@ class Node:
         num_kv_tokens_can_host = floor(
             self.hardware.memory_gb * 1024 * 1024 * 1024 * self.kv_cache_ratio / kv_size
         )
-        return min(self.max_concurrent_requests, floor(num_kv_tokens_can_host / self.max_sequence_length))
+        return min(
+            self.max_concurrent_requests, floor(num_kv_tokens_can_host / self.max_sequence_length)
+        )
 
     @property
     def num_current_layers(self) -> int:
