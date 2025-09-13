@@ -51,9 +51,23 @@ jobs:
           --max-num-tokens-in-batch 16384 \
           --kv-block-size 1024 \
           --max-batch-size 128 \
-          --start-layer 14 \
+          --start-layer 0 \
           --end-layer 28 &
         PID=$!
-        sleep 180
+        sleep 60
+        curl --location 'http://localhost:3000/v1/chat/completions' --header 'Content-Type: application/json' --data '{
+            "messages": [
+              {
+                "role": "user",
+                "content": "What is the capital of France"
+              }
+            ],
+            "stream": false,
+            "max_tokens": 1024,
+            "temperature": 0,
+            "sampling_params": {
+                "skip_special_tokens": false
+            }
+        }'
         kill $PID 2>/dev/null || true
-        wait $PID 2>/dev/null || echo "E2E test completed after 3 minutes"
+        wait $PID 2>/dev/null || echo -e "\nE2E test completed after 60 seconds"

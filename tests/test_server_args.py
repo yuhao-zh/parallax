@@ -5,26 +5,10 @@ Tests for the server_args module.
 import argparse
 from unittest.mock import patch
 
-import mlx.core as mx
 import pytest
 
 from parallax.server.executor import create_executor_config
-from parallax.server.server_args import parse_args, parse_dtype, validate_args
-
-
-class TestParseDtype:
-    """Test dtype parsing functionality."""
-
-    def test_valid_dtypes(self):
-        """Test parsing of valid dtypes."""
-        assert parse_dtype("float16") == mx.float16
-        assert parse_dtype("bfloat16") == mx.bfloat16
-        assert parse_dtype("float32") == mx.float32
-
-    def test_invalid_dtype(self):
-        """Test parsing of invalid dtype."""
-        with pytest.raises(ValueError, match="Unsupported dtype"):
-            parse_dtype("invalid_dtype")
+from parallax.server.server_args import parse_args, validate_args
 
 
 class TestValidateArgs:
@@ -35,6 +19,7 @@ class TestValidateArgs:
         args = argparse.Namespace(
             start_layer=0,
             end_layer=10,
+            dtype="bfloat16",
             kv_cache_memory_fraction=0.5,
             max_batch_size=16,
             max_num_tokens_in_batch=1024,
@@ -52,6 +37,7 @@ class TestValidateArgs:
         args = argparse.Namespace(
             start_layer=-1,
             end_layer=10,
+            dtype="bfloat16",
             kv_cache_memory_fraction=0.5,
             max_batch_size=16,
             max_num_tokens_in_batch=1024,
@@ -69,6 +55,7 @@ class TestValidateArgs:
         args = argparse.Namespace(
             start_layer=10,
             end_layer=5,
+            dtype="bfloat16",
             kv_cache_memory_fraction=0.5,
             max_batch_size=16,
             max_num_tokens_in_batch=1024,
@@ -91,7 +78,7 @@ class TestCreateExecutorConfig:
             model_path="mlx-community/Qwen3-0.6B-bf16",
             start_layer=0,
             end_layer=14,
-            dtype=mx.bfloat16,  # Now it's already a MLX dtype object
+            dtype="bfloat16",
             max_batch_size=16,
             kv_block_size=16,
             kv_cache_memory_fraction=0.8,
@@ -100,6 +87,10 @@ class TestCreateExecutorConfig:
             prefill_priority=0,
             micro_batch_ratio=2,
             scheduler_wait_ms=500,
+            enable_prefix_cache=True,
+            executor_input_ipc="///ipc/1",
+            executor_output_ipc="///ipc/2",
+            attention_backend="torch_native",
         )
 
         config = create_executor_config(args)
@@ -107,7 +98,7 @@ class TestCreateExecutorConfig:
         assert config["model_repo"] == "mlx-community/Qwen3-0.6B-bf16"
         assert config["start_layer"] == 0
         assert config["end_layer"] == 14
-        assert config["dtype"] == mx.bfloat16
+        assert config["dtype"] == "bfloat16"
         assert config["kv_cache_memory_fraction"] == 0.8
 
 
@@ -137,7 +128,7 @@ class TestParseArgs:
         assert args.model_path == "mlx-community/Qwen3-0.6B-bf16"
         assert args.start_layer == 0
         assert args.end_layer == 14
-        assert args.dtype == mx.bfloat16  # Now it's a MLX dtype object
+        assert args.dtype == "bfloat16"
         assert args.kv_cache_memory_fraction == 0.8
 
     @patch(

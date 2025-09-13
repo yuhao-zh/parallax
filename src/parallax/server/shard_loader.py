@@ -96,7 +96,7 @@ class MLXModelLoader:
         Returns:
             A tuple containing the loaded sharded MLX model and its configuration dictionary.
         """
-        model_path = get_model_path(self.model_path_str)
+        model_path, _ = get_model_path(self.model_path_str)
         config = load_config(model_path)
         tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
 
@@ -126,7 +126,7 @@ class MLXModelLoader:
         except (ImportError, AttributeError) as e:
             raise ValueError(f"Failed to load architecture for model_type '{model_type}'.") from e
 
-        dtype = getattr(mx, config.get("torch_dtype"))
+        dtype = getattr(mx, config.get("torch_dtype", "bfloat16"))
 
         # Extract the base model name from model_id_original if it's a repo ID
         model_id = self.model_path_str
@@ -170,6 +170,8 @@ class MLXModelLoader:
                     ):
                         is_needed = True
                         remapped_key = key.replace("model.", "", 1)
+                        if model_shard.is_last_shard and config.get("tie_word_embeddings", False):
+                            shard_weights["lm_head.weight"] = mx.array(f.get_tensor(key))
                     elif model_shard.is_last_shard:
                         if "model.norm" in key:
                             is_needed = True
@@ -178,7 +180,7 @@ class MLXModelLoader:
                             is_needed = True
                             remapped_key = key
                         elif (
-                            config.get("tie_word_embeddings", True)
+                            config.get("tie_word_embeddings", False)
                             and "embed" in key
                             and key.startswith("model.embed_tokens")
                         ):

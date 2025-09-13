@@ -54,22 +54,16 @@ Decode:
         generates and sends `output_id` to the first Peer.
 
 TODO:
-    1. For now we only supports Greedy Decoding,
-        we need to add sampling sampling params and passing logits;
-    2. Add support for multiple output_ids in a single step (e.g. beam width, top-k sampling, etc.);
-    3. Accepts more generation configs like repetition penalties.
-    4. Decouple different HW: mx.array to np.ndarray.
+    1. Add support for multiple output_ids in a single step (e.g. beam width, top-k sampling, etc.);
+    2. Accepts more generation configs like repetition penalties.
 """
 
-import time
 import uuid
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
-import mlx.core as mx
-
-from parallax.utils.logging_config import get_logger
 from parallax.server.sampling.sampling_params import SamplingParams
+from parallax.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -96,22 +90,18 @@ class Request:
         request_id: Optional[str] = None,
         status: RequestStatus = RequestStatus.PREFILLING,
         prompt_len: int = 0,
+        input_ids: Optional[List[int]] = None,
+        output_ids: Optional[List[int]] = None,
         routing_table: Optional[List[str]] = [],
         sampling_params: Optional[SamplingParams] = None,
     ):
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
         self.prompt_len = prompt_len
+        self.output_ids = output_ids or []
+        self.input_ids = input_ids or []
         self.routing_table = routing_table
         self.sampling_params = sampling_params
-        # Timestamps
-        now = time.time()
-        self.created_at: float = now
-        self.last_updated_at: float = now
-
-    def _touch(self) -> None:
-        """Update the last-updated timestamp."""
-        self.last_updated_at = time.time()
 
     @property
     def is_finished(self) -> bool:
@@ -144,7 +134,6 @@ class Request:
             return
         self.status = new_status
         logger.debug(f"Request {self.request_id} status updated to {self.status}.")
-        self._touch()
 
 
 class InitialRequest(Request):
@@ -166,10 +155,13 @@ class InitialRequest(Request):
         if not prompt and not input_ids:
             raise ValueError("prompt or input_ids cannot be empty.")
         super().__init__(
-            request_id=request_id, status=status, prompt_len=len(input_ids) if input_ids else 0
+            request_id=request_id,
+            status=status,
+            prompt_len=len(input_ids) if input_ids else 0,
+            input_ids=input_ids,
+            sampling_params=sampling_params,
         )
         self.prompt = prompt
-        self.input_ids = input_ids
 
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be at least 1.")
@@ -177,7 +169,6 @@ class InitialRequest(Request):
         self.max_total_length = max_total_length
         self.output_ids = output_ids or []
         self.hidden_states = None
-        self.sampling_params = sampling_params
 
         if len(self.output_ids) > 0 and self.status == RequestStatus.PREFILLING:
             raise ValueError(f"Cannot initialize with output_ids given {self.status}.")
@@ -226,7 +217,6 @@ class InitialRequest(Request):
         # Finishing condition checks are now handled by the Scheduler.
         if self.status == RequestStatus.PREFILLING:
             self.status = RequestStatus.DECODING
-        self._touch()
 
     @classmethod
     def from_prompt_ids(
@@ -258,12 +248,19 @@ class IntermediateRequest(Request):
         request_id: str,
         current_position: int,
         status: RequestStatus = RequestStatus.PREFILLING,
-        hidden_states: Optional[mx.array] = None,
+        input_ids: Optional[List[int]] = None,
+        hidden_states: Optional[Any] = None,
         next_token_id: Optional[int] = None,
         routing_table: Optional[List[str]] = [],
         sampling_params: Optional[SamplingParams] = None,
     ):
-        super().__init__(request_id=request_id, status=status, routing_table=routing_table)
+        super().__init__(
+            request_id=request_id,
+            status=status,
+            routing_table=routing_table,
+            input_ids=input_ids,
+            sampling_params=sampling_params,
+        )
         # Hidden states from the previous peer's computation.
         # Shape:
         #   prefill: (prompt_len, hidden_dim)
@@ -276,7 +273,6 @@ class IntermediateRequest(Request):
         self.current_position = current_position
         self.hidden_states = hidden_states
         self.next_token_id = next_token_id
-        self.sampling_params = sampling_params
 
     @property
     def input_length(self) -> int:
@@ -291,7 +287,7 @@ class IntermediateRequest(Request):
 
     @classmethod
     def from_initial_request(
-        cls, initial_request: InitialRequest, hidden_states: Optional[mx.array] = None
+        cls, initial_request: InitialRequest, hidden_states: Optional[Any] = None
     ) -> "IntermediateRequest":
         """Convert an InitialRequest to an IntermediateRequest.
 
@@ -309,17 +305,26 @@ class IntermediateRequest(Request):
         """
         if hidden_states is None:
             assert initial_request.is_finished, "Hidden states can't be None for unfinished request"
+        if initial_request.output_ids is None or len(initial_request.output_ids) == 0:
+            next_token_id = None
+        else:
+            next_token_id = initial_request.output_ids[-1]
 
         return IntermediateRequest(
             request_id=initial_request.request_id,
             status=initial_request.status,
+            input_ids=initial_request.input_ids,
+            next_token_id=next_token_id,
             current_position=initial_request.total_length,
             hidden_states=hidden_states,
+            sampling_params=initial_request.sampling_params,
         )
 
     @classmethod
     def from_intermediate_request(
-        cls, old_request: "IntermediateRequest", new_hidden_states: mx.array
+        cls,
+        old_request: "IntermediateRequest",
+        new_hidden_states: Any,
     ) -> "IntermediateRequest":
         """
         Creates a new IntermediateRequest from an old one, with updated hidden states.
@@ -329,8 +334,11 @@ class IntermediateRequest(Request):
             request_id=old_request.request_id,
             status=old_request.status,
             current_position=old_request.total_length,
+            input_ids=old_request.input_ids,
+            next_token_id=old_request.next_token_id,
             hidden_states=new_hidden_states,
             routing_table=old_request.routing_table,
+            sampling_params=old_request.sampling_params,
         )
 
     def __repr__(self):
@@ -338,6 +346,7 @@ class IntermediateRequest(Request):
             f"request_id={self.request_id}",
             f"status={self.status}",
             f"current_position={self.current_position}",
+            f"input_ids={self.input_ids}",
             f"hidden_states={self.hidden_states}",
         ]
 

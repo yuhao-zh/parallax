@@ -45,7 +45,7 @@ class Scheduler:
         """
         self.max_batch_size = max_batch_size
         self.max_num_tokens = max_num_tokens
-        self.micro_batch_size = self.max_batch_size // micro_batch_ratio
+        self.micro_batch_size = max_batch_size // micro_batch_ratio
         self.scheduler_wait_ms = scheduler_wait_ms
         self.is_first_peer = is_first_peer
         if is_first_peer:

@@ -9,7 +9,6 @@ TODO: Add penalizer support.
 """
 
 import dataclasses
-from functools import partial
 
 import mlx.core as mx
 from mlx import nn
@@ -17,8 +16,11 @@ from mlx import nn
 from parallax.server.request import Request
 from parallax.server.sampling.sampling_params import SamplingParams
 
+
 @dataclasses.dataclass
 class SamplingBatchInfo:
+    """Maintains batched sampling information"""
+
     # Basic batched sampling params
     temperatures: mx.array
     top_ps: mx.array
@@ -33,51 +35,44 @@ class SamplingBatchInfo:
 
     @classmethod
     def from_reqs(cls, reqs: list[Request]):
+        """Retrieves sampling infos from a list of requests"""
         for r in reqs:
             if r.sampling_params is None:
                 r.sampling_params = SamplingParams()
 
-        is_all_greedy = all(r.sampling_params.top_k <=1 for r in reqs)
+        is_all_greedy = all(r.sampling_params.top_k <= 1 for r in reqs)
         need_min_p_sampling = any(r.sampling_params.min_p > 0 for r in reqs)
 
         temperatures = mx.array(
-            [r.sampling_params.temperature for r in reqs], dtype = mx.float32
+            [r.sampling_params.temperature for r in reqs], dtype=mx.float32
         ).reshape(-1, 1)
-        top_ps = mx.array(
-            [r.sampling_params.top_p for r in reqs], dtype = mx.float32
-        )
-        top_ks = mx.array(
-            [r.sampling_params.top_k for r in reqs], dtype = mx.int32
-        )
-        min_ps = mx.array(
-            [r.sampling_params.min_p for r in reqs], dtype = mx.float32
-        )
+        top_ps = mx.array([r.sampling_params.top_p for r in reqs], dtype=mx.float32)
+        top_ks = mx.array([r.sampling_params.top_k for r in reqs], dtype=mx.int32)
+        min_ps = mx.array([r.sampling_params.min_p for r in reqs], dtype=mx.float32)
 
         ret = cls(
-            temperatures = temperatures,
-            top_ps = top_ps,
-            top_ks = top_ks,
-            min_ps = min_ps,
-            is_all_greedy = is_all_greedy,
-            need_min_p_sampling = need_min_p_sampling,
+            temperatures=temperatures,
+            top_ps=top_ps,
+            top_ks=top_ks,
+            min_ps=min_ps,
+            is_all_greedy=is_all_greedy,
+            need_min_p_sampling=need_min_p_sampling,
         )
         return ret
 
 
 class Sampler(nn.Module):
-    def __call__(
-        self,
-        logits: mx.array,
-        sampling_info: SamplingBatchInfo
-    ):
-        ''' Run a sampler & compute logprobs and update logits accordingly
+    """Sampler that completes Topk/Topp sampling for logits"""
+
+    def __call__(self, logits: mx.array, sampling_info: SamplingBatchInfo):
+        """Run a sampler & compute logprobs and update logits accordingly
 
         Args:
             logits: Logits from the model forward
             sampling_info: Metadata for sampling
         Returns:
             next_token_ids: next token IDs.
-        '''
+        """
         batch_next_token_ids = None
         if sampling_info.is_all_greedy:
             # Use argmax if all requests use greedy sampling
@@ -90,9 +85,10 @@ class Sampler(nn.Module):
                 sampling_info.top_ks,
                 sampling_info.top_ps,
                 sampling_info.min_ps,
-                sampling_info.need_min_p_sampling
+                sampling_info.need_min_p_sampling,
             )
-        return batch_next_token_ids    
+        return batch_next_token_ids
+
 
 @mx.compile
 def apply_top_k_top_p_min_p_sampling(
@@ -100,8 +96,9 @@ def apply_top_k_top_p_min_p_sampling(
     top_ks: mx.array,
     top_ps: mx.array,
     min_ps: mx.array,
-    need_min_p_sampling: bool
+    need_min_p_sampling: bool,
 ):
+    """Mlx compiled kernel for calculating topk/topp/minp sampling"""
     probs_idx = mx.argsort(-logits, axis=-1)
     probs_sort = mx.take_along_axis(logits, probs_idx, axis=-1)
     probs_sum = mx.cumsum(probs_sort, axis=-1)
