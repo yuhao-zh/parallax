@@ -101,7 +101,7 @@ class Request:
         self.output_ids = output_ids or []
         self.input_ids = input_ids or []
         self.routing_table = routing_table
-        self.sampling_params = sampling_params
+        self.sampling_params = sampling_params or SamplingParams()
 
     @property
     def is_finished(self) -> bool:
