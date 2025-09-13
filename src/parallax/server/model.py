@@ -10,7 +10,7 @@ from mlx import nn
 from mlx_lm.models.base import BaseModelArgs
 
 from parallax.server.sampling.sampler import Sampler, SamplingBatchInfo
-from parallax.utils.logging_config import get_logger
+from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 

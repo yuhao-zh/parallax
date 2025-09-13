@@ -12,7 +12,7 @@ import time
 from typing import Dict, List, Literal, Optional, Tuple
 
 from parallax.server.request import InitialRequest, Request, RequestStatus
-from parallax.utils.logging_config import get_logger
+from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 

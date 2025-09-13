@@ -24,7 +24,7 @@ import mlx.core as mx
 
 from parallax.server.request import Request, RequestStatus
 from parallax.server.server_info import HardwareInfo
-from parallax.utils.logging_config import get_logger
+from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
