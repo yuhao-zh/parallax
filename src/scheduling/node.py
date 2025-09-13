@@ -252,22 +252,26 @@ class Node:
             available_memory_bytes / self.model_info.decoder_layer_io_bytes(roofline=False)
         )
 
-    def per_decoder_layer_kv_cache_memory(self, num_decoder_layers: int) -> int:
+    @property
+    def per_decoder_layer_kv_cache_memory(self) -> Optional[int]:
         """Return the available memory for kv cache per layer."""
+        if self.num_decoder_layers == 0:
+            return None
         return floor(
             (self.hardware.memory_gb * 1024 * 1024 * 1024 * self.kv_cache_ratio)
-            / num_decoder_layers
+            / self.num_decoder_layers
         )
 
-    def per_decoder_layer_flops(
-        self, num_decoder_layers: int, include_lm_head: bool = False
-    ) -> int:
+    @property
+    def per_decoder_layer_flops(self) -> Optional[int]:
         """Return the FLOPs per decoder layer for this node."""
+        if self.num_decoder_layers == 0:
+            return None
         flops = self.hardware.tflops_fp16
-        if include_lm_head:
+        if self.has_lm_head:
             flops -= self.model_info.lm_head_flops()
 
-        return floor(flops / num_decoder_layers)
+        return floor(flops / self.num_decoder_layers)
 
     def set_layer_allocation(self, start_layer: int, end_layer: int) -> None:
         """Set the layer range allocated to this node."""
