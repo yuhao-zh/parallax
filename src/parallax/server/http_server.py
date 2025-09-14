@@ -21,7 +21,7 @@ import sys
 import time
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Dict, Optional
 
@@ -79,7 +79,8 @@ class HTTPRequestInfo:
     completion_tokens: int = 0
     # helper
     is_finish: bool = False
-    stream_offset: int = 0
+    # Queue for streaming tokens one by one
+    token_queue: Optional[asyncio.Queue] = field(default=None, repr=False)
 
 
 class HTTPHandler:
@@ -117,6 +118,8 @@ class HTTPHandler:
             create_time=create_time,
             update_time=update_time,
         )
+        if stream:
+            request_info.token_queue = asyncio.Queue()
         self.processing_requests[rid] = request_info
 
     def release_request(self, rid: str):
@@ -127,72 +130,79 @@ class HTTPHandler:
         """Sends the request to model executor using IPC."""
         self.send_to_executor.send_pyobj(request)
 
-    def _generate_stream_helper(self, rid, is_first, is_last):
-        """generate_stream_response helper function"""
+    def abort_request(self, request_id: str):
+        """Sends abort request to executor for a specific request ID."""
+        logger.info(f"Sending abort request for request ID: {request_id}")
+        self.send_to_executor.send_pyobj({"type": "abort", "rid": request_id})
+
+    async def stream_response_wrapper(self, rid):
+        """Wraps the generator to handle client disconnects using a finally block."""
+        generator = self.generate_stream_response(rid)
+        try:
+            async for chunk in generator:
+                yield chunk
+        finally:
+            # This block executes when the client disconnects or the stream finishes.
+            req_info = self.processing_requests.get(rid)
+            # If the request is still in processing and not marked as finished, it means
+            # the client disconnected midway.
+            if req_info and not req_info.is_finish:
+                logger.warning(f"Client disconnected for streaming request {rid}.")
+                self.abort_request(rid)
+                self.release_request(rid)
+
+    def _generate_stream_chunk(self, rid, token, is_first=False, is_last=False):
+        """Generates a SSE chunk for a single token."""
         request_info = self.processing_requests[rid]
+
         if is_first:
             role = "assistant"
             content = ""
         elif is_last:
+            role = None
             content = None
-            role = None
         else:
-            text_length = len(request_info.text)
-            content = request_info.text[request_info.stream_offset :]
-            request_info.stream_offset = text_length
             role = None
+            content = token
+
         response = {
             "id": rid,
-            "object": request_info.object,
+            "object": "chat.completion.chunk",
             "model": request_info.model,
             "created": request_info.create_time,
             "choices": [
                 {
                     "index": 0,
                     "logprobs": request_info.logprobs,
-                    "finish_reason": request_info.finish_reason,
+                    "finish_reason": request_info.finish_reason if is_last else None,
                     "matched_stop": request_info.matched_stop,
                 },
             ],
             "usage": None,
         }
         choice = response["choices"][0]
-        choice["delta"] = {
-            "role": role,
-            "content": content,
-            "reasoning_content": None,
-            "tool_calls": None,
-        }
+        choice["delta"] = { "role": role, "content": content }
         response_json = json.dumps(response, separators=(",", ":"))
-        response_str = f"data: {response_json}\n\n"
-        return response_str.encode()
+        return f"data: {response_json}\n\n".encode()
 
-    def generate_stream_response(self, rid):
-        """Generates a streaming response"""
-        try:
-            first_flag = True
-            first_resposne = self._generate_stream_helper(rid, True, False)
+    async def generate_stream_response(self, rid):
+        """Generates a streaming response by consuming from a token queue."""
+        # Send first chunk with role
+        yield self._generate_stream_chunk(rid, None, is_first=True)
+        
+        request_info = self.processing_requests.get(rid)
+        if not request_info or not request_info.stream:
+             return
 
-            # Intermediate response
-            while True:
-                request_info = self.processing_requests[rid]
-                if request_info.is_finish:
-                    break
-                text_length = len(request_info.text)
-                if text_length == request_info.stream_offset:
-                    continue
-                response = self._generate_stream_helper(rid, False, False)
-                if first_flag:
-                    first_flag = False
-                    response = first_resposne + response
-                yield response
-
-            # Finish response
-            last_response = self._generate_stream_helper(rid, False, True)
-            last_response = last_response + b"data: [DONE]\n\n"
-            yield last_response
-        except (asyncio.CancelledError, aiohttp.ClientError, Exception):
-            pass
+        while True:
+            token = await request_info.token_queue.get()
+            if token is None: # End of stream sentinel
+                break
+            yield self._generate_stream_chunk(rid, token)
+        
+        # Send final chunk with finish reason
+        yield self._generate_stream_chunk(rid, None, is_last=True)
+        yield b"data: [DONE]\n\n"
 
     def generate_non_stream_response(self, rid):
         """Generates a non-streaming response"""
@@ -231,24 +241,38 @@ class HTTPHandler:
         while True:
             recv_dict = await self.recv_from_executor.recv_pyobj()
             rid = recv_dict["rid"]
+            if rid not in self.processing_requests:
+                continue
+
+            request_info = self.processing_requests[rid]
+            request_info.update_time = time.time()
             output = recv_dict["output"]
-            if rid in self.processing_requests:
-                request_info = self.processing_requests[rid]
-                request_info.update_time = time.time()
-                if recv_dict.get("eos", False) or output == "<|im_end|>":
+            
+            is_eos = recv_dict.get("eos", False) or output == "<|im_end|>" or recv_dict.get("length", False)
+
+            # Only process and send non-EOS tokens
+            if not is_eos and len(output) > 0:
+                # Accumulate full text for non-streaming and potentially for logging
+                request_info.text += output
+                request_info.completion_tokens += 1
+                
+                # For streaming, put the individual token into the queue.
+                if request_info.stream:
+                    await request_info.token_queue.put(output)
+
+            # If it is the end of the stream, update status and send sentinel
+            if is_eos:
+                logger.info(f"Request {rid} finished with status recv_dict: {recv_dict}")
+                if recv_dict.get("length", False):
+                    logger.info(f"Request {rid} finished with length")
+                    request_info.finish_reason = "length"
+                else:
                     request_info.finish_reason = "stop"
                     request_info.matched_stop = 0
-                    request_info.is_finish = True
-                elif recv_dict.get("length", False):
-                    request_info.text += output
-                    if len(output) > 0:
-                        request_info.completion_tokens += 1
-                    request_info.finish_reason = "length"
-                    request_info.is_finish = True
-                else:
-                    request_info.text += output
-                    if len(output) > 0:
-                        request_info.completion_tokens += 1
+                
+                request_info.is_finish = True
+                if request_info.stream:
+                    await request_info.token_queue.put(None) # Sentinel for stream end
 
     async def create_handle_loop(self):
         """Create asyncio event loop task function"""
@@ -308,7 +332,7 @@ async def v1_chat_completions(raw_request: fastapi.Request):
 
     if is_stream:
         return StreamingResponse(
-            app.state.http_handler.generate_stream_response(request_id),
+            app.state.http_handler.stream_response_wrapper(request_id),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -316,15 +340,37 @@ async def v1_chat_completions(raw_request: fastapi.Request):
             },
         )
     else:
-        while True:
-            await asyncio.sleep(0.01)
-            req = app.state.http_handler.processing_requests.get(request_id)
-            is_finish = req.is_finish
-            if is_finish:
-                break
-        response = app.state.http_handler.generate_non_stream_response(request_id)
-        app.state.http_handler.release_request(request_id)
-        return ORJSONResponse(status_code=200, content=response)
+        try:
+            # For non-streaming requests, we poll for completion. This is simpler
+            # than event-based synchronization and acceptable for requests that
+            # are expected to be relatively short.
+            while True:
+                # Check if client is still connected
+                if await raw_request.is_disconnected():
+                    logger.warning(f"Client disconnected for non-streaming request {request_id}")
+                    if request_id in app.state.http_handler.processing_requests:
+                        app.state.http_handler.abort_request(request_id)
+                        app.state.http_handler.release_request(request_id)
+                    return create_error_response("Client disconnected", "ClientDisconnectedError")
+                
+                await asyncio.sleep(0.01)
+                req = app.state.http_handler.processing_requests.get(request_id)
+                if req is None:  # Request might have been cleaned up due to error
+                    return create_error_response("Request not found", "RequestNotFoundError")
+                is_finish = req.is_finish
+                if is_finish:
+                    break
+            response = app.state.http_handler.generate_non_stream_response(request_id)
+            app.state.http_handler.release_request(request_id)
+            return ORJSONResponse(status_code=200, content=response)
+        except Exception as e:
+            # Handle any unexpected errors during processing
+            logger.error(f"Error processing non-streaming request {request_id}: {e}")
+            if request_id in app.state.http_handler.processing_requests:
+                logger.info(f"Sending abort request due to error: {request_id}")
+                app.state.http_handler.abort_request(request_id)
+                app.state.http_handler.release_request(request_id)
+            return create_error_response("Internal server error", "InternalServerError")
 
 
 @app.post("/v1/chat/completions")

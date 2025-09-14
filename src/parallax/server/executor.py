@@ -207,9 +207,15 @@ class Executor:
         while True:
             try:
                 raw_request = self.recv_from_ipc_socket.recv_pyobj(zmq.NOBLOCK)
-                # Do tokenization and form InitialRequest
-                req = self._handle_raw_request(raw_request)
-                recv_reqs.append(req)
+                
+                # Check if this is an abort request
+                if isinstance(raw_request, dict) and raw_request.get("type") == "abort":
+                    logger.info(f"Received abort request from HTTP for request ID: {raw_request.get('rid')}")
+                    self.scheduler.cancel_request(raw_request.get('rid'))
+                else:
+                    # Normal request processing - do tokenization and form InitialRequest
+                    req = self._handle_raw_request(raw_request)
+                    recv_reqs.append(req)
             except zmq.ZMQError:
                 break
             except Exception as e:
@@ -604,9 +610,11 @@ class Executor:
                 elif isinstance(req, IntermediateRequest):
                     original_req = self.scheduler.get_running_request(req.request_id)
                     if original_req is None:
-                        raise ValueError(
-                            f"Recieved Request {req.request_id} should be in request pool"
+                        logger.warning(
+                            f"Received IntermediateRequest {req.request_id} but no corresponding request found in scheduler (CUDA). "
+                            "It might have been cancelled or finished."
                         )
+                        continue
 
                     assert req.next_token_id is not None
                     original_req.commit_new_token(req.next_token_id)
@@ -669,23 +677,22 @@ class Executor:
                 elif isinstance(req, IntermediateRequest):
                     original_req = self.scheduler.get_running_request(req.request_id)
                     if original_req is None:
-                        raise ValueError(
-                            f"Recieved Request {req.request_id} should be in request pool"
+                        logger.warning(
+                            f"Received IntermediateRequest {req.request_id} but no corresponding request found in scheduler. "
+                            "It might have been cancelled or finished."
                         )
+                        continue
                     if not self.kv_cache_manager.has_request(req.request_id):
-                        raise ValueError(
-                            f"Recieved Request {req.request_id} should be in cache manager"
+                        logger.warning(
+                            f"Received IntermediateRequest {req.request_id} but no corresponding request found in cache manager. "
+                            "It might have been cancelled or finished."
                         )
+                        continue
 
                     assert req.next_token_id is not None
                     original_req.commit_new_token(req.next_token_id)
                     if len(req.routing_table) > 0:
                         original_req.routing_table = req.routing_table
-
-                    will_exceed_limit = (
-                        original_req.output_length + 1 >= original_req.max_new_tokens
-                        or original_req.total_length + 1 >= original_req.max_total_length
-                    )
 
                     # Check for termination.
                     if self.scheduler.check_and_update_request_status(original_req):
@@ -702,7 +709,7 @@ class Executor:
                         "output": cur_text,
                         "rid": req.request_id,
                     }
-                    if req.next_token_id == self.tokenizer.eos_token_id or will_exceed_limit:
+                    if req.next_token_id == self.tokenizer.eos_token_id:
                         req_dict["eos"] = True
                     if original_req.status == RequestStatus.FINISHED_MAX_LENGTH:
                         req_dict["length"] = True

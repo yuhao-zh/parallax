@@ -125,6 +125,15 @@ class Scheduler:
             logger.info(f"Evicted request {request_id} from scheduler.")
         else:
             raise ValueError(f"Attempted to evict non-existent request {request_id}.")
+    
+    def cancel_request(self, request_id: str):
+        """Cancels a request from the scheduler."""
+        if request_id in self._running_requests:
+            req = self._running_requests[request_id]
+            req.update_status(RequestStatus.CANCELLED)
+            logger.info(f"Cancelled request {request_id} from scheduler.")
+        else:
+            raise ValueError(f"Attempted to cancel non-existent request {request_id}.")
 
     def check_and_update_request_status(self, request: InitialRequest) -> bool:
         """Checks if a request has met any finishing conditions and updates its status."""
