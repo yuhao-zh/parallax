@@ -227,6 +227,10 @@ class Executor:
                     forward_request = forward_pb2.ForwardRequest()
                     forward_request.ParseFromString(recv_req[1])
                     recv_req = proto_to_request(forward_request, self.device)
+                    # Move current position for first peer
+                    if self.is_first_peer:
+                        for req in recv_req:
+                            req.current_position += 1
                     recv_reqs.extend(recv_req)
                 elif recv_req[0] == b"abort":
                     abort_request = forward_pb2.AbortRequest()
@@ -791,7 +795,7 @@ class Executor:
             return IntermediateRequest(
                 request_id=request.request_id,
                 status=RequestStatus.DECODING,  # Last peer always changes status to DECODING
-                current_position=request.total_length + 1,
+                current_position=request.total_length,
                 input_ids=request.input_ids,
                 hidden_states=hidden_states,
                 next_token_id=next_token_id,

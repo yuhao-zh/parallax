@@ -68,7 +68,6 @@ def send_notify(notify_url, block_start_index, block_end_index, request, status)
     payload = [
         {
             "session_id": req.rid,
-            # the output length of started is from previouse rank, if this is head rank we need add 1
             "step_id": req.output_length + (block_start_index == 0 and status == "started"),
             "block_idx": block_start_index,
             "total_blocks": block_end_index - block_start_index,
