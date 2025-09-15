@@ -247,6 +247,10 @@ class ParallaxModelRunner(SGLModelRunner):
         logger.info(
             f"Init torch distributed ends. mem usage={(before_avail_memory - local_gpu_memory):.2f} GB"
         )
+
+        # This is a hack for initializing CudaGraphRunner
+        self.server_args.pp_size = 2
+
         return min_per_gpu_memory
 
 

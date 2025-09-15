@@ -179,6 +179,12 @@ def form_sgl_batch_decode(
         ret.output_ids = torch.tensor(output_ids, dtype=torch.int64).to(
             ret.device, non_blocking=True
         )
+    else:
+        # Set an empty output_ids tensor
+        batch_size = len(ready_indices)
+        ret.output_ids = torch.empty(batch_size, dtype=torch.int64).to(
+            ret.device, non_blocking=True
+        )
     ret.prepare_for_decode()
     # TODO: this is a hack to make the seq_lens correct due to select_batch is not refference running batch's seq_lens
     # need to fix this
@@ -186,7 +192,6 @@ def form_sgl_batch_decode(
     running_batch.orig_seq_lens[ready_indices] += 1
 
     model_worker_batch = ret.get_model_worker_batch()
-    ForwardBatch.init_new(model_worker_batch, model_runner)
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
 
     return forward_batch
