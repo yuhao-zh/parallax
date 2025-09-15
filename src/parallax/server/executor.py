@@ -629,9 +629,8 @@ class Executor:
                         self.scheduler.enque_request(original_req)
 
                     # detokenize and send to http server
-                    cur_text = self.tokenizer.decode(req.next_token_id)
                     req_dict = {
-                        "output": cur_text,
+                        "next_token_id": req.next_token_id,
                         "rid": req.request_id,
                     }
                     if req.next_token_id == self.tokenizer.eos_token_id:
@@ -704,9 +703,8 @@ class Executor:
                         self.scheduler.enque_request(original_req)
 
                     # detokenize and send to http server
-                    cur_text = self.tokenizer.decode(req.next_token_id)
                     req_dict = {
-                        "output": cur_text,
+                        "next_token_id": req.next_token_id,
                         "rid": req.request_id,
                     }
                     if req.next_token_id == self.tokenizer.eos_token_id:

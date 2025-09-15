@@ -35,7 +35,10 @@ from pydantic import BaseModel
 from starlette.datastructures import State
 
 from parallax.utils.utils import get_zmq_socket
+from parallax.utils.tokenizer_utils import load_detokenizer
 from parallax_utils.logging_config import get_logger
+from mlx_lm.utils import get_model_path, load_config
+from mlx_lm.tokenizer_utils import load_tokenizer, StreamingDetokenizer
 
 logger = get_logger(__name__)
 
@@ -81,6 +84,7 @@ class HTTPRequestInfo:
     is_finish: bool = False
     # Queue for streaming tokens one by one
     token_queue: Optional[asyncio.Queue] = field(default=None, repr=False)
+    detokenizer: StreamingDetokenizer = None
 
 
 class HTTPHandler:
@@ -94,6 +98,7 @@ class HTTPHandler:
         self,
         executor_input_ipc_name,
         executor_output_ipc_name,
+        model_path_str,
     ):
         self.asyncio_tasks = set()
         # Init inter-process communication
@@ -101,6 +106,11 @@ class HTTPHandler:
         self.send_to_executor = get_zmq_socket(context, zmq.PUSH, executor_input_ipc_name, True)
         self.recv_from_executor = get_zmq_socket(context, zmq.PULL, executor_output_ipc_name, True)
         self.processing_requests: Dict[str, HTTPRequestInfo] = {}
+        # Load tokenizer for separate detokenizers
+        model_path, _ = get_model_path(model_path_str)
+        config = load_config(model_path)
+        self.tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
+        self.detokenizer_class, self.tokenmap = load_detokenizer(model_path, self.tokenizer)
 
     def create_request(self, request: Dict):
         """Creates a new request information"""
@@ -108,6 +118,7 @@ class HTTPHandler:
         stream = request.get("stream", False)
         model = request.get("model", "default")
         chat_object = "chat.completion.chunk" if stream else "chat.completion"
+        detokenizer = self.detokenizer_class(self.tokenizer, self.tokenmap)
         create_time = time.time()
         update_time = create_time
         request_info = HTTPRequestInfo(
@@ -117,6 +128,7 @@ class HTTPHandler:
             object=chat_object,
             create_time=create_time,
             update_time=update_time,
+            detokenizer=detokenizer,
         )
         if stream:
             request_info.token_queue = asyncio.Queue()
@@ -246,8 +258,10 @@ class HTTPHandler:
 
             request_info = self.processing_requests[rid]
             request_info.update_time = time.time()
-            output = recv_dict["output"]
-            
+            next_token_id = recv_dict["next_token_id"]
+            request_info.detokenizer.add_token(next_token_id)
+            output = request_info.detokenizer.last_segment
+
             is_eos = recv_dict.get("eos", False) or output == "<|im_end|>" or recv_dict.get("length", False)
 
             # Only process and send non-EOS tokens
@@ -306,11 +320,12 @@ app = fastapi.FastAPI(
 )
 
 
-async def init_app_states(state: State, executor_input_ipc: str, executor_output_ipc: str):
+async def init_app_states(state: State, executor_input_ipc: str, executor_output_ipc: str, model_path: str):
     """Init FastAPI app states, including http handler, etc."""
     state.http_handler = HTTPHandler(
         executor_input_ipc,
         executor_output_ipc,
+        model_path,
     )
 
 
@@ -391,6 +406,7 @@ class ParallaxHttpServer:
         self.port = args.port
         self.executor_input_ipc_name = args.executor_input_ipc
         self.executor_output_ipc_name = args.executor_output_ipc
+        self.model_path = args.model_path
 
     async def run_uvicorn(self):
         """
@@ -420,7 +436,7 @@ class ParallaxHttpServer:
         2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
         """
         asyncio.run(
-            init_app_states(app.state, self.executor_input_ipc_name, self.executor_output_ipc_name)
+            init_app_states(app.state, self.executor_input_ipc_name, self.executor_output_ipc_name, self.model_path)
         )
         asyncio.run(self.run_tasks())
 
@@ -432,3 +448,5 @@ def launch_http_server(args):
     """
     http_server = ParallaxHttpServer(args)
     mp.Process(target=http_server.run).start()
+
+
