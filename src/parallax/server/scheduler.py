@@ -125,7 +125,7 @@ class Scheduler:
             logger.info(f"Evicted request {request_id} from scheduler.")
         else:
             raise ValueError(f"Attempted to evict non-existent request {request_id}.")
-    
+
     def cancel_request(self, request_id: str):
         """Cancels a request from the scheduler."""
         if request_id in self._running_requests:

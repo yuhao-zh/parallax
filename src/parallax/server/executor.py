@@ -207,11 +207,13 @@ class Executor:
         while True:
             try:
                 raw_request = self.recv_from_ipc_socket.recv_pyobj(zmq.NOBLOCK)
-                
+
                 # Check if this is an abort request
                 if isinstance(raw_request, dict) and raw_request.get("type") == "abort":
-                    logger.info(f"Received abort request from HTTP for request ID: {raw_request.get('rid')}")
-                    self.scheduler.cancel_request(raw_request.get('rid'))
+                    logger.info(
+                        f"Received abort request from HTTP for request ID: {raw_request.get('rid')}"
+                    )
+                    self.scheduler.cancel_request(raw_request.get("rid"))
                 else:
                     # Normal request processing - do tokenization and form InitialRequest
                     req = self._handle_raw_request(raw_request)
@@ -618,6 +620,8 @@ class Executor:
 
                     assert req.next_token_id is not None
                     original_req.commit_new_token(req.next_token_id)
+                    if len(req.routing_table) > 0:
+                        original_req.routing_table = req.routing_table
 
                     # Check for termination.
                     if self.scheduler.check_and_update_request_status(original_req):

@@ -115,13 +115,13 @@ class Request:
 
     @property
     def is_prefill(self) -> bool:
-        """ Checks if the request is in the prefill stage. """
+        """Checks if the request is in the prefill stage."""
         """ Continue the prefill stage even if the request is cancelled. """
         return self.status == RequestStatus.PREFILLING or self.status == RequestStatus.CANCELLED
 
     @property
     def is_decoding(self) -> bool:
-        """ Checks if the request is in the decoding stage. """
+        """Checks if the request is in the decoding stage."""
         """ Continue one decoding step even if the request is cancelled. """
         return self.status == RequestStatus.DECODING or self.status == RequestStatus.CANCELLED
 

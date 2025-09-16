@@ -322,9 +322,8 @@ class GradientServer:
                     stub = self.get_stub(next_peer_id)
                     start = time.time()
                     logger.info(f"Start forwarding data to {next_peer_id}")
-                    future = stub.rpc_pp_forward(forward_request)
-                    response = future.result()
-                    logger.info(f"Forward request response: {response}")
+                    response = stub.rpc_pp_forward(forward_request)
+                    response.result()
                     send_notify(
                         self.notify_url,
                         self.block_start_index,
@@ -369,8 +368,7 @@ class GradientServer:
                             logger.info(
                                 f"Send abort request: {[r.rid for r in abort_request.reqs]} to: {peer_id}"
                             )
-                            response = stub.rpc_abort(abort_request)
-                            logger.info(f"Abort request response: {response}")
+                            stub.rpc_abort(abort_request)
                 else:
                     logger.error(f"Unknown message type: {message_type}")
 

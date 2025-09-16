@@ -7,23 +7,27 @@ from functools import partial
 from json import JSONDecodeError
 
 from mlx_lm.tokenizer_utils import (
-    NaiveStreamingDetokenizer,
     BPEStreamingDetokenizer,
+    NaiveStreamingDetokenizer,
     SPMStreamingDetokenizer,
+    _is_bpe_decoder,
     _is_spm_decoder,
     _is_spm_decoder_no_space,
-    _is_bpe_decoder,
 )
+
 
 class ParallaxNaiveStreamingDetokenizer(NaiveStreamingDetokenizer):
     """A custom BPE streaming detokenizer that add an argument 'tokenizer'"""
+
     def __init__(self, tokenizer, tokenmap):
         self._tokenizer = tokenizer
         self._tokenizer.decode([0])
         self.reset()
 
+
 class ParallaxBPEStreamingDetokenizer(BPEStreamingDetokenizer):
     """A custom BPE streaming detokenizer that skips initializing tokenmap"""
+
     def __init__(self, tokenizer, tokenmap):
         self.clean_spaces = tokenizer.clean_up_tokenization_spaces
         self.tokenmap = tokenmap
@@ -33,11 +37,13 @@ class ParallaxBPEStreamingDetokenizer(BPEStreamingDetokenizer):
 
 class ParallaxSPMStreamingDetokenizer(SPMStreamingDetokenizer):
     """A custom SPM streaming detokenizer that skips initializing tokenmap"""
+
     def __init__(self, tokenizer, tokenmap, trim_space=True):
         self.trim_space = trim_space
         self._sep = "\u2581".encode()
         self.tokenmap = tokenmap
         self.reset()
+
 
 def _get_spm_tokenmap(tokenizer):
     """Initialize spm tokenmap for reuse"""
@@ -51,6 +57,7 @@ def _get_spm_tokenmap(tokenizer):
             tokenmap[tokenid] = value.encode()
     return tokenmap
 
+
 def _get_bpe_tokenmap(tokenizer):
     """Initialize bpe tokenmap for reuse"""
     # Extract the tokens in a list from id to text
@@ -58,6 +65,7 @@ def _get_bpe_tokenmap(tokenizer):
     for value, tokenid in tokenizer.vocab.items():
         tokenmap[tokenid] = value
     return tokenmap
+
 
 def load_detokenizer(model_path, tokenizer):
     """Load a huggingface tokenizer and try to infer the type of streaming

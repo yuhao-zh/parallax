@@ -31,13 +31,9 @@ if __name__ == "__main__":
     try:
         args = parse_args()
 
-        args.recv_from_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
-        args.send_to_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
         args.executor_input_ipc = f"ipc://{tempfile.NamedTemporaryFile().name}"
         args.executor_output_ipc = f"ipc://{tempfile.NamedTemporaryFile().name}"
 
-        logger.info(f"recv_from_peer_addr: {args.recv_from_peer_addr}")
-        logger.info(f"send_to_peer_addr: {args.send_to_peer_addr}")
         logger.info(f"executor_input_addr: {args.executor_input_ipc}")
         logger.info(f"executor_output_addr: {args.executor_output_ipc}")
 

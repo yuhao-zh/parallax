@@ -25,20 +25,19 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Dict, Optional
 
-import aiohttp
 import fastapi
 import uvicorn
 import zmq
 import zmq.asyncio
 from fastapi.responses import ORJSONResponse, StreamingResponse
+from mlx_lm.tokenizer_utils import StreamingDetokenizer, load_tokenizer
+from mlx_lm.utils import get_model_path, load_config
 from pydantic import BaseModel
 from starlette.datastructures import State
 
-from parallax.utils.utils import get_zmq_socket
 from parallax.utils.tokenizer_utils import load_detokenizer
+from parallax.utils.utils import get_zmq_socket
 from parallax_utils.logging_config import get_logger
-from mlx_lm.utils import get_model_path, load_config
-from mlx_lm.tokenizer_utils import load_tokenizer, StreamingDetokenizer
 
 logger = get_logger(__name__)
 
@@ -193,7 +192,7 @@ class HTTPHandler:
             "usage": None,
         }
         choice = response["choices"][0]
-        choice["delta"] = { "role": role, "content": content }
+        choice["delta"] = {"role": role, "content": content}
         response_json = json.dumps(response, separators=(",", ":"))
         return f"data: {response_json}\n\n".encode()
 
@@ -201,17 +200,17 @@ class HTTPHandler:
         """Generates a streaming response by consuming from a token queue."""
         # Send first chunk with role
         yield self._generate_stream_chunk(rid, None, is_first=True)
-        
+
         request_info = self.processing_requests.get(rid)
         if not request_info or not request_info.stream:
-             return
+            return
 
         while True:
             token = await request_info.token_queue.get()
-            if token is None: # End of stream sentinel
+            if token is None:  # End of stream sentinel
                 break
             yield self._generate_stream_chunk(rid, token)
-        
+
         # Send final chunk with finish reason
         yield self._generate_stream_chunk(rid, None, is_last=True)
         yield b"data: [DONE]\n\n"
@@ -262,31 +261,34 @@ class HTTPHandler:
             request_info.detokenizer.add_token(next_token_id)
             output = request_info.detokenizer.last_segment
 
-            is_eos = recv_dict.get("eos", False) or output == "<|im_end|>" or recv_dict.get("length", False)
+            is_eos = (
+                recv_dict.get("eos", False)
+                or output == "<|im_end|>"
+                or recv_dict.get("length", False)
+            )
 
             # Only process and send non-EOS tokens
             if not is_eos and len(output) > 0:
                 # Accumulate full text for non-streaming and potentially for logging
                 request_info.text += output
                 request_info.completion_tokens += 1
-                
+
                 # For streaming, put the individual token into the queue.
                 if request_info.stream:
                     await request_info.token_queue.put(output)
 
             # If it is the end of the stream, update status and send sentinel
             if is_eos:
-                logger.info(f"Request {rid} finished with status recv_dict: {recv_dict}")
                 if recv_dict.get("length", False):
                     logger.info(f"Request {rid} finished with length")
                     request_info.finish_reason = "length"
                 else:
                     request_info.finish_reason = "stop"
                     request_info.matched_stop = 0
-                
+
                 request_info.is_finish = True
                 if request_info.stream:
-                    await request_info.token_queue.put(None) # Sentinel for stream end
+                    await request_info.token_queue.put(None)  # Sentinel for stream end
 
     async def create_handle_loop(self):
         """Create asyncio event loop task function"""
@@ -320,7 +322,9 @@ app = fastapi.FastAPI(
 )
 
 
-async def init_app_states(state: State, executor_input_ipc: str, executor_output_ipc: str, model_path: str):
+async def init_app_states(
+    state: State, executor_input_ipc: str, executor_output_ipc: str, model_path: str
+):
     """Init FastAPI app states, including http handler, etc."""
     state.http_handler = HTTPHandler(
         executor_input_ipc,
@@ -367,7 +371,7 @@ async def v1_chat_completions(raw_request: fastapi.Request):
                         app.state.http_handler.abort_request(request_id)
                         app.state.http_handler.release_request(request_id)
                     return create_error_response("Client disconnected", "ClientDisconnectedError")
-                
+
                 await asyncio.sleep(0.01)
                 req = app.state.http_handler.processing_requests.get(request_id)
                 if req is None:  # Request might have been cleaned up due to error
@@ -436,7 +440,12 @@ class ParallaxHttpServer:
         2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
         """
         asyncio.run(
-            init_app_states(app.state, self.executor_input_ipc_name, self.executor_output_ipc_name, self.model_path)
+            init_app_states(
+                app.state,
+                self.executor_input_ipc_name,
+                self.executor_output_ipc_name,
+                self.model_path,
+            )
         )
         asyncio.run(self.run_tasks())
 
@@ -448,5 +457,3 @@ def launch_http_server(args):
     """
     http_server = ParallaxHttpServer(args)
     mp.Process(target=http_server.run).start()
-
-
