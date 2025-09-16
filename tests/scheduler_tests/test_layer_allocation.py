@@ -201,11 +201,11 @@ def test_allocator(
         nodes.append(_build_node("rtx4090", model, id_suffix=f"-{i}"))
 
     allocator = (
-        GreedyLayerAllocator(model, nodes)
+        GreedyLayerAllocator(model, nodes, assign_left_over_nodes=False)
         if strategy == "greedy"
-        else DynamicProgrammingLayerAllocator(model, nodes)
+        else DynamicProgrammingLayerAllocator(model, nodes, assign_left_over_nodes=False)
     )
-    allocator.initialize()
+    allocator.global_allocation()
     _test_gap_patch_rebalance(allocator)
 
     # Collect (start,end) per node in creation order
@@ -224,3 +224,58 @@ def test_allocator(
     assert Counter(actual_trimmed) == Counter(
         expected_ranges
     ), f"Stage ranges mismatch (order-insensitive):\nactual={actual_trimmed}\nexpected={expected_ranges}"
+
+
+@pytest.mark.parametrize("strategy", ["greedy", "dp"])
+def test_single_node_can_host_all_layers_greedy(strategy: Literal["greedy", "dp"]):
+    """Small model fully hosted by a single strong node (A100-80g)."""
+    model = build_model_info(5)
+    node = _build_node("a100-80g", model)
+    alloc = (
+        GreedyLayerAllocator(model, [node])
+        if strategy == "greedy"
+        else DynamicProgrammingLayerAllocator(model, [node])
+    )
+    initialized = alloc.global_allocation()
+    assert initialized is True
+    assert alloc.has_full_pipeline() is True
+    assert node.start_layer == 0 and node.end_layer == model.num_layers
+
+
+@pytest.mark.parametrize("strategy", ["greedy", "dp"])
+def test_mixed_pool_single_host_available(strategy: Literal["greedy", "dp"]):
+    """Intermediate model: one A100 can host alone; others (4090) remain unused."""
+    model = build_model_info(6)
+    a100 = _build_node("a100-80g", model, id_suffix="-a")
+    r1 = _build_node("rtx4090", model, id_suffix="-1")
+    r2 = _build_node("rtx4090", model, id_suffix="-2")
+    alloc = (
+        GreedyLayerAllocator(model, [a100, r1, r2])
+        if strategy == "greedy"
+        else DynamicProgrammingLayerAllocator(model, [a100, r1, r2])
+    )
+    initialized = alloc.global_allocation()
+    assert initialized is True
+    # A100 should cover entire model
+    assert a100.start_layer == 0 and a100.end_layer == model.num_layers
+    assert r1.start_layer == 0 and r1.end_layer == 3
+    assert r2.start_layer == 3 and r2.end_layer == model.num_layers
+
+
+@pytest.mark.parametrize("strategy", ["greedy", "dp"])
+def test_pipeline_required_with_midrange_only(strategy: Literal["greedy", "dp"]):
+    """Model requires pipeline across multiple mid-range GPUs (RTX4090)."""
+    model = build_model_info(7)
+    nodes = [_build_node("rtx4090", model, id_suffix=f"-{i}") for i in range(3)]
+    alloc = (
+        GreedyLayerAllocator(model, nodes)
+        if strategy == "greedy"
+        else DynamicProgrammingLayerAllocator(model, nodes)
+    )
+    ok = alloc.global_allocation()
+    assert ok is True
+    # At least two nodes should be assigned to cover 7 layers
+    assigned = [(n.node_id, n.start_layer, n.end_layer) for n in nodes if n.start_layer is not None]
+    assert len(assigned) >= 2
+    total = sum(e - s for _, s, e in assigned)
+    assert total == model.num_layers

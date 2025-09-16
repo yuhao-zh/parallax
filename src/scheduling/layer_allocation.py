@@ -3,7 +3,7 @@ Layer allocation and dynamic rebalancing primitives (Phase 1 of scheduling).
 
 Key components:
 - LayerLoad: per-layer hosting power (combined KV memory + FLOPs) tracked in a min-heap;
-- BaseLayerAllocator: shared utilities for static initialize(), dynamic join/leave, and
+- BaseLayerAllocator: shared utilities for static global_allocation(), dynamic join/leave, and
   in-place pipeline rebalancing using a water-filling algorithm;
 - GreedyLayerAllocator: builds pipelines greedily to minimize stages and maximize the
   number of pipelines, then rebalances each pipeline in-place;
@@ -33,44 +33,32 @@ class LayerLoad:
 
     layer_id: int
     current_kv_size: int
-    current_compute: float
     hosting_nodes: Set[str] = field(default_factory=set)
 
     def add_node(self, node: Node) -> None:
         """Add a node's contribution to this layer's load."""
         self.hosting_nodes.add(node.node_id)
-        if node.per_decoder_layer_flops is None or node.per_decoder_layer_kv_cache_memory is None:
-            raise ValueError(
-                "Node must have per_decoder_layer_flops and per_decoder_layer_kv_cache_memory"
-            )
+        if node.per_decoder_layer_kv_cache_memory is None:
+            raise ValueError("Node must have per_decoder_layer_kv_cache_memory")
         self.current_kv_size += node.per_decoder_layer_kv_cache_memory
-        self.current_compute += node.per_decoder_layer_flops
 
     def remove_node(self, node: Node):
         """Remove a node from the layer load."""
         if node.node_id in self.hosting_nodes:
             self.hosting_nodes.remove(node.node_id)
-            if (
-                node.per_decoder_layer_flops is None
-                or node.per_decoder_layer_kv_cache_memory is None
-            ):
-                raise ValueError(
-                    "Node must have per_decoder_layer_flops and per_decoder_layer_kv_cache_memory"
-                )
+            if node.per_decoder_layer_kv_cache_memory is None:
+                raise ValueError("Node must have per_decoder_layer_kv_cache_memory")
 
             self.current_kv_size -= node.per_decoder_layer_kv_cache_memory
-            self.current_compute -= node.per_decoder_layer_flops
 
     def __lt__(self, other):
         """For heap ordering: prioritize layers with lower hosting power.
 
         Primary: less memory (less hosting power)
-        Secondary: lower FLOPs (less compute allocated)
-        Tertiary: lower layer ID (less layers hosted)
+        Secondary: lower layer ID (less layers hosted)
         """
-        return (self.current_kv_size, self.current_compute, self.layer_id) < (
+        return (self.current_kv_size, self.layer_id) < (
             other.current_kv_size,
-            other.current_compute,
             other.layer_id,
         )
 
@@ -80,7 +68,6 @@ class BaseLayerAllocator:
 
     There are two types of allocations:
     1. Static: initialization, global rebalancing.
-       - requiring at least min_nodes to start the allocation;
        - happens globally, not per-node;
        - more optimal since it considers the entire cluster;
     2. Dynamic: nodes are joining / leaving dynamically
@@ -91,7 +78,7 @@ class BaseLayerAllocator:
          - each worker node gives up running requests
          - each worker node re-load a different shard.
 
-    Global rebalancing, i.e. re-`initialize` is needed when:
+    Global rebalancing, i.e. re-`global_allocation` is needed when:
      - When we find some layers are not hosted by any node,
      - Loads are too imbalanced.
 
@@ -108,17 +95,15 @@ class BaseLayerAllocator:
         self,
         model_info: ModelInfo,
         nodes: List[Node],
-        min_nodes: int = 1,
         *,
         layer_hosting_power_memory_score: float = 0.5,
         rebalance_threshold: float = 0.25,
         water_filling_max_iterations: int = 40,
+        assign_left_over_nodes: bool = True,
     ) -> None:
         self.model_info = model_info
         self.num_total_layers = model_info.num_layers
         self.nodes = sorted(nodes, key=lambda node: node.get_decoder_layer_capacity(), reverse=True)
-        # Minimum number of nodes to start the allocation
-        self.min_nodes = min_nodes
 
         self.layer_to_load: Dict[int, LayerLoad] = {}
         self.node_id_to_node: Dict[str, Node] = {}
@@ -132,11 +117,17 @@ class BaseLayerAllocator:
         self.rebalance_threshold = rebalance_threshold
         # Maximum number of iterations to run the water-filling algorithm
         self.water_filling_max_iterations = water_filling_max_iterations
+        # Whether to assign left-over nodes using dynamic policy for
+        # static allocation's leftover nodes
+        self.assign_left_over_nodes = assign_left_over_nodes
+
+        # Node allocation
+        self.node_allocation: Dict[str, Tuple[int, int]] = {}
 
         # Heapify Layer Loads
         self.layer_loads_heap: List[LayerLoad] = []
         for layer_id in range(self.num_total_layers):
-            layer_load = LayerLoad(layer_id=layer_id, current_kv_size=0, current_compute=0.0)
+            layer_load = LayerLoad(layer_id=layer_id, current_kv_size=0)
             self.layer_to_load[layer_id] = layer_load
         self._update_layer_loads_heap()
 
@@ -153,7 +144,7 @@ class BaseLayerAllocator:
             return False
         return True
 
-    def initialize(self) -> bool:
+    def global_allocation(self) -> bool:
         """Static assignment based on existing nodes. For cold-start and global rebalancing.
 
         Returns:
@@ -163,15 +154,17 @@ class BaseLayerAllocator:
 
     def allocate(self, node: Node, start_layer: int, end_layer: int) -> None:
         """Allocate a node to a specific layer range."""
-        # Track node mapping
+        if end_layer <= start_layer:
+            raise ValueError(
+                f"Invalid allocation: start_layer {start_layer} >= end_layer {end_layer}"
+            )
         self.node_id_to_node[node.node_id] = node
         node.set_layer_allocation(start_layer, end_layer)
-        # Update pipeline endpoints
+        self.node_allocation[node.node_id] = (start_layer, end_layer)
         if start_layer == 0:
             self.embedding_node_ids.append(node.node_id)
         if end_layer == self.num_total_layers:
             self.lm_head_node_ids.append(node.node_id)
-        # Update layer loads
         for layer_id in range(start_layer, end_layer):
             if layer_id not in self.layer_to_load:
                 raise ValueError(f"Layer {layer_id} not found in layer_to_load")
@@ -183,20 +176,30 @@ class BaseLayerAllocator:
         if node.start_layer is None or node.end_layer is None:
             raise ValueError("Node must have start_layer and end_layer")
         start_layer, end_layer = node.start_layer, node.end_layer
-        # Update pipeline endpoints
+        if node.node_id in self.node_allocation:
+            del self.node_allocation[node.node_id]
         if node.node_id in self.embedding_node_ids:
             self.embedding_node_ids.remove(node.node_id)
         if node.node_id in self.lm_head_node_ids:
             self.lm_head_node_ids.remove(node.node_id)
-        # Update layer loads
         for layer_id in range(start_layer, end_layer):
             if layer_id in self.layer_to_load:
                 self.layer_to_load[layer_id].remove_node(node)
         node.clear_layer_allocation()
         self._update_layer_loads_heap()
 
+    def declare(self, node: Node) -> None:
+        """Declare a node to the allocator."""
+        if node.node_id not in self.node_id_to_node:
+            self.nodes.append(node)
+            self.node_id_to_node[node.node_id] = node
+        self.nodes = sorted(
+            self.nodes, key=lambda node: node.get_decoder_layer_capacity(), reverse=True
+        )
+
     def join(self, node: Node) -> None:
         """Dynamically assign a new node based on lightest layers."""
+        self.declare(node)
         lightest_layer = self.get_lightest_layer()
         if lightest_layer is None:
             raise ValueError("No layers to assign")
@@ -214,6 +217,23 @@ class BaseLayerAllocator:
             raise ValueError(f"Node {node_id} not found in allocation")
         self.deallocate(node)
         del self.node_id_to_node[node_id]
+
+    def allocate_left_over_nodes(self) -> None:
+        """Assign any nodes without allocations by treating them as dynamic joins.
+
+        During bootstrapping or after a global allocation, some nodes may remain
+        unassigned because they cannot contribute to a full pipeline. This method
+        assigns such nodes one-by-one using the same policy as dynamic `join`:
+        repeatedly host the lightest layers to improve replication and balance.
+        """
+        # Iterate in capacity order for determinism and better packing
+        for node in sorted(self.nodes, key=lambda n: n.get_decoder_layer_capacity(), reverse=True):
+            if node.node_id not in self.node_allocation:
+                try:
+                    self.join(node)
+                except Exception:
+                    # Best-effort: if no layers can be assigned, skip
+                    continue
 
     def should_global_rebalance(self) -> bool:
         """Trigger global rebalance, i.e. re-run `initialize`  if load imbalance is too high.
@@ -234,15 +254,11 @@ class BaseLayerAllocator:
             return False
 
         total_cluster_memory = sum(node.hardware.memory_gb for node in self.nodes)
-        total_cluster_flops = sum(node.hardware.tflops_fp16 for node in self.nodes)
 
-        if total_cluster_memory == 0 or total_cluster_flops == 0:
-            raise ValueError("Total cluster memory or flops is zero")
+        if total_cluster_memory == 0:
+            raise ValueError("Total cluster memory is zero")
 
-        loads = [
-            self._calculate_combined_load(layer, total_cluster_memory, total_cluster_flops)
-            for layer in layer_heap
-        ]
+        loads = [layer.current_kv_size / total_cluster_memory for layer in layer_heap]
 
         if not loads:
             return False
@@ -388,19 +404,14 @@ class BaseLayerAllocator:
 
         Nodes without an allocation are omitted. Results are sorted by start_layer.
         """
-        allocations: List[Tuple[str, int, int]] = []
-        for node in self.nodes:
-            if node.start_layer is None or node.end_layer is None:
-                continue
-            allocations.append((node.node_id, int(node.start_layer), int(node.end_layer)))
-        allocations.sort(key=lambda x: (x[1], x[2], x[0]))
-        return allocations
+        items = [(node_id, se[0], se[1]) for node_id, se in self.node_allocation.items()]
+        items.sort(key=lambda x: (x[1], x[2], x[0]))
+        return items
 
     def get_lightest_layer(self) -> Optional[LayerLoad]:
         """Return the current lightest-hosted layer from the heap, if any."""
         if not self.layer_loads_heap:
             return None
-        # heap[0] is the minimum according to LayerLoad.__lt__
         return self.layer_loads_heap[0]
 
     def _update_layer_loads_heap(self):
@@ -421,33 +432,14 @@ class BaseLayerAllocator:
 
         return end_layer
 
-    def _calculate_combined_load(
-        self, layer: LayerLoad, total_cluster_memory: int, total_cluster_flops: float
-    ) -> float:
-        """Calculates a normalized, combined load metric for a layer."""
-        if total_cluster_memory == 0 or total_cluster_flops == 0:
-            return 0.0
-
-        normalized_memory = layer.current_kv_size / total_cluster_memory
-        normalized_flops = layer.current_compute / total_cluster_flops
-
-        return (
-            self.layer_hosting_power_memory_score * normalized_memory
-            + (1 - self.layer_hosting_power_memory_score) * normalized_flops
-        )
-
     def has_full_pipeline(self) -> bool:
         """Return True if there exists at least one pipeline covering [0, num_total_layers).
 
         Checks whether we can chain contiguous node allocations starting at 0 to reach L.
         """
         total_layers = self.num_total_layers
-        # Build map from start -> max end among nodes starting at that start
         start_to_max_end: Dict[int, int] = {}
-        for node in self.nodes:
-            if node.start_layer is None or node.end_layer is None:
-                continue
-            s, e = node.start_layer, node.end_layer
+        for _, (s, e) in self.node_allocation.items():
             if s < 0 or e <= s:
                 continue
             if s not in start_to_max_end or e > start_to_max_end[s]:
@@ -468,6 +460,22 @@ class BaseLayerAllocator:
                 return False
             current_end = next_end
             steps += 1
+
+    def layer_replication_stats(self) -> Tuple[int, int, float]:
+        """Return (min, max, avg) number of nodes hosting each layer.
+
+        Counts the number of hosting nodes per layer from `layer_to_load` and
+        aggregates basic statistics. If there are no layers, returns (0, 0, 0.0).
+        """
+        if not self.layer_to_load:
+            return 0, 0, 0.0
+        counts = [len(layer.hosting_nodes) for layer in self.layer_to_load.values()]
+        if not counts:
+            return 0, 0, 0.0
+        min_hosts = min(counts)
+        max_hosts = max(counts)
+        avg_hosts = float(sum(counts)) / float(len(counts))
+        return min_hosts, max_hosts, avg_hosts
 
 
 class GreedyLayerAllocator(BaseLayerAllocator):
@@ -508,27 +516,8 @@ class GreedyLayerAllocator(BaseLayerAllocator):
     remaining nodes.
     """
 
-    def __init__(
-        self,
-        model_info: ModelInfo,
-        nodes: List[Node],
-        min_nodes: int = 1,
-        *,
-        layer_hosting_power_memory_score: float = 0.5,
-        rebalance_threshold: float = 0.25,
-        water_filling_max_iterations: int = 40,
-    ) -> None:
-        super().__init__(
-            model_info,
-            nodes,
-            min_nodes=min_nodes,
-            layer_hosting_power_memory_score=layer_hosting_power_memory_score,
-            rebalance_threshold=rebalance_threshold,
-            water_filling_max_iterations=water_filling_max_iterations,
-        )
-
     # pylint: disable=too-many-locals, too-many-nested-blocks, too-many-branches
-    def initialize(self) -> bool:
+    def global_allocation(self) -> bool:
         """
         Allocate layers to nodes greedily to maximize the number of pipelines.
 
@@ -536,8 +525,6 @@ class GreedyLayerAllocator(BaseLayerAllocator):
         to assign contiguous layer ranges on each pipeline.
         """
         num_total_layers = self.model_info.num_layers
-        if len(self.nodes) < self.min_nodes:
-            raise ValueError("Insufficient nodes to initialize allocation")
 
         available_nodes = self.nodes.copy()
         any_assigned = False
@@ -602,8 +589,11 @@ class GreedyLayerAllocator(BaseLayerAllocator):
                 # Cannot form a complete pipeline with remaining nodes
                 break
 
-        if not any_assigned:
+        if not any_assigned or not self.has_full_pipeline():
             return False
+        # Assign any nodes that were left unallocated using dynamic policy
+        if self.assign_left_over_nodes:
+            self.allocate_left_over_nodes()
         return True
 
 
@@ -648,7 +638,7 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
         nodes: List[Node],
         alpha: float = 2.0,
         *,
-        min_nodes: int = 1,
+        assign_left_over_nodes: bool = True,
         layer_hosting_power_memory_score: float = 0.5,
         rebalance_threshold: float = 0.25,
         water_filling_max_iterations: int = 40,
@@ -656,7 +646,6 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
         super().__init__(
             model_info,
             nodes,
-            min_nodes=min_nodes,
             layer_hosting_power_memory_score=layer_hosting_power_memory_score,
             rebalance_threshold=rebalance_threshold,
             water_filling_max_iterations=water_filling_max_iterations,
@@ -666,7 +655,7 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
         self._path: Dict[Tuple[int, Tuple[int, ...], int], Tuple] = {}
 
     # pylint: disable=too-many-locals, too-many-statements
-    def initialize(self) -> bool:
+    def global_allocation(self) -> bool:
         num_nodes = len(self.nodes)
         num_layers = int(self.model_info.num_layers)
         total_cap = sum(node.get_decoder_layer_capacity() for node in self.nodes)
@@ -785,6 +774,11 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
             if not pl_nodes:
                 continue
             self.adjust_pipeline_layers(pl_nodes, assume_sorted=False)
+        if not self.has_full_pipeline():
+            return False
+        # Assign any nodes that were left unallocated using dynamic policy
+        if self.assign_left_over_nodes:
+            self.allocate_left_over_nodes()
         return True
 
     def _backtrack(self, best_num_pipes: int, num_nodes: int) -> List[List[Node]]:

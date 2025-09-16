@@ -211,8 +211,12 @@ class Node:
         """Number of decoder layers."""
         if self.start_layer is None or self.end_layer is None:
             return 0
-        start_layer = self.start_layer if self.has_embedding else self.start_layer + 1
-        end_layer = self.end_layer if self.has_lm_head else self.end_layer - 1
+        start_layer = self.start_layer + 1 if self.has_embedding else self.start_layer
+        end_layer = self.end_layer - 1 if self.has_lm_head else self.end_layer
+        if start_layer >= end_layer:
+            raise ValueError(
+                f"Node {self.node_id} has invalid decoder layer range: start_layer {start_layer} <= end_layer {end_layer}"
+            )
         return end_layer - start_layer
 
     @property
@@ -263,17 +267,6 @@ class Node:
             (self.hardware.memory_gb * 1024 * 1024 * 1024 * self.kv_cache_ratio)
             / self.num_decoder_layers
         )
-
-    @property
-    def per_decoder_layer_flops(self) -> Optional[int]:
-        """Return the FLOPs per decoder layer for this node."""
-        if self.num_decoder_layers == 0:
-            return None
-        flops = self.hardware.tflops_fp16
-        if self.has_lm_head:
-            flops -= self.model_info.lm_head_flops()
-
-        return floor(flops / self.num_decoder_layers)
 
     def set_layer_allocation(self, start_layer: int, end_layer: int) -> None:
         """Set the layer range allocated to this node."""
