@@ -39,4 +39,4 @@ jobs:
 
     - name: Run pre-commit on all files
       run: pre-commit run --all-files
-      continue-on-error: true
+      continue-on-error: false

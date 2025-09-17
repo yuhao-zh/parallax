@@ -186,6 +186,7 @@ class ShardedModel(nn.Module):
                 mask=mask,
                 cache=current_layer_past_kv,
                 offset=offset,
+                lengths=lengths,
             )
             collected_k_updates.append(new_k)
             collected_v_updates.append(new_v)

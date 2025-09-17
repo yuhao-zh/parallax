@@ -119,6 +119,7 @@ class Executor:
             )
             self.model_shard, self.config, self.tokenizer = self.shard_loader.load()
 
+        # for window attention need to calculate causal mask size
         self.finished_batch = []
         self.start_layer = start_layer
         self.end_layer = end_layer
