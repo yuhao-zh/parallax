@@ -288,7 +288,7 @@ class Node:
         perf_model = RooflinePerformanceModel(
             hardware=self.hardware,
             model_info=self.model_info,
-            quantization_speedup=self.quantization_speedup,
+            # quantization_speedup=self.quantization_speedup,
             batch_size=self.current_requests,
             target_seq_len=1,
             source_seq_len=self.max_sequence_length,

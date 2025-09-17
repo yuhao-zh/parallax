@@ -68,7 +68,7 @@ class Scheduler:
         self._pending_joins: "queue.Queue[Node]" = queue.Queue()
         self._pending_leaves: "queue.Queue[str]" = queue.Queue()
         self._pending_node_updates: (
-            "queue.Queue[Tuple[Node, Optional[int], Optional[float], Optional[Dict[str, float]]]]"
+            "queue.Queue[Tuple[str, Optional[int], Optional[float], Optional[Dict[str, float]]]]"
         ) = queue.Queue()
 
         # Concurrency controls
@@ -172,6 +172,7 @@ class Scheduler:
     # Async-style event enqueuers for main loop
     def enqueue_join(self, node: Node) -> None:
         """Enqueue a join event."""
+        logger.info(f"Enqueueing join event for node {node.node_id}")
         self._pending_joins.put(node)
         self._wake_event.set()
 
@@ -182,14 +183,16 @@ class Scheduler:
 
     def enqueue_node_update(
         self,
-        node: Node,
+        node_id: str,
         *,
         current_requests: Optional[int] = None,
         layer_latency_ms: Optional[float] = None,
         new_rtt_to_nodes: Optional[Dict[str, float]] = None,
     ) -> None:
         """Enqueue a node update event."""
-        self._pending_node_updates.put((node, current_requests, layer_latency_ms, new_rtt_to_nodes))
+        self._pending_node_updates.put(
+            (node_id, current_requests, layer_latency_ms, new_rtt_to_nodes)
+        )
         self._wake_event.set()
 
     def checking_node_heartbeat(self) -> None:
@@ -202,6 +205,7 @@ class Scheduler:
     # Dynamic node management
     def join(self, node: Node, bootstrap: bool = False) -> None:
         """Add a node to allocation and refresh plan and materialized nodes."""
+        logger.info(f"Joining node {node.node_id}")
         self.nodes.append(node)
         self.layer_allocator.declare(node)
         if not bootstrap:
@@ -264,6 +268,7 @@ class Scheduler:
         and request dispatching. At startup, waits until at least
         `min_nodes_bootstrapping` nodes are present, then runs `bootstrap()`.
         """
+        logger.info("Running scheduler")
         self._stop_event.clear()
 
         # Start event thread first so joins can be processed while we wait to bootstrap
@@ -328,6 +333,7 @@ class Scheduler:
 
     def _wait_for_bootstrap(self, poll_interval: float) -> bool:
         """Wait until enough nodes then run bootstrap. Returns False if stopped."""
+        logger.info("Waiting for bootstrap")
         while not self._stop_event.is_set() and not self._bootstrapped:
             with self._node_count_cv:
                 if len(self.nodes) < self.min_nodes_bootstrapping:
@@ -344,11 +350,11 @@ class Scheduler:
         """Apply pending node stats updates from the queue."""
         while True:
             try:
-                node, cur, lat, rtts = self._pending_node_updates.get_nowait()
+                node_id, cur, lat, rtts = self._pending_node_updates.get_nowait()
             except queue.Empty:
                 break
             self.update_node_info(
-                node,
+                self.node_id_to_node[node_id],
                 current_requests=cur,
                 layer_latency_ms=lat,
                 new_rtt_to_nodes=rtts,

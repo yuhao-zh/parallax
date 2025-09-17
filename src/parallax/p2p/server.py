@@ -10,7 +10,6 @@ It is used to handle the communication between the peers, and communicate with t
 import dataclasses
 import enum
 import logging
-import multiprocessing as mp
 import threading
 import time
 from typing import List, Optional
@@ -20,9 +19,10 @@ import httpx
 import zmq
 from lattica import ConnectionHandler, Lattica, rpc_method, rpc_stream
 
+from backend.server.rpc_connection_handler import RPCConnectionHandler
 from parallax.p2p.proto import forward_pb2
 from parallax.p2p.utils import AsyncWorker
-from parallax.utils.utils import get_zmq_socket
+from parallax.utils.utils import get_device_info, get_zmq_socket
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +161,7 @@ class GradientServer:
         recv_from_peer_addr: str,
         send_to_peer_addr: str,
         initial_peers: List[str] = [],
+        scheduler_addr: Optional[str] = None,
         relay_servers: List[str] = [],
         block_start_index: int = 0,
         block_end_index: int = 1,
@@ -169,10 +170,15 @@ class GradientServer:
         host_maddrs: List[str] = [],
         announce_maddrs: List[str] = [],
         notify_url: str = None,
+        model_name: Optional[str] = None,
     ):
+        assert not (
+            scheduler_addr is not None and len(initial_peers) > 0
+        ), "scheduler_addr and initial_peers are not allowed at the same time"
         self.recv_from_peer_addr = recv_from_peer_addr
         self.send_to_peer_addr = send_to_peer_addr
         self.initial_peers = initial_peers
+        self.scheduler_addr = scheduler_addr
         self.relay_servers = relay_servers
         self.block_start_index = block_start_index
         self.block_end_index = block_end_index
@@ -181,6 +187,7 @@ class GradientServer:
         self.host_maddrs = host_maddrs
         self.announce_maddrs = announce_maddrs
         self.notify_url = notify_url
+        self.model_name = model_name
 
         self.node_id = f"{dht_prefix}_announce"
         self.lattica = None
@@ -190,7 +197,7 @@ class GradientServer:
         self.stubs = {}
 
     def run(self):
-        self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
+        self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs).with_mdns(False)
 
         if len(self.relay_servers) > 0:
             logger.info(f"Using relay servers: {self.relay_servers}")
@@ -204,7 +211,36 @@ class GradientServer:
             logger.info(f"Using initial peers: {self.initial_peers}")
             self.lattica.with_bootstraps(self.initial_peers)
 
+        if self.scheduler_addr is not None:
+            logger.info(f"Using scheduler addr: {self.scheduler_addr}")
+            self.lattica.with_bootstraps([self.scheduler_addr])
+            self.scheduler_peer_id = self.scheduler_addr.split("/")[-1]
+        else:
+            self.scheduler_peer_id = None
+
         self.lattica.build()
+
+        if self.scheduler_addr is not None:  # central scheduler mode
+            try:
+                self.scheduler_stub = RPCConnectionHandler(self.lattica, None).get_stub(
+                    self.scheduler_peer_id
+                )
+                logger.info(f"Send node_join request to scheduler")
+                response = self.scheduler_stub.node_join(self.get_node_info())
+                response = response.result()
+                if response == {}:
+                    logger.error("Failed to join scheduler")
+                    exit(1)
+
+                logger.info(f"Join scheduler response: {response}")
+
+                self.block_start_index = response.get("start_layer")
+                self.block_end_index = response.get("end_layer")
+            except Exception as e:
+                logger.exception(f"Error in join scheduler: {e}")
+                exit(1)
+        else:  # decentralized mode
+            self.start_routing_table_updater()  # thread
 
         self.connection_handler = TransformerConnectionHandler(
             lattica=self.lattica,
@@ -214,8 +250,8 @@ class GradientServer:
             block_end_index=self.block_end_index,
             notify_url=self.notify_url,
         )  # thread
+
         self.start_node_announcer()  # thread
-        self.start_routing_table_updater()  # thread
         self.start_node_sender()  # main loop
 
     def find_servers(self):
@@ -283,7 +319,11 @@ class GradientServer:
 
         while True:
             try:
-                if self.block_start_index == 0 and self.routing_table is None:
+                if (
+                    self.scheduler_addr is None
+                    and self.block_start_index == 0
+                    and self.routing_table is None
+                ):
                     logger.info("Routing table is not ready in head rank, waiting for it to be set")
                     time.sleep(self.routing_table_update_interval)
                     continue
@@ -300,9 +340,12 @@ class GradientServer:
                     routing_table = None
                     for req in forward_request.reqs:
                         if len(req.routing_table) == 0:
+                            if self.scheduler_addr is not None:
+                                logger.error("Routing table is not set for scheduler mode")
                             assert (
                                 self.block_start_index == 0
                             ), "Request routing table is not set for non-head rank"
+
                             req.routing_table.extend(self.routing_table)
                             logger.info(
                                 f"Set routing table {self.routing_table} for request {req.rid}"
@@ -381,20 +424,23 @@ class GradientServer:
                 while not self.stop_event.is_set():
                     # Announce the range ID
                     try:
-                        self.lattica.store(
-                            key=self.node_id,
-                            subkey=self.lattica.peer_id(),
-                            value={
-                                "block_start_index": self.block_start_index,
-                                "block_end_index": self.block_end_index,
-                            },
-                            expiration_time=time.time() + 60,  # Valid for 60 seconds
-                        )
+                        if self.scheduler_addr is not None:
+                            self.scheduler_stub.node_update(self.get_node_info(is_update=True))
+                        else:
+                            self.lattica.store(
+                                key=self.node_id,
+                                subkey=self.lattica.peer_id(),
+                                value={
+                                    "block_start_index": self.block_start_index,
+                                    "block_end_index": self.block_end_index,
+                                },
+                                expiration_time=time.time() + 60,  # Valid for 60 seconds
+                            )
                     except Exception as e:
                         logger.warning(f"Failed to announce {self.node_id}: {e}")
 
                     # Wait and repeat
-                    time.sleep(30)
+                    time.sleep(10)
             except Exception as e:
                 logger.exception(f"Module announcer thread error: {e}")
 
@@ -403,9 +449,29 @@ class GradientServer:
         self.announcer = threading.Thread(target=_announcer_thread, daemon=True)
         self.announcer.start()
 
+    def get_node_info(self, is_update: bool = False):
+        info = {
+            "call_url": "http://127.0.0.1:3000",
+            "node_id": self.lattica.peer_id(),
+            "hardware": get_device_info(),
+            "model_name": self.model_name,
+            "kv_cache_ratio": 0.8,
+            "param_hosting_ratio": 0.5,
+            "max_concurrent_requests": 16,
+            "max_sequence_length": 1024,
+        }
+        if is_update:
+            info["current_requests"] = 0
+            info["layer_latency_ms"] = 0
+            info["rtt_to_nodes"] = {}
+            info["start_layer"] = self.block_start_index
+            info["end_layer"] = self.block_end_index
+        return info
+
 
 def launch_p2p_server(
     initial_peers: List[str],
+    scheduler_addr: Optional[str],
     relay_servers: List[str],
     pp_start_layer: int,
     pp_end_layer: int,
@@ -415,6 +481,9 @@ def launch_p2p_server(
     host_maddrs: Optional[List[str]],
     announce_maddrs: List[str],
     notify_url: str,
+    recv_from_peer_addr: str,
+    send_to_peer_addr: str,
+    model_name: Optional[str],
 ):
     if dht_port is not None:
         assert host_maddrs is None, "You can't use --dht-port and --host-maddrs at the same time"
@@ -425,9 +494,10 @@ def launch_p2p_server(
 
     # Run the server in a separate thread to keep the main thread free for event loop
     server = GradientServer(
-        recv_from_peer_addr="ipc:///tmp/parallax_p2p_recv_from_peer",
-        send_to_peer_addr="ipc:///tmp/parallax_p2p_send_to_peer",
+        recv_from_peer_addr=recv_from_peer_addr,
+        send_to_peer_addr=send_to_peer_addr,
         initial_peers=initial_peers,
+        scheduler_addr=scheduler_addr,
         relay_servers=relay_servers,
         block_start_index=pp_start_layer,
         block_end_index=pp_end_layer,
@@ -436,6 +506,13 @@ def launch_p2p_server(
         host_maddrs=host_maddrs,
         announce_maddrs=announce_maddrs,
         notify_url=notify_url,
+        model_name=model_name,
     )
     # Start the server
-    mp.Process(target=server.run).start()
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    while server.block_start_index is None:
+        time.sleep(1)
+
+    return server.block_start_index, server.block_end_index

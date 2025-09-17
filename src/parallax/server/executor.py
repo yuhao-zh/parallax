@@ -1050,7 +1050,7 @@ class Executor:
         logger.info("Executor shutdown complete.")
 
 
-def create_executor_config(args):
+def create_executor_config(args: argparse.Namespace):
     """Create executor configuration from command line arguments."""
 
     config = {
@@ -1067,8 +1067,8 @@ def create_executor_config(args):
         "prefill_priority": args.prefill_priority,
         "micro_batch_ratio": args.micro_batch_ratio,
         "scheduler_wait_ms": args.scheduler_wait_ms,
-        "send_to_peer_addr": "ipc:///tmp/parallax_p2p_send_to_peer",
-        "recv_from_peer_addr": "ipc:///tmp/parallax_p2p_recv_from_peer",
+        "send_to_peer_addr": args.send_to_peer_addr if "send_to_peer_addr" in args else None,
+        "recv_from_peer_addr": args.recv_from_peer_addr if "recv_from_peer_addr" in args else None,
         "executor_input_ipc_addr": args.executor_input_ipc,
         "executor_output_ipc_addr": args.executor_output_ipc,
         "attention_backend": args.attention_backend,

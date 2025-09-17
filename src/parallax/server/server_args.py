@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     # P2P configuration
     parser.add_argument("--initial-peers", nargs="+", default=[], help="List of initial DHT peers")
 
+    parser.add_argument("--scheduler-addr", type=str, default=None, help="Scheduler address")
+
     parser.add_argument("--relay-servers", nargs="+", default=[], help="List of relay DHT peers")
 
     parser.add_argument(
@@ -62,12 +64,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--start-layer",
         type=int,
-        required=True,
+        default=None,
         help="Starting layer index for this shard (inclusive)",
     )
 
     parser.add_argument(
-        "--end-layer", type=int, required=True, help="Ending layer index for this shard (exclusive)"
+        "--end-layer", type=int, default=None, help="Ending layer index for this shard (exclusive)"
     )
 
     parser.add_argument(
@@ -183,10 +185,10 @@ def validate_args(args: argparse.Namespace) -> None:
         ValueError: If arguments are invalid
     """
     # Validate layer indices
-    if args.start_layer < 0:
+    if args.start_layer is not None and args.start_layer < 0:
         raise ValueError("start_layer must be non-negative")
 
-    if args.end_layer <= args.start_layer:
+    if args.end_layer is not None and args.end_layer <= args.start_layer:
         raise ValueError("end_layer must be greater than start_layer")
 
     # Validate memory fraction
