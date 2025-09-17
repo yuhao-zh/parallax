@@ -46,15 +46,30 @@ class CustomFormatter(logging.Formatter):
         return super().format(record)
 
 
-def _enable_default_handler(target_module_prefix: str):
+def _enable_default_handler(target_module_prefix):
+    """Attach the default handler to the root logger with a name-prefix filter.
+
+    Accepts either a single string prefix or an iterable of prefixes; a record
+    passes the filter if its logger name starts with any provided prefix.
+    """
     root = logging.getLogger()
 
-    # attach the handler only to loggers that start with target_module_prefix
+    # attach the handler only to loggers that start with any of target prefixes
     class _ModuleFilter(logging.Filter):
-        def filter(self, rec: logging.LogRecord) -> bool:
-            return rec.name.startswith(target_module_prefix)
+        def __init__(self, prefixes):
+            super().__init__()
+            if isinstance(prefixes, str):
+                self._prefixes = (prefixes,)
+            else:
+                try:
+                    self._prefixes = tuple(prefixes)
+                except TypeError:
+                    self._prefixes = (str(prefixes),)
 
-    _default_handler.addFilter(_ModuleFilter())
+        def filter(self, rec: logging.LogRecord) -> bool:
+            return any(rec.name.startswith(p) for p in self._prefixes)
+
+    _default_handler.addFilter(_ModuleFilter(target_module_prefix))
     root.addHandler(_default_handler)
 
 
@@ -78,7 +93,8 @@ def _initialize_if_necessary():
         level_name = os.getenv("PARALLAX_LOGLEVEL", "INFO").upper()
         logging.getLogger().setLevel(level_name)
 
-        _enable_default_handler("parallax")  # only parallax.* by default
+        # Allow logs from our main packages by default
+        _enable_default_handler(("parallax", "scheduling", "backend"))
 
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
