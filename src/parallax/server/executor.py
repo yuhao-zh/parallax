@@ -871,10 +871,6 @@ class Executor:
                     else:
                         # Merge running_batch with prefill batch
                         self.running_batch.merge_batch(self.cur_batch)
-            else:
-                # Set decode req conditions
-                for req in self.cur_batch.reqs:
-                    req.ready = False
             self.cur_batch = None
 
         if return_decoded_tokens:
