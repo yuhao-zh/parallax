@@ -372,7 +372,7 @@ class Scheduler:
                 break
             try:
                 self.leave(node_id)
-            except Exception as exc:  # pylint: disable=broad-except
+            except Exception as exc:
                 logger.warning(f"Leave failed for {node_id}: {exc}")
 
     def stop(self) -> None:

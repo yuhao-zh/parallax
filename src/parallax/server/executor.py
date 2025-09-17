@@ -1,4 +1,3 @@
-# pylint: disable=too-many-locals,too-few-public-methods,too-many-statements,too-many-branches,too-many-lines,broad-exception-caught,pointless-string-statement,import-outside-toplevel
 """
 High-level executor for managing model shards, scheduler, and cache pool on each Peer.
 
@@ -956,7 +955,6 @@ class Executor:
         return ret
 
     def run_loop(self):
-        # pylint: disable=too-many-nested-blocks
         """The main loop of the executor."""
         logger.info(
             f"Executor for layers [{self.start_layer}, {self.end_layer}) starting run loop..."

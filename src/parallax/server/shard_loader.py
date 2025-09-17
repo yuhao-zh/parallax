@@ -20,7 +20,6 @@ logger = get_logger(__name__)
 
 
 class MLXModelLoader:
-    # pylint: disable=too-few-public-methods
     """
     Handles downloading model assets from Hugging Face (if needed) and loading
     a specified shard of an MLX model.
@@ -83,7 +82,6 @@ class MLXModelLoader:
     def load(
         self, lazy: bool = False, strict: bool = True
     ) -> Tuple[nn.Module, Dict[str, Any], Any]:
-        # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         """
         Loads the specified model shard by loading only the necessary weights
         from the safetensor files, saving significant memory.

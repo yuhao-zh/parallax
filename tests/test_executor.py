@@ -1,4 +1,3 @@
-# pylint: disable=protected-access, too-many-locals
 """
 Unit tests for the Executor class, using Qwen3-0.6B-bf16.
 """

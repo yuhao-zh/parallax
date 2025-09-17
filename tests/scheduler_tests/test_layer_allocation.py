@@ -185,7 +185,6 @@ def test_allocator(
     strategy: Literal["greedy", "dp"],
 ):
     """Test allocator with greedy and dp strategies."""
-    # pylint: disable=too-many-locals
     model = build_model_info(num_layers)
 
     n_a100_80g, n_a100_40g, n_5090, n_4090 = counts

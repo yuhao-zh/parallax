@@ -1,8 +1,6 @@
-# pylint: disable=too-many-locals,duplicate-code
 """
 hidden_dimefines the Qwen3 model.
 """
-
 
 from typing import Optional, Tuple
 

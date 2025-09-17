@@ -1,4 +1,3 @@
-# pylint: disable=too-many-locals, too-many-branches
 """
 Phase 2: Request routing.
 
@@ -49,7 +48,6 @@ class DynamicProgrammingRouting(RequestRoutingStrategy):
       minimum-latency node sequence and total latency.
     """
 
-    # pylint: disable=too-many-statements
     def find_turning_points(self, nodes: List[Node], num_layers: int) -> List[Tuple[str, int, str]]:
         """Find shard truncation points via layer-level DP.
 

@@ -274,7 +274,6 @@ class BaseLayerAllocator:
 
         return coefficient_of_variation > self.rebalance_threshold
 
-    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     def adjust_pipeline_layers(
         self,
         pipeline_nodes: List[Node],
@@ -516,7 +515,6 @@ class GreedyLayerAllocator(BaseLayerAllocator):
     remaining nodes.
     """
 
-    # pylint: disable=too-many-locals, too-many-nested-blocks, too-many-branches
     def global_allocation(self) -> bool:
         """
         Allocate layers to nodes greedily to maximize the number of pipelines.
@@ -654,7 +652,6 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
         self.alpha = alpha
         self._path: Dict[Tuple[int, Tuple[int, ...], int], Tuple] = {}
 
-    # pylint: disable=too-many-locals, too-many-statements
     def global_allocation(self) -> bool:
         num_nodes = len(self.nodes)
         num_layers = int(self.model_info.num_layers)
@@ -675,7 +672,6 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
         for k_target in range(1, max_num_pipes + 1):
             path: Dict[Tuple[int, Tuple[int, ...], int], Tuple] = {}
 
-            # pylint: disable=too-many-branches, too-many-locals, cell-var-from-loop, too-many-statements
             @lru_cache(maxsize=None)
             def dp(i: int, open_residuals: Tuple[int, ...], finished_pipes: int) -> int:
                 # Completed target with no open pipelines

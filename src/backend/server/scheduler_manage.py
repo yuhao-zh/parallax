@@ -1,11 +1,13 @@
-from scheduling.scheduler import Scheduler
-from scheduling.node import RequestSignal
 import time
-from backend.server.rpc_connection_handler import RPCConnectionHandler
-from lattica import Lattica
 from typing import List
-from scheduling.model_info import ModelInfo
+
+from lattica import Lattica
+
+from backend.server.rpc_connection_handler import RPCConnectionHandler
 from backend.server.static_config import get_model_info
+from scheduling.node import RequestSignal
+from scheduling.scheduler import Scheduler
+
 
 class SchedulerManage:
     def __init__(
@@ -26,11 +28,11 @@ class SchedulerManage:
         self.node_id = f"{dht_prefix}_announce"
         self.lattica = None
         self.stubs = {}
-        
+
     def run(self, model_name, init_nodes_num):
         self._start_scheduler(model_name, init_nodes_num)
         self._start_lattica()
-        
+
     def _start_scheduler(self, model_name, init_nodes_num):
         if self.scheduler is not None:
             return
@@ -76,11 +78,11 @@ class SchedulerManage:
     def get_schedule_status(self):
         if self.scheduler is None:
             return "waiting"
-        
+
         if self.scheduler.layer_allocator.has_full_pipeline():
             return "success"
         else:
             return "waiting"
 
     def get_call_url_by_node_id(self, node_id):
-       return self.connection_handler.get_call_url_by_node_id(node_id)
+        return self.connection_handler.get_call_url_by_node_id(node_id)

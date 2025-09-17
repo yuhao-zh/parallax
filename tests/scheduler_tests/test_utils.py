@@ -69,7 +69,6 @@ def build_node(
     return n
 
 
-# pylint: disable=too-many-locals
 def compute_rtts_from_coords(nodes: Iterable[Node]) -> Dict[Tuple[str, str], float]:
     """Map Euclidean distances between nodes' (x, y) to RTTs in [10, 200] ms."""
     node_list = list(nodes)

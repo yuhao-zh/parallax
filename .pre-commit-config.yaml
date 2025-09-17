@@ -1,16 +1,9 @@
-exclude: |
-  (?x)^( 
-    README\.md|
-    src/scheduling/README\.md
-  )$
-
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: check-yaml
       - id: end-of-file-fixer
-        exclude: /experiments/testdata/.*
       - id: trailing-whitespace
       - id: mixed-line-ending
 
@@ -29,21 +22,11 @@ repos:
       - id: isort
         language_version: python3.11
         args: ["--profile", "black"]
+        exclude: '^src/parallax/p2p/proto/forward_pb2\.py$'
 
   - repo: https://github.com/psf/black
     rev: 24.3.0
     hooks:
       - id: black
         language_version: python3.11
-
-  - repo: https://github.com/pycqa/pylint
-    rev: v3.2.2
-    hooks:
-      - id: pylint
-        language: system
-        types: [python]
-        exclude: ".*_pb2\\.py$"
-        args:
-          - "--disable=fixme,logging-fstring-interpolation,too-many-instance-attributes,too-many-arguments,too-many-positional-arguments,too-few-public-methods,c-extension-no-member,broad-exception-caught,consider-using-with,no-member,attribute-defined-outside-init,dangerous-default-value"
-          - "--max-line-length=120"
-          - "--msg-template={abspath}:{line}: [{msg_id}({symbol}), {obj}] {msg}"
+        exclude: '^src/parallax/p2p/proto/forward_pb2\.py$'

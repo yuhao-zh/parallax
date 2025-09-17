@@ -1,5 +1,5 @@
-# pylint: disable=missing-module-docstring,missing-class-docstring,too-few-public-methods,global-statement, arguments-renamed
 """Logging configuration for Parallax."""
+
 import logging
 import os
 import sys

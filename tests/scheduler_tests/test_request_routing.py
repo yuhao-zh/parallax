@@ -1,4 +1,3 @@
-# pylint: disable=too-many-locals
 """
 Unit tests for DynamicProgrammingRouting.
 
@@ -7,7 +6,6 @@ Covers:
 - Turning point detection via layer-level DP
 - Parametrized scenarios with different splits/overlaps
 """
-
 
 import pytest
 

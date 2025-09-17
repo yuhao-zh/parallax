@@ -1,4 +1,3 @@
-# pylint: disable=too-many-locals
 """Utility functions."""
 
 from typing import List

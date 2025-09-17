@@ -66,7 +66,6 @@ def test_scheduler_join_and_leave():
     assert n3 not in sched.nodes
 
 
-# pylint: disable=protected-access
 def test_scheduler_bootstrap_wait_and_dynamic_events():
     """Scheduler waits for min nodes, bootstraps, then handles join/leave events."""
     model = build_model_info(12)

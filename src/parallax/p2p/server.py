@@ -7,8 +7,6 @@ It is used to handle the communication between the peers, and communicate with t
 
 """
 
-# pylint: disable=wrong-import-position,wrong-import-order,missing-function-docstring,broad-exception-caught,too-many-locals,too-many-branches,too-many-statements
-
 import dataclasses
 import enum
 import logging
@@ -290,7 +288,6 @@ class GradientServer:
                     time.sleep(self.routing_table_update_interval)
                     continue
 
-                # pylint: disable=unbalanced-tuple-unpacking
                 message_type, message_body = send_to_peer.recv_multipart()[:2]
 
                 if message_type == b"forward":

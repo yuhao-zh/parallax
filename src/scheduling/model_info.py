@@ -1,4 +1,3 @@
-# pylint: disable=too-many-function-args
 """
 ModelInfo class for scheduling.
 

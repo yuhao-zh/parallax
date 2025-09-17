@@ -1,4 +1,3 @@
-# pylint: disable=no-else-return
 """
 This module contains the http frontend server for Parallax.
 Two classes that handles a post request from the frontend service:

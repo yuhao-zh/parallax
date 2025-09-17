@@ -1,4 +1,3 @@
-# pylint: disable=too-many-function-args
 """
 Scheduling requests to form batches.sche
 

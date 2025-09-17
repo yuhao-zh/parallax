@@ -1,4 +1,3 @@
-# pylint: disable=too-many-locals
 """
 Defines the ShardedModel class for distributing MLX models across multiple devices.
 """
@@ -115,7 +114,6 @@ class ShardedModel(nn.Module):
         mask: Optional[mx.array] = None,
         window_size: Optional[int] = None,
     ) -> Tuple[mx.array, Tuple[mx.array, mx.array]]:
-        # pylint: disable=too-many-branches
         """
         Args:
             h_or_tokens:

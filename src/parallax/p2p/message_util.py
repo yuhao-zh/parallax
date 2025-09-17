@@ -1,5 +1,4 @@
-﻿# pylint: disable=import-outside-toplevel
-"""
+﻿"""
 Utility functions for message serialization and deserialization.
 
 This module contains utility functions for serializing and deserializing messages

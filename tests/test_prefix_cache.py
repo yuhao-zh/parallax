@@ -1,7 +1,7 @@
-# pylint: disable=too-many-locals
 """
 Tests for the radix tree.
 """
+
 import mlx.core as mx
 
 from parallax.server.radix_cache import RadixCache

@@ -12,7 +12,7 @@ Scheduling primitives for distributed LLM inference.
 import time
 from dataclasses import dataclass, field
 from math import floor
-from typing import Callable, Dict, Optional, List
+from typing import Callable, Dict, List, Optional
 
 from scheduling.model_info import ModelInfo
 
