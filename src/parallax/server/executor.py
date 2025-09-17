@@ -50,6 +50,7 @@ from parallax.utils.utils import (
     create_causal_mask,
     get_current_device,
     get_device_dtype,
+    get_infinite_value_by_dtype,
     get_zmq_socket,
     pad_inputs,
     pad_prefix_caches,
@@ -434,11 +435,13 @@ class Executor:
             k_batched, k_padding_mask = pad_prefix_caches(k_caches, lengths, self.dtype)
             v_batched, _ = pad_prefix_caches(v_caches, lengths, self.dtype)
             padding_mask = k_padding_mask
-            causal_mask = create_causal_mask(padded_inputs.shape[1], max(lengths))
-            mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
+            causal_mask = create_causal_mask(padded_inputs.shape[1], max(lengths), self.dtype)
+            mask = combine_padding_and_causal_masks(padding_mask, causal_mask, self.dtype)
         else:
-            causal_mask = create_causal_mask(padded_inputs.shape[1], padded_inputs.shape[1])
-            mask = combine_padding_and_causal_masks(padding_mask, causal_mask)
+            causal_mask = create_causal_mask(
+                padded_inputs.shape[1], padded_inputs.shape[1], self.dtype
+            )
+            mask = combine_padding_and_causal_masks(padding_mask, causal_mask, self.dtype)
 
         return {
             "h_or_tokens": padded_inputs,
@@ -479,7 +482,7 @@ class Executor:
             kv_cache = self.kv_cache_manager.gather_kv_cache(req.request_id)
             kv_cache_list.append(kv_cache)
 
-        padded_inputs, _ = pad_inputs(0, h_list)
+        padded_inputs, _ = pad_inputs(0, h_list, self.dtype)
 
         if not kv_cache_list:
             raise ValueError("No KV cache found for request.")
@@ -495,7 +498,8 @@ class Executor:
         # to the attention weights of shape (B, n_heads, 1, source_len_padded + 1).
         ones_for_current_token = mx.ones((k_padding_mask.shape[0], 1, 1, 1), dtype=self.dtype)
         final_padding_mask = mx.concatenate([k_padding_mask, ones_for_current_token], axis=3)
-        attention_mask = (1.0 - final_padding_mask) * -1e9
+        inf_value = get_infinite_value_by_dtype(self.dtype)
+        attention_mask = (1.0 - final_padding_mask) * -inf_value
 
         model_lengths = mx.array([kv[0].shape[2] for kv in kv_cache_list])
 
@@ -613,7 +617,8 @@ class Executor:
                     original_req = self.scheduler.get_running_request(req.request_id)
                     if original_req is None:
                         logger.warning(
-                            f"Received IntermediateRequest {req.request_id} but no corresponding request found in scheduler (CUDA). "
+                            f"Received IntermediateRequest {req.request_id}. "
+                            "But no corresponding request found in scheduler (CUDA). "
                             "It might have been cancelled or finished."
                         )
                         continue
@@ -681,13 +686,15 @@ class Executor:
                     original_req = self.scheduler.get_running_request(req.request_id)
                     if original_req is None:
                         logger.warning(
-                            f"Received IntermediateRequest {req.request_id} but no corresponding request found in scheduler. "
+                            f"Received IntermediateRequest {req.request_id}. "
+                            "But no corresponding request found in scheduler. "
                             "It might have been cancelled or finished."
                         )
                         continue
                     if not self.kv_cache_manager.has_request(req.request_id):
                         logger.warning(
-                            f"Received IntermediateRequest {req.request_id} but no corresponding request found in cache manager. "
+                            f"Received IntermediateRequest {req.request_id}. "
+                            "But no corresponding request found in cache manager. "
                             "It might have been cancelled or finished."
                         )
                         continue
