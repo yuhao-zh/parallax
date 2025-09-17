@@ -1,8 +1,9 @@
 import argparse
 
-from backend.utils.logging_config import get_logger
+from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -28,7 +29,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--port", type=int, default=5000, help="Port to listen on")
 
-    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-0.6B-MLX-bf16", help="Model name")
+    parser.add_argument(
+        "--model-name", type=str, default="Qwen/Qwen3-0.6B-MLX-bf16", help="Model name"
+    )
 
     parser.add_argument("--init-nodes-num", type=int, default=4, help="Number of initial nodes")
 
