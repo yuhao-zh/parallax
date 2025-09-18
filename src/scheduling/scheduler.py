@@ -40,7 +40,6 @@ class Scheduler:
     ) -> None:
         self.model_info = model_info
         self.num_layers = model_info.num_layers
-        self.nodes = nodes
 
         allocator_class = (
             GreedyLayerAllocator if strategy == "greedy" else DynamicProgrammingLayerAllocator
@@ -51,6 +50,8 @@ class Scheduler:
             rebalance_threshold=rebalance_threshold,
             water_filling_max_iterations=water_filling_max_iterations,
         )
+        # Ensure Scheduler and allocator share the same node list to avoid divergence.
+        self.nodes = self.layer_allocator.nodes
         self.node_id_to_node: Dict[str, Node] = self.layer_allocator.node_id_to_node
         self.min_nodes_bootstrapping = min_nodes_bootstrapping
 
@@ -232,7 +233,6 @@ class Scheduler:
             node.kv_cache_ratio,
             node.param_hosting_ratio,
         )
-        self.nodes.append(node)
         self.layer_allocator.declare(node)
         if not bootstrap:
             self.layer_allocator.join(node)
@@ -247,7 +247,6 @@ class Scheduler:
         node = self.node_id_to_node[node_id]
         logger.info("Leaving node %s (start=%s, end=%s)", node_id, node.start_layer, node.end_layer)
         self.layer_allocator.leave(node_id)
-        self.nodes.remove(node)
         if self.layer_allocator.should_global_rebalance():
             logger.info("Global rebalance triggered due to node leave")
             # TODO: send a signal to the nodes to stop running requests

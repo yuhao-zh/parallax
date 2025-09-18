@@ -9,8 +9,7 @@ On the worker side (parallax worker nodes),
     2. Run
     python src/parallax/launch.py \
           --model-path Qwen/Qwen3-0.6B \
-          --kv-max-tokens-in-cache 100000 \
-          --max-num-tokens-in-batch 16384 \
+          --max-num-tokens-per-batch 16384 \
           --kv-block-size 1024 \
           --max-batch-size 128 \
           --port 3000 \
@@ -288,7 +287,7 @@ def calculate_metrics(
         if outputs[i].success:
             output_len = outputs[i].output_tokens
 
-            if output_len is None:
+            if output_len == 0:
                 # We use the tokenizer to count the number of output tokens
                 # for some serving backends instead of looking at
                 # len(outputs[i].itl) since multiple output tokens may be

@@ -263,6 +263,9 @@ class KVCacheManager:
         for request, key, value, length in zip(requests, keys, values, lengths):
             length = length.item()
             assert self.has_request(request.request_id), "request not in cache"
+            # TODO: fix this
+            # actual length? double-counted prefill len
+            # decode length 1, why rounding up?
             if self.tokens_in_cache + self.round_up_to_step(length) > self.max_num_tokens:
                 logger.warning(
                     f"can't add request {request.request_id} to cache: "

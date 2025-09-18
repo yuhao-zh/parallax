@@ -67,7 +67,6 @@ def get_metrics() -> Dict[str, Any]:
 
 def set_metrics_publisher(publisher: Optional[Callable[[Dict[str, Any]], None]]) -> None:
     """Register a callback to publish metric snapshots after each update.
-
     Args:
         publisher: Callable receiving a metrics dict. Set to None to disable publishing.
     """

@@ -26,7 +26,7 @@ class Scheduler:
     def __init__(
         self,
         max_batch_size: int = 16,
-        max_num_tokens: int = 1024,
+        max_num_tokens_per_batch: int = 1024,
         prefill_priority: Literal[0, 1] = 0,
         scheduler_wait_ms: int = 500,
         micro_batch_ratio: int = 2,
@@ -36,7 +36,7 @@ class Scheduler:
         """
         Args:
             max_batch_size: Maximum number of running requests;
-            max_num_tokens: Maxmimum number of prefill + decode tokens in a single batch;
+            max_num_tokens_per_batch: Maxmimum number of prefill + decode tokens in a single batch;
             prefill_priority: Priority for prefill requests,
                 default 0 for prefill, 1 for decode, 0 for higher priority;
             scheduler_wait_ms: The minimum time to wait before dispatching a batch;
@@ -44,7 +44,7 @@ class Scheduler:
             tokenizer: The tokenizer to use for the model.
         """
         self.max_batch_size = max_batch_size
-        self.max_num_tokens = max_num_tokens
+        self.max_num_tokens_per_batch = max_num_tokens_per_batch
         self.micro_batch_size = max_batch_size // micro_batch_ratio
         self.scheduler_wait_ms = scheduler_wait_ms
         self.is_first_peer = is_first_peer
@@ -59,16 +59,17 @@ class Scheduler:
         self._request_queue: List[Tuple[int, float, str, Request]] = []
         # Keeps track of all in-flight requests
         self._running_requests: Dict[str, Request] = {}
-        self._inflight_tokens: int = 0
 
         self.priority_map = {
             RequestStatus.PREFILLING: prefill_priority,
             RequestStatus.DECODING: 1 - prefill_priority,
         }
         self._last_dispatch_ts = time.time()
+        # Track last reported running requests to avoid redundant metric updates
+        self._last_reported_running_requests: int = 0
         logger.info(
             f"Scheduler initialized: max_batch_size={self.max_batch_size}, "
-            f"max_num_tokens={self.max_num_tokens}"
+            f"max_num_tokens_per_batch={self.max_num_tokens_per_batch}"
         )
 
     @property
@@ -113,24 +114,21 @@ class Scheduler:
         priority = self.priority_map.get(request.status, 1)
         heapq.heappush(self._request_queue, (priority, arrival_time, request.request_id, request))
         logger.debug(f"Request {request.request_id} added to the scheduler.")
-        # Reflect current running requests metric (unchanged by enqueue but kept fresh)
-        try:
-            update_metrics(current_requests=self.num_running_requests)
-        except Exception:
-            pass
+        logger.debug(f"Scheduler queue size: {len(self._request_queue)}")
+        # Running count does not change on enqueue; do not update metrics here
 
     def evict_request(self, request_id: str, status: Optional[RequestStatus] = None):
         """Removes a request from the scheduler's running queue."""
         _ = status  # status is used by the first peer's logic but not here.
         if request_id in self._running_requests:
-            req = self._running_requests.pop(request_id)
-            # Adjust inflight tokens
-            cost = req.prompt_len if req.is_prefill else 1
-            self._inflight_tokens -= cost
+            self._running_requests.pop(request_id)
             logger.info(f"Evicted request {request_id} from scheduler.")
-            # Update metrics after eviction
+            # Update metrics only if running count changed since last report
             try:
-                update_metrics(current_requests=self.num_running_requests)
+                curr = self.num_running_requests
+                # if curr != self._last_reported_running_requests:
+                update_metrics(current_requests=curr)
+                # self._last_reported_running_requests = curr
             except Exception:
                 pass
         else:
@@ -188,35 +186,39 @@ class Scheduler:
         if not self.has_pending_requests:
             return []
 
+        inflight_tokens = 0
+
         batch = []
-        while True:
-            if not self.has_pending_requests:
-                break
+        save_index = []
+        for index, request in enumerate(self._request_queue):
             if len(batch) >= self.micro_batch_size:
-                break
-            _, _, rid, req = self._request_queue[0]
+                save_index.append(index)
+                continue
+            _, _, rid, req = request
+
             cost = req.prompt_len if req.is_prefill else 1
-            if cost + self._inflight_tokens > self.max_num_tokens:
-                break
+            if cost + inflight_tokens > self.max_num_tokens_per_batch:
+                save_index.append(index)
+                continue
 
-            heapq.heappop(self._request_queue)
-            batch.append(req)
             if rid not in self._running_requests:
-                self._running_requests[rid] = req
-            else:
-                assert req.is_decoding, "Request should be decoding if already run."
-                staled_req_state = self._running_requests[rid]
-                if staled_req_state.is_prefill:
-                    self._inflight_tokens -= staled_req_state.prompt_len
-                else:
-                    self._inflight_tokens -= 1
-                self._running_requests[rid] = req
+                if len(self._running_requests) >= self.max_batch_size:
+                    save_index.append(index)
+                    continue
 
-            self._inflight_tokens += cost
+            batch.append(req)
+            self._running_requests[rid] = req
+
+            inflight_tokens += cost
+
+        self._request_queue = [self._request_queue[i] for i in save_index]
 
         # Reflect current running requests metric after forming the batch
         try:
-            update_metrics(current_requests=self.num_running_requests)
+            curr = self.num_running_requests
+            if curr != self._last_reported_running_requests:
+                update_metrics(current_requests=curr)
+                self._last_reported_running_requests = curr
         except Exception:
             pass
         return batch

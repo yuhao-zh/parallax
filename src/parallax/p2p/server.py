@@ -251,6 +251,7 @@ class GradientServer:
                         pass
 
                 set_metrics_publisher(_publish_metrics)
+
             except Exception as e:
                 logger.exception(f"Error in join scheduler: {e}")
                 exit(1)

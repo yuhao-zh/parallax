@@ -105,7 +105,10 @@ class BaseLayerAllocator:
     ) -> None:
         self.model_info = model_info
         self.num_total_layers = model_info.num_layers
-        self.nodes = sorted(nodes, key=lambda node: node.get_decoder_layer_capacity(), reverse=True)
+        # Use the caller-provided list object to keep a single authoritative list.
+        # Sort in-place to preserve shared reference with scheduler.
+        self.nodes = nodes
+        self.nodes.sort(key=lambda node: node.get_decoder_layer_capacity(), reverse=True)
 
         self.layer_to_load: Dict[int, LayerLoad] = {}
         self.node_id_to_node: Dict[str, Node] = {}
@@ -203,9 +206,8 @@ class BaseLayerAllocator:
         if node.node_id not in self.node_id_to_node:
             self.nodes.append(node)
             self.node_id_to_node[node.node_id] = node
-        self.nodes = sorted(
-            self.nodes, key=lambda node: node.get_decoder_layer_capacity(), reverse=True
-        )
+        # Keep order deterministic without rebinding the list reference
+        self.nodes.sort(key=lambda node: node.get_decoder_layer_capacity(), reverse=True)
         logger.info("Declared node %s (total declared: %d)", node.node_id, len(self.nodes))
 
     def join(self, node: Node) -> None:
@@ -236,6 +238,11 @@ class BaseLayerAllocator:
         logger.info("Node leaving allocator: %s", node_id)
         self.deallocate(node)
         del self.node_id_to_node[node_id]
+        # Ensure the shared nodes list is updated
+        for node in self.nodes:
+            if node.node_id == node_id:
+                self.nodes.remove(node)
+                break
 
     def allocate_left_over_nodes(self) -> None:
         """Assign any nodes without allocations by treating them as dynamic joins.

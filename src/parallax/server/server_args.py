@@ -89,13 +89,6 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--kv-max-tokens-in-cache",
-        type=int,
-        default=None,
-        help="Maximum number of tokens to store in KV cache (None for auto)",
-    )
-
-    parser.add_argument(
         "--kv-block-size", type=int, default=64, help="Block size for KV cache management"
     )
 
@@ -109,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--max-num-tokens-in-batch",
+        "--max-num-tokens-per-batch",
         type=int,
         default=1024,
         help="Maximum number of tokens in a batch",
@@ -199,8 +192,8 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.max_batch_size <= 0:
         raise ValueError("max_batch_size must be positive")
 
-    if args.max_num_tokens_in_batch <= 0:
-        raise ValueError("max_num_tokens_in_batch must be positive")
+    if args.max_num_tokens_per_batch <= 0:
+        raise ValueError("max_num_tokens_per_batch must be positive")
 
     if args.kv_block_size <= 0:
         raise ValueError("kv_block_size must be positive")
@@ -210,10 +203,6 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if args.scheduler_wait_ms < 0:
         raise ValueError("scheduler_wait_ms must be non-negative")
-
-    # Validate KV cache tokens
-    if args.kv_max_tokens_in_cache is not None and args.kv_max_tokens_in_cache <= 0:
-        raise ValueError("kv_max_tokens_in_cache must be positive if specified")
 
     # Validate supported dtypes
     dtype_list = [

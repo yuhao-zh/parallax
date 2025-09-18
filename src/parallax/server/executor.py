@@ -73,14 +73,16 @@ class Executor:
         dtype: str = "float16",
         # Scheduler Configs
         max_batch_size: int = 16,
-        max_num_tokens_in_batch: int = 1024,
+        # Controlling perfill / decode ratio
+        max_num_tokens_per_batch: int = 1024,
         prefill_priority: int = 0,
         micro_batch_ratio: int = 2,
         scheduler_wait_ms: int = 500,
+        # Metrics Configs
+        layer_latency_update_every: int = 16384,
         # KV Cache Configs
         kv_block_size: int = 64,
         kv_cache_memory_fraction: float = 0.8,
-        kv_max_tokens_in_cache: Optional[int] = None,
         enable_prefix_cache: Optional[bool] = False,
         # Communication Configs
         # P2P Communication Configs
@@ -143,6 +145,10 @@ class Executor:
         self.is_last_peer = end_layer == self.config.get("num_hidden_layers")
         self.num_shard_layers = end_layer - start_layer
 
+        # Metrics throttling for per-layer latency updates
+        self.layer_latency_update_every = int(max(1, layer_latency_update_every))
+        self._decode_steps_since_metric = self.layer_latency_update_every
+
         self.dtype = get_device_dtype(dtype, self.device)
         logger.info(
             f"Executor dtype set to {dtype} (resolved={self.dtype}); shard_layers={self.num_shard_layers}"
@@ -168,7 +174,7 @@ class Executor:
         # Scheduler
         self.scheduler = Scheduler(
             max_batch_size=max_batch_size,
-            max_num_tokens=max_num_tokens_in_batch,
+            max_num_tokens_per_batch=max_num_tokens_per_batch,
             prefill_priority=prefill_priority,
             scheduler_wait_ms=scheduler_wait_ms,
             micro_batch_ratio=micro_batch_ratio,
@@ -176,7 +182,7 @@ class Executor:
             tokenizer=self.tokenizer,
         )
         logger.info(
-            f"Scheduler initialized (max_batch_size={max_batch_size}, max_tokens={max_num_tokens_in_batch}, wait_ms={scheduler_wait_ms})"
+            f"Scheduler initialized (max_batch_size={max_batch_size}, max_tokens={max_num_tokens_per_batch}, wait_ms={scheduler_wait_ms})"
         )
 
         if self.device == "mlx":
@@ -193,7 +199,6 @@ class Executor:
                 num_layers=self.num_shard_layers,
                 dtype=self.dtype,
                 cache_memory_fraction=kv_cache_memory_fraction,
-                max_num_tokens=kv_max_tokens_in_cache,
             )
             mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
             logger.debug(
@@ -207,7 +212,6 @@ class Executor:
             num_layers=self.num_shard_layers,
             dtype=self.dtype,
             page_size=1,
-            max_num_tokens=kv_max_tokens_in_cache,
         )
 
         # Communication Related
@@ -344,7 +348,7 @@ class Executor:
             "lengths": torch.tensor(lengths, device=self.device),
             "requests": batched_requests,
         }
-        logger.debug(f"Prepared CUDA prefill batch (size={batch_size})")
+        logger.info(f"Prepared CUDA prefill batch (size={batch_size})")
         return ret
 
     def _prepare_cuda_decode_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
@@ -397,7 +401,7 @@ class Executor:
             "lengths": torch.tensor(lengths, device=self.device),
             "requests": batched_requests,
         }
-        logger.debug(f"Prepared CUDA decode batch (size={batch_size})")
+        logger.info(f"Prepared CUDA decode batch (size={batch_size})")
         return ret
 
     def _prepare_mlx_prefill_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
@@ -589,6 +593,10 @@ class Executor:
             decode_batch = self._prepare_mlx_decode_batch(decode_reqs)
         if prefill_batch is None and decode_batch is None:
             return None
+        if prefill_batch is not None:
+            logger.info(f"Prepared prefill batch with {len(prefill_batch['requests'])} requests.")
+        if decode_batch is not None:
+            logger.info(f"Prepared decode batch with {len(decode_batch['requests'])} requests.")
         return {
             "prefill_batch": prefill_batch,
             "decode_batch": decode_batch,
@@ -713,6 +721,8 @@ class Executor:
 
     def _handle_input_requests(self, requests: List[Request]):
         """Update requests states and status in scheduler and cache manager."""
+        if len(requests) > 0:
+            logger.info(f"Handling {len(requests)} requests.")
         if not requests:
             return
 
@@ -1038,6 +1048,7 @@ class Executor:
             batch_to_process = self.scheduler.form_batch()
             if not batch_to_process:
                 continue
+            logger.info(f"Formed batch with {len(batch_to_process)} requests.")
 
             # 6. Process the batch
             try:
@@ -1052,14 +1063,21 @@ class Executor:
                         output = self.process_batch(
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
                         )
-                        # Update metrics with per-layer latency sample
-                        try:
-                            elapsed_ms = (time.time() - start_time) * 1000.0
-                            assert self.num_shard_layers > 0
-                            per_layer_ms = elapsed_ms / float(self.num_shard_layers)
-                            update_metrics(layer_latency_ms_sample=per_layer_ms)
-                        except Exception:
-                            pass
+                        # Update metrics with per-layer latency sample (throttled by decode steps)
+                        if batch_type == "decode_batch":
+                            try:
+                                self._decode_steps_since_metric += len(prepared_inputs["requests"])
+                                if (
+                                    self._decode_steps_since_metric
+                                    >= self.layer_latency_update_every
+                                ):
+                                    elapsed_ms = (time.time() - start_time) * 1000.0
+                                    assert self.num_shard_layers > 0
+                                    per_layer_ms = elapsed_ms / float(self.num_shard_layers)
+                                    update_metrics(layer_latency_ms_sample=per_layer_ms)
+                                    self._decode_steps_since_metric = 0
+                            except Exception:
+                                pass
                         # 7. Prepare requests for the next stage in the pipeline
                         next_batch = self._prepare_next_batch_requests(
                             requests=prepared_inputs["requests"],
@@ -1121,9 +1139,8 @@ def create_executor_config(args: argparse.Namespace):
         "max_batch_size": args.max_batch_size,
         "kv_block_size": args.kv_block_size,
         "kv_cache_memory_fraction": args.kv_cache_memory_fraction,
-        "kv_max_tokens_in_cache": args.kv_max_tokens_in_cache,
         "enable_prefix_cache": args.enable_prefix_cache,
-        "max_num_tokens_in_batch": args.max_num_tokens_in_batch,
+        "max_num_tokens_per_batch": args.max_num_tokens_per_batch,
         "prefill_priority": args.prefill_priority,
         "micro_batch_ratio": args.micro_batch_ratio,
         "scheduler_wait_ms": args.scheduler_wait_ms,

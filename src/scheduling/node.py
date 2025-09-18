@@ -14,7 +14,10 @@ from dataclasses import dataclass, field
 from math import floor
 from typing import Callable, Dict, List, Optional
 
+from parallax_utils.logging_config import get_logger
 from scheduling.model_info import ModelInfo
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -196,9 +199,10 @@ class Node:
         num_kv_tokens_can_host = floor(
             self.hardware.memory_gb * 1024 * 1024 * 1024 * self.kv_cache_ratio / kv_size
         )
-        return min(
+        max_requests = min(
             self.max_concurrent_requests, floor(num_kv_tokens_can_host / self.max_sequence_length)
         )
+        return max_requests
 
     @property
     def num_current_layers(self) -> int:
@@ -237,6 +241,9 @@ class Node:
     @property
     def is_overloaded(self) -> bool:
         """Check if node is at capacity for requests."""
+        logger.warning(
+            f"Node {self.node_id} is overloaded: {self.current_requests} >= {self.max_requests}"
+        )
         return self.current_requests >= self.max_requests
 
     def get_decoder_layer_capacity(
