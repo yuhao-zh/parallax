@@ -170,6 +170,7 @@ class GradientServer:
         hidden_layers: int = 128,
         dht_prefix: str = "gradient",
         host_maddrs: List[str] = [],
+        public_ip: Optional[str] = None,
         http_port: int = 3000,
         announce_maddrs: List[str] = [],
         notify_url: str = None,
@@ -189,6 +190,7 @@ class GradientServer:
         self.dht_prefix = dht_prefix
         self.host_maddrs = host_maddrs
         self.announce_maddrs = announce_maddrs
+        self.public_ip = public_ip
         self.http_port = http_port
         self.notify_url = notify_url
         self.model_name = model_name
@@ -452,7 +454,6 @@ class GradientServer:
                     except Exception as e:
                         logger.warning(f"Failed to announce {self.node_id}: {e}")
 
-                    # Wait and repeat
                     time.sleep(10)
             except Exception as e:
                 logger.exception(f"Module announcer thread error: {e}")
@@ -465,8 +466,7 @@ class GradientServer:
     def get_node_info(self, is_update: bool = False):
         peer_id = self.lattica.peer_id() if self.lattica is not None else None
         info = {
-            # TODO: get real ip
-            "call_url": f"http://127.0.0.1:{self.http_port}",
+            "call_url": f"http://{self.public_ip}:{self.http_port}",
             "node_id": peer_id,
             "hardware": detect_node_hardware(peer_id),
             "model_name": self.model_name,
@@ -497,6 +497,7 @@ def launch_p2p_server(
     dht_prefix: str,
     host_maddrs: Optional[List[str]],
     announce_maddrs: List[str],
+    public_ip: Optional[str],
     http_port: int,
     notify_url: str,
     recv_from_peer_addr: str,
@@ -523,6 +524,7 @@ def launch_p2p_server(
         dht_prefix=dht_prefix,
         host_maddrs=host_maddrs,
         announce_maddrs=announce_maddrs,
+        public_ip=public_ip if public_ip is not None else "127.0.0.1",
         http_port=http_port,
         notify_url=notify_url,
         model_name=model_name,
