@@ -10,6 +10,7 @@ import heapq
 import time
 from typing import Dict, List, Literal, Optional, Tuple
 
+from parallax.server.metrics import update_metrics
 from parallax.server.request import InitialRequest, Request, RequestStatus
 from parallax_utils.logging_config import get_logger
 
@@ -112,6 +113,11 @@ class Scheduler:
         priority = self.priority_map.get(request.status, 1)
         heapq.heappush(self._request_queue, (priority, arrival_time, request.request_id, request))
         logger.debug(f"Request {request.request_id} added to the scheduler.")
+        # Reflect current running requests metric (unchanged by enqueue but kept fresh)
+        try:
+            update_metrics(current_requests=self.num_running_requests)
+        except Exception:
+            pass
 
     def evict_request(self, request_id: str, status: Optional[RequestStatus] = None):
         """Removes a request from the scheduler's running queue."""
@@ -122,6 +128,11 @@ class Scheduler:
             cost = req.prompt_len if req.is_prefill else 1
             self._inflight_tokens -= cost
             logger.info(f"Evicted request {request_id} from scheduler.")
+            # Update metrics after eviction
+            try:
+                update_metrics(current_requests=self.num_running_requests)
+            except Exception:
+                pass
         else:
             raise ValueError(f"Attempted to evict non-existent request {request_id}.")
 
@@ -203,4 +214,9 @@ class Scheduler:
 
             self._inflight_tokens += cost
 
+        # Reflect current running requests metric after forming the batch
+        try:
+            update_metrics(current_requests=self.num_running_requests)
+        except Exception:
+            pass
         return batch

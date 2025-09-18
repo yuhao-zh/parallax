@@ -178,11 +178,6 @@ class Executor:
         logger.info(
             f"Scheduler initialized (max_batch_size={max_batch_size}, max_tokens={max_num_tokens_in_batch}, wait_ms={scheduler_wait_ms})"
         )
-        # Initialize metrics
-        try:
-            update_metrics(current_requests=0)
-        except Exception:
-            pass
 
         if self.device == "mlx":
             # Other setup for MAC
@@ -1037,10 +1032,6 @@ class Executor:
             # 4. Check if we should form a batch
             if not self.scheduler.should_dispatch():
                 time.sleep(0.01)  # prevent busy waiting
-                try:
-                    update_metrics(current_requests=self.scheduler.num_running_requests)
-                except Exception:
-                    pass
                 continue
 
             # 5. Form a batch from the scheduler's queue
@@ -1066,14 +1057,7 @@ class Executor:
                             elapsed_ms = (time.time() - start_time) * 1000.0
                             assert self.num_shard_layers > 0
                             per_layer_ms = elapsed_ms / float(self.num_shard_layers)
-                            update_metrics(
-                                current_requests=self.scheduler.num_running_requests,
-                                layer_latency_ms_sample=per_layer_ms,
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            update_metrics(current_requests=self.scheduler.num_running_requests)
+                            update_metrics(layer_latency_ms_sample=per_layer_ms)
                         except Exception:
                             pass
                         # 7. Prepare requests for the next stage in the pipeline
@@ -1111,10 +1095,6 @@ class Executor:
                         release_cuda_request(self.running_batch, req.request_id)
                     else:
                         self.kv_cache_manager.release_request(req.request_id)
-                try:
-                    update_metrics(current_requests=self.scheduler.num_running_requests)
-                except Exception:
-                    pass
 
     def run_loop_in_background(self):
         """Run the executor loop in the background."""

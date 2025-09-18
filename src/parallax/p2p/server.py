@@ -22,7 +22,7 @@ from lattica import ConnectionHandler, Lattica, rpc_method, rpc_stream
 from backend.server.rpc_connection_handler import RPCConnectionHandler
 from parallax.p2p.proto import forward_pb2
 from parallax.p2p.utils import AsyncWorker
-from parallax.server.metrics import get_metrics
+from parallax.server.metrics import get_metrics, set_metrics_publisher
 from parallax.server.server_info import detect_node_hardware
 from parallax.utils.utils import get_zmq_socket
 
@@ -240,6 +240,15 @@ class GradientServer:
 
                 self.block_start_index = response.get("start_layer")
                 self.block_end_index = response.get("end_layer")
+
+                # Publish executor metrics to backend on each update
+                def _publish_metrics(_snapshot):
+                    try:
+                        self.scheduler_stub.node_update(self.get_node_info(is_update=True))
+                    except Exception:
+                        pass
+
+                set_metrics_publisher(_publish_metrics)
             except Exception as e:
                 logger.exception(f"Error in join scheduler: {e}")
                 exit(1)

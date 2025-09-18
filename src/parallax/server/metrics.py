@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 _lock = threading.Lock()
 _metrics: Dict[str, Any] = {
@@ -17,6 +17,9 @@ _metrics: Dict[str, Any] = {
     "layer_latency_ms": None,  # Exponentially smoothed per-layer latency
     "_last_update_ts": 0.0,
 }
+
+# Optional publisher for pushing updates to a backend (e.g., central scheduler)
+_publisher: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
 def update_metrics(
@@ -45,9 +48,28 @@ def update_metrics(
                     (1.0 - ewma_alpha) * float(prev) + ewma_alpha * float(layer_latency_ms_sample)
                 )
         _metrics["_last_update_ts"] = time.time()
+        snapshot = dict(_metrics)
+
+    # Publish outside the lock to avoid reentrancy issues
+    if _publisher is not None:
+        try:
+            _publisher(snapshot)
+        except Exception:
+            # Best-effort; logging is avoided here to keep this utility lightweight
+            pass
 
 
 def get_metrics() -> Dict[str, Any]:
     """Return a shallow copy of current metrics suitable for JSON serialization."""
     with _lock:
         return dict(_metrics)
+
+
+def set_metrics_publisher(publisher: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Register a callback to publish metric snapshots after each update.
+
+    Args:
+        publisher: Callable receiving a metrics dict. Set to None to disable publishing.
+    """
+    global _publisher
+    _publisher = publisher

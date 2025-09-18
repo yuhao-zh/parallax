@@ -175,7 +175,7 @@ class Scheduler:
         if new_rtt_to_nodes is not None:
             node.rtt_to_nodes.update(new_rtt_to_nodes)
         node.last_heartbeat = time.time()
-        logger.info(
+        logger.debug(
             "Node updated: %s (requests=%s, latency_ms=%s, rtt_updates=%s)",
             node.node_id,
             current_requests if current_requests is not None else node.current_requests,
@@ -208,7 +208,7 @@ class Scheduler:
             (node_id, current_requests, layer_latency_ms, new_rtt_to_nodes)
         )
         self._wake_event.set()
-        logger.info(
+        logger.debug(
             "Enqueued node update: %s (requests=%s, latency_ms=%s, rtt_updates=%s)",
             node_id,
             current_requests,
