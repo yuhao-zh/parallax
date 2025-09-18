@@ -21,6 +21,9 @@ class RequestHandler:
     async def _forward_request(
         self, endpoint: str, request_data: Dict, request_id: str, received_ts: int
     ):
+        logger.info(
+            f"Forwarding request {request_id} to endpoint {endpoint}; stream={request_data.get('stream', False)}"
+        )
         if (
             self.scheduler_manage is None
             or not self.scheduler_manage.get_schedule_status() == "success"
@@ -48,6 +51,9 @@ class RequestHandler:
 
         request_data["routing_table"] = routing_table
         call_url = self.scheduler_manage.get_call_url_by_node_id(routing_table[0])
+        logger.info(
+            f"Resolved call_url for request {request_id}: node={routing_table[0]} -> {call_url}"
+        )
 
         if not call_url:
             return JSONResponse(
@@ -57,6 +63,7 @@ class RequestHandler:
 
         url = call_url + endpoint
         is_stream = request_data.get("stream", False)
+        logger.info(f"POST upstream: url={url}, stream={is_stream}")
 
         async def _process_upstream_response(response: aiohttp.ClientResponse):
             logger.info(f"post: {request_id}, code: {response.status}, params: {request_data}")
@@ -79,7 +86,7 @@ class RequestHandler:
                             if chunk:
                                 yield chunk
 
-            return StreamingResponse(
+            resp = StreamingResponse(
                 stream_generator(),
                 media_type="text/event-stream",
                 headers={
@@ -87,11 +94,15 @@ class RequestHandler:
                     "Cache-Control": "no-cache",
                 },
             )
+            logger.info(f"Streaming response initiated for {request_id}")
+            return resp
         else:
             async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
                 async with session.post(url, json=request_data) as response:
                     await _process_upstream_response(response)
-                    return JSONResponse(content=await response.json())
+                    result = await response.json()
+                    logger.info(f"Non-stream response completed for {request_id}")
+                    return JSONResponse(content=result)
 
     async def v1_completions(self, request_data: Dict, request_id: str, received_ts: int):
         return await self._forward_request("/v1/completions", request_data, request_id, received_ts)

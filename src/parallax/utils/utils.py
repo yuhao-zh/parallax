@@ -32,38 +32,6 @@ def get_current_device():
     return device
 
 
-def get_device_info():
-    """Get the device info"""
-    device = get_current_device()
-    if device == "cuda":
-        # TFLOPS and memory bandwidth are not directly available via torch.
-        # Using placeholders based on common GPU types.
-        # TODO: Implement a more accurate way to get these values.
-        tflops_fp16 = 312  # Example: A100 PCIe 40GB
-        memory_bandwidth_gbps = 1555  # Example: A100 PCIe 40GB
-        free_mem, _ = torch.cuda.mem_get_info()
-        return {
-            "tflops_fp16": tflops_fp16,
-            "memory_gb": free_mem / 1024**3,
-            "memory_bandwidth_gbps": memory_bandwidth_gbps,
-        }
-    elif device == "mlx":
-        # MLX performance metrics are not well-documented. Using estimates for Apple Silicon.
-        return {
-            "tflops_fp16": 100,  # Placeholder, e.g., M1 is ~10 TFLOPS
-            "memory_gb": 100,  # psutil.virtual_memory().available / 1024**3,
-            "memory_bandwidth_gbps": 100,  # Placeholder, e.g., M2 is 100 GB/s
-        }
-    elif device == "cpu":
-        return {
-            "tflops_fp16": 10,  # Placeholder
-            "memory_gb": psutil.virtual_memory().available / 1024**3,
-            "memory_bandwidth_gbps": 50,  # Placeholder, e.g., DDR4/DDR5
-        }
-    else:
-        raise ValueError(f"Unsupported device: {device}")
-
-
 def get_device_dtype(dtype_str: str, device: str):
     """Gets the real data type according to current device"""
     if device == "cuda":

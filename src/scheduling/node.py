@@ -285,10 +285,17 @@ class Node:
 
     def roofline_layer_latency_ms(self) -> float:
         """Get the roofline layer latency for this node."""
+        # Compute an effective compute speedup due to quantization.
+        bytes_per_elem = float(self.model_info.param_bytes_per_element)
+        # bf16/fp16 baseline ~2 bytes
+        base = 1.0 if bytes_per_elem <= 0 else 2.0 / bytes_per_elem
+        # Empirical efficiency factor: int8 often achieves ~80% of theoretical 2x
+        efficiency = 0.8 if bytes_per_elem < 2.0 else 1.0
+        quantization_speedup = max(0.1, base * efficiency)
         perf_model = RooflinePerformanceModel(
             hardware=self.hardware,
             model_info=self.model_info,
-            # quantization_speedup=self.quantization_speedup,
+            quantization_speedup=quantization_speedup,
             batch_size=self.current_requests,
             target_seq_len=1,
             source_seq_len=self.max_sequence_length,

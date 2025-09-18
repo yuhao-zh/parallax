@@ -22,7 +22,9 @@ from lattica import ConnectionHandler, Lattica, rpc_method, rpc_stream
 from backend.server.rpc_connection_handler import RPCConnectionHandler
 from parallax.p2p.proto import forward_pb2
 from parallax.p2p.utils import AsyncWorker
-from parallax.utils.utils import get_device_info, get_zmq_socket
+from parallax.server.metrics import get_metrics
+from parallax.server.server_info import detect_node_hardware
+from parallax.utils.utils import get_zmq_socket
 
 logger = logging.getLogger(__name__)
 
@@ -450,19 +452,22 @@ class GradientServer:
         self.announcer.start()
 
     def get_node_info(self, is_update: bool = False):
+        peer_id = self.lattica.peer_id() if self.lattica is not None else None
         info = {
             "call_url": "http://127.0.0.1:3000",
-            "node_id": self.lattica.peer_id(),
-            "hardware": get_device_info(),
+            "node_id": peer_id,
+            "hardware": detect_node_hardware(peer_id),
             "model_name": self.model_name,
-            "kv_cache_ratio": 0.8,
+            "kv_cache_ratio": 0.35,
             "param_hosting_ratio": 0.5,
             "max_concurrent_requests": 16,
             "max_sequence_length": 1024,
         }
         if is_update:
-            info["current_requests"] = 0
-            info["layer_latency_ms"] = 0
+            metrics = get_metrics()
+            info["current_requests"] = metrics.get("current_requests", 0)
+            if metrics.get("layer_latency_ms") is not None:
+                info["layer_latency_ms"] = metrics.get("layer_latency_ms")
             info["rtt_to_nodes"] = {}
             info["start_layer"] = self.block_start_index
             info["end_layer"] = self.block_end_index

@@ -34,6 +34,7 @@ from parallax.p2p.message_util import (
 )
 from parallax.p2p.proto import forward_pb2
 from parallax.server.kv_cache import KVCacheManager
+from parallax.server.metrics import update_metrics
 from parallax.server.radix_cache import RadixCache
 from parallax.server.request import (
     InitialRequest,
@@ -94,6 +95,7 @@ class Executor:
     ):
         # Backend
         self.device = get_current_device()
+        logger.info(f"Executor initializing on device: {self.device}")
 
         # Sharded Model
         if self.device == "cuda":
@@ -101,6 +103,9 @@ class Executor:
 
             from parallax.sglang.model_runner import initialize_sgl_model_runner
 
+            logger.info(
+                f"Initializing CUDA model runner for repo={model_repo}, layers=[{start_layer}, {end_layer})"
+            )
             self.model_runner, self.config, self.tokenizer = initialize_sgl_model_runner(
                 model_repo,
                 start_layer,
@@ -110,15 +115,25 @@ class Executor:
                 kv_block_size,
                 moe_runner_backend,
             )
+            logger.info(
+                f"CUDA model runner initialized. num_layers={self.config.get('num_hidden_layers')}"
+            )
             # SGL KV Cache Manager is already initialized in ScheduleBatch
             # TODO: Replace ScheduleBatch to Parallax inflight batch
             self.running_batch = ScheduleBatch(reqs=[], batch_is_full=False)
             self.cur_batch = None
         else:
+            logger.info(
+                f"Initializing MLX sharded model loader for repo={model_repo}, layers=[{start_layer}, {end_layer})"
+            )
             self.shard_loader = MLXModelLoader(
                 model_repo, start_layer=start_layer, end_layer=end_layer
             )
+            t0 = time.time()
             self.model_shard, self.config, self.tokenizer = self.shard_loader.load()
+            logger.info(
+                f"MLX sharded model loaded in {(time.time() - t0) * 1000:.1f} ms; num_layers={self.config.get('num_hidden_layers')}"
+            )
 
         # for window attention need to calculate causal mask size
         self.finished_batch = []
@@ -129,11 +144,17 @@ class Executor:
         self.num_shard_layers = end_layer - start_layer
 
         self.dtype = get_device_dtype(dtype, self.device)
+        logger.info(
+            f"Executor dtype set to {dtype} (resolved={self.dtype}); shard_layers={self.num_shard_layers}"
+        )
         self.num_key_value_heads = self.config.get("num_key_value_heads")
         self.head_dim = self.config.get("head_dim") or self.config.get(
             "hidden_size"
         ) // self.config.get("num_attention_heads")
         self.enable_prefix_cache = enable_prefix_cache
+        logger.debug(
+            f"Model config: n_kv_heads={self.num_key_value_heads}, head_dim={self.head_dim}, tokenizer_pad={self.tokenizer.pad_token_id}"
+        )
 
         if self.tokenizer.pad_token_id is None:
             self.pad_token_id = self.tokenizer.eos_token_id
@@ -154,9 +175,22 @@ class Executor:
             is_first_peer=self.is_first_peer,
             tokenizer=self.tokenizer,
         )
+        logger.info(
+            f"Scheduler initialized (max_batch_size={max_batch_size}, max_tokens={max_num_tokens_in_batch}, wait_ms={scheduler_wait_ms})"
+        )
+        # Initialize metrics
+        try:
+            update_metrics(current_requests=0)
+        except Exception:
+            pass
 
         if self.device == "mlx":
             # Other setup for MAC
+            logger.info(
+                "Initializing KVCacheManager (mlx) with block_size=%d, layers=%d",
+                kv_block_size,
+                self.num_shard_layers,
+            )
             self.kv_cache_manager = KVCacheManager(
                 block_size=kv_block_size,
                 num_kv_heads=self.num_key_value_heads,
@@ -167,6 +201,9 @@ class Executor:
                 max_num_tokens=kv_max_tokens_in_cache,
             )
             mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
+            logger.debug(
+                f"KVCacheManager ready; wired_limit set; prefix_cache={'on' if self.enable_prefix_cache else 'off'}"
+            )
 
         # Prefix Cache Manager
         self.prefix_cache = RadixCache(
@@ -223,6 +260,8 @@ class Executor:
                 break
             except Exception as e:
                 logger.exception(f"Error receiving http request: {e}")
+        if recv_reqs:
+            logger.debug(f"Received {len(recv_reqs)} HTTP requests")
         return recv_reqs
 
     def recv_requests_from_peer(self) -> List[Request]:
@@ -260,6 +299,8 @@ class Executor:
                 break
             except Exception as e:
                 logger.exception(f"Error receiving or deserializing request: {e}")
+        if recv_reqs:
+            logger.debug(f"Received {len(recv_reqs)} peer requests")
         return recv_reqs
 
     def _prepare_cuda_prefill_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
@@ -302,12 +343,14 @@ class Executor:
         lengths = []
         for req in batched_requests:
             lengths.append(req.total_length)
-        return {
+        ret = {
             "forward_batch": forward_batch,
             "pp_proxy_tensors": pp_proxy_tensors,
             "lengths": torch.tensor(lengths, device=self.device),
             "requests": batched_requests,
         }
+        logger.debug(f"Prepared CUDA prefill batch (size={batch_size})")
+        return ret
 
     def _prepare_cuda_decode_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
         """
@@ -353,12 +396,14 @@ class Executor:
                     "residual": residual,
                 }
             )
-        return {
+        ret = {
             "forward_batch": forward_batch,
             "pp_proxy_tensors": pp_proxy_tensors,
             "lengths": torch.tensor(lengths, device=self.device),
             "requests": batched_requests,
         }
+        logger.debug(f"Prepared CUDA decode batch (size={batch_size})")
+        return ret
 
     def _prepare_mlx_prefill_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
         """Prepares inputs for ShardedModel from a batch of prefill requests."""
@@ -443,13 +488,17 @@ class Executor:
             )
             mask = combine_padding_and_causal_masks(padding_mask, causal_mask, self.dtype)
 
-        return {
+        ret = {
             "h_or_tokens": padded_inputs,
             "cache": (k_batched, v_batched) if matched_prefix else None,
             "lengths": mx.array(actual_lengths) if matched_prefix else mx.array(lengths),
             "mask": mask,
             "requests": batched_requests,
         }
+        logger.debug(
+            f"Prepared MLX prefill batch (size={batch_size}, matched_prefix={matched_prefix})"
+        )
+        return ret
 
     def _prepare_mlx_decode_batch(
         self, batched_requests: List[Request]
@@ -503,13 +552,15 @@ class Executor:
 
         model_lengths = mx.array([kv[0].shape[2] for kv in kv_cache_list])
 
-        return {
+        ret = {
             "h_or_tokens": padded_inputs,
             "cache": (k_batched, v_batched),
             "lengths": model_lengths,
             "mask": attention_mask,
             "requests": batched_requests,
         }
+        logger.debug(f"Prepared MLX decode batch (size={batch_size})")
+        return ret
 
     def _prepare_batch_inputs(self, batched_requests: List[Request]) -> Optional[Dict[str, Any]]:
         """Prepares inputs for ShardedModel from a batch of requests.
@@ -956,6 +1007,9 @@ class Executor:
             ret = self._process_batch_cuda(prepared_inputs, return_decoded_tokens)
         else:
             ret = self._process_batch_mlx(prepared_inputs, return_decoded_tokens)
+        logger.debug(
+            f"Processed batch (device={self.device}, return_tokens={return_decoded_tokens})"
+        )
         return ret
 
     def run_loop(self):
@@ -983,6 +1037,10 @@ class Executor:
             # 4. Check if we should form a batch
             if not self.scheduler.should_dispatch():
                 time.sleep(0.01)  # prevent busy waiting
+                try:
+                    update_metrics(current_requests=self.scheduler.num_running_requests)
+                except Exception:
+                    pass
                 continue
 
             # 5. Form a batch from the scheduler's queue
@@ -1003,6 +1061,21 @@ class Executor:
                         output = self.process_batch(
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
                         )
+                        # Update metrics with per-layer latency sample
+                        try:
+                            elapsed_ms = (time.time() - start_time) * 1000.0
+                            assert self.num_shard_layers > 0
+                            per_layer_ms = elapsed_ms / float(self.num_shard_layers)
+                            update_metrics(
+                                current_requests=self.scheduler.num_running_requests,
+                                layer_latency_ms_sample=per_layer_ms,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            update_metrics(current_requests=self.scheduler.num_running_requests)
+                        except Exception:
+                            pass
                         # 7. Prepare requests for the next stage in the pipeline
                         next_batch = self._prepare_next_batch_requests(
                             requests=prepared_inputs["requests"],
@@ -1038,6 +1111,10 @@ class Executor:
                         release_cuda_request(self.running_batch, req.request_id)
                     else:
                         self.kv_cache_manager.release_request(req.request_id)
+                try:
+                    update_metrics(current_requests=self.scheduler.num_running_requests)
+                except Exception:
+                    pass
 
     def run_loop_in_background(self):
         """Run the executor loop in the background."""

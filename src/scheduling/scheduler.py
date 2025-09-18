@@ -33,7 +33,6 @@ class Scheduler:
         strategy: Literal["greedy", "dp"] = "dp",
         *,
         request_arrival_horizon_sec: float = 600.0,
-        layer_hosting_power_memory_score: float = 0.5,
         rebalance_threshold: float = float("inf"),
         water_filling_max_iterations: int = 40,
         request_warm_up_for_reshard: int = 0,
@@ -49,7 +48,6 @@ class Scheduler:
         self.layer_allocator = allocator_class(
             model_info,
             nodes,
-            layer_hosting_power_memory_score=layer_hosting_power_memory_score,
             rebalance_threshold=rebalance_threshold,
             water_filling_max_iterations=water_filling_max_iterations,
         )
@@ -77,11 +75,19 @@ class Scheduler:
         self._node_count_cv: threading.Condition = threading.Condition()
         self._event_thread: Optional[threading.Thread] = None
         self._dispatch_thread: Optional[threading.Thread] = None
+        self._alloc_log_thread: Optional[threading.Thread] = None
         self._bootstrapped: bool = False
+        logger.info(
+            f"Scheduler initialized, min_nodes_bootstrapping {self.min_nodes_bootstrapping}, "
+            f"strategy {strategy}, rebalance threshold {rebalance_threshold}"
+        )
 
         # Eager bootstrap for initial allocation if enough nodes are present
         try:
             if len(self.nodes) >= self.min_nodes_bootstrapping:
+                logger.info(
+                    f"Eager allocation attempt with {len(self.nodes)} nodes (min required: {self.min_nodes_bootstrapping})"
+                )
                 self.layer_allocator.global_allocation()
         except Exception:  # best-effort eager allocation
             pass
@@ -114,6 +120,7 @@ class Scheduler:
             logger.warning("Bootstrapping failed to produce a full pipeline")
             return False
         self._bootstrapped = True
+        logger.info("Bootstrapping completed successfully; full pipeline established")
         return True
 
     def list_node_allocations(self) -> List[Tuple[str, int, int]]:
@@ -168,6 +175,13 @@ class Scheduler:
         if new_rtt_to_nodes is not None:
             node.rtt_to_nodes.update(new_rtt_to_nodes)
         node.last_heartbeat = time.time()
+        logger.info(
+            "Node updated: %s (requests=%s, latency_ms=%s, rtt_updates=%s)",
+            node.node_id,
+            current_requests if current_requests is not None else node.current_requests,
+            layer_latency_ms if layer_latency_ms is not None else node.avg_layer_latency_ms,
+            0 if new_rtt_to_nodes is None else len(new_rtt_to_nodes),
+        )
 
     # Async-style event enqueuers for main loop
     def enqueue_join(self, node: Node) -> None:
@@ -194,6 +208,13 @@ class Scheduler:
             (node_id, current_requests, layer_latency_ms, new_rtt_to_nodes)
         )
         self._wake_event.set()
+        logger.info(
+            "Enqueued node update: %s (requests=%s, latency_ms=%s, rtt_updates=%s)",
+            node_id,
+            current_requests,
+            layer_latency_ms,
+            0 if new_rtt_to_nodes is None else len(new_rtt_to_nodes),
+        )
 
     def checking_node_heartbeat(self) -> None:
         """Check the heartbeat of all nodes."""
@@ -205,7 +226,12 @@ class Scheduler:
     # Dynamic node management
     def join(self, node: Node, bootstrap: bool = False) -> None:
         """Add a node to allocation and refresh plan and materialized nodes."""
-        logger.info(f"Joining node {node.node_id}")
+        logger.info(
+            "Joining node %s (kv_ratio=%.2f, param_ratio=%.2f)",
+            node.node_id,
+            node.kv_cache_ratio,
+            node.param_hosting_ratio,
+        )
         self.nodes.append(node)
         self.layer_allocator.declare(node)
         if not bootstrap:
@@ -219,6 +245,7 @@ class Scheduler:
         if node_id not in self.layer_allocator.node_id_to_node:
             raise ValueError(f"Node {node_id} not found in nodes")
         node = self.node_id_to_node[node_id]
+        logger.info("Leaving node %s (start=%s, end=%s)", node_id, node.start_layer, node.end_layer)
         self.layer_allocator.leave(node_id)
         self.nodes.remove(node)
         if self.layer_allocator.should_global_rebalance():
@@ -239,6 +266,9 @@ class Scheduler:
         self._wake_event.set()
         now = time.time()
         self._arrival_ts.append(now)
+        logger.info(
+            "Received request %s (queue_size=%d)", request.request_id, self._request_queue.qsize()
+        )
         # Trim old timestamps to keep arrival-rate window bounded
         horizon = self.request_arrival_horizon_sec
         while self._arrival_ts and now - self._arrival_ts[0] > horizon:
@@ -259,9 +289,12 @@ class Scheduler:
             n = self.node_id_to_node[node_id]
             if n is not None:
                 n.add_request()
+        logger.info(
+            "Dispatched request %s via path %s (est_lat=%.2fms)", req.request_id, path, latency
+        )
         return req.request_id, path, latency
 
-    def run(self, *, poll_interval: float = 0.05) -> None:
+    def run(self, *, poll_interval: float = 0.05, allocation_log_interval: float = 30.0) -> None:
         """Run the scheduler concurrently until `stop()` is called.
 
         Starts background threads for event processing (joins/leaves/updates/heartbeats)
@@ -290,6 +323,22 @@ class Scheduler:
         )
         self._dispatch_thread.start()
 
+        # Start periodic allocation logger thread
+        def _alloc_log_loop() -> None:
+            """Periodically log current layer allocations."""
+            while not self._stop_event.is_set():
+                try:
+                    assignments = self.list_node_allocations()
+                    logger.info("Current allocations (%d nodes): %s", len(self.nodes), assignments)
+                except Exception as exc:
+                    logger.warning(f"Allocation logger error: {exc}")
+                time.sleep(max(1.0, allocation_log_interval))
+
+        self._alloc_log_thread = threading.Thread(
+            target=_alloc_log_loop, name="SchedulerAllocLogger", daemon=True
+        )
+        self._alloc_log_thread.start()
+
         # Block until stop is requested
         try:
             while not self._stop_event.is_set():
@@ -299,6 +348,8 @@ class Scheduler:
                 self._event_thread.join(timeout=2.0)
             if self._dispatch_thread is not None:
                 self._dispatch_thread.join(timeout=2.0)
+            if self._alloc_log_thread is not None:
+                self._alloc_log_thread.join(timeout=2.0)
 
     # === Modularized worker loops ===
     def _event_loop(self, poll_interval: float) -> None:
@@ -328,6 +379,9 @@ class Scheduler:
                     n = self.node_id_to_node[node_id]
                     if n is not None:
                         n.add_request()
+                logger.info(
+                    "Dispatched request %s via path %s", getattr(req, "request_id", "?"), path
+                )
             except queue.Empty:
                 continue
 
