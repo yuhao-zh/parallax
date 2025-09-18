@@ -175,6 +175,7 @@ class GradientServer:
         announce_maddrs: List[str] = [],
         notify_url: str = None,
         model_name: Optional[str] = None,
+        max_batch_size: int = 16,
     ):
         assert not (
             scheduler_addr is not None and len(initial_peers) > 0
@@ -194,7 +195,7 @@ class GradientServer:
         self.http_port = http_port
         self.notify_url = notify_url
         self.model_name = model_name
-
+        self.max_batch_size = max_batch_size
         self.node_id = f"{dht_prefix}_announce"
         self.lattica = None
         self.routing_table = None
@@ -376,6 +377,7 @@ class GradientServer:
 
                     next_peer_id = routing_table[(self_index + 1) % len(routing_table)]
                     stub = self.get_stub(next_peer_id)
+                    self.lattica.get_peer_rtt(next_peer_id)
                     start = time.time()
                     logger.info(f"Start forwarding data to {next_peer_id}")
                     response = stub.rpc_pp_forward(forward_request)
@@ -471,9 +473,9 @@ class GradientServer:
             "node_id": peer_id,
             "hardware": detect_node_hardware(peer_id),
             "model_name": self.model_name,
-            "kv_cache_ratio": 0.35,
-            "param_hosting_ratio": 0.5,
-            "max_concurrent_requests": 16,
+            "kv_cache_ratio": 0.2,
+            "param_hosting_ratio": 0.7,
+            "max_concurrent_requests": self.max_batch_size,
             "max_sequence_length": 1024,
         }
         if is_update:
@@ -504,6 +506,7 @@ def launch_p2p_server(
     recv_from_peer_addr: str,
     send_to_peer_addr: str,
     model_name: Optional[str],
+    max_batch_size: int = 16,
 ):
     if dht_port is not None:
         assert host_maddrs is None, "You can't use --dht-port and --host-maddrs at the same time"
@@ -529,6 +532,7 @@ def launch_p2p_server(
         http_port=http_port,
         notify_url=notify_url,
         model_name=model_name,
+        max_batch_size=max_batch_size,
     )
     # Start the server
     thread = threading.Thread(target=server.run, daemon=True)

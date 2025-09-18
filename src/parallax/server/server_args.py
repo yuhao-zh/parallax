@@ -84,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv-cache-memory-fraction",
         type=float,
-        default=0.8,
+        default=0.85,
         help="Fraction of available memory to use for KV cache (0.0 to 1.0)",
     )
 
@@ -128,7 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--attention-backend",
         type=str,
-        default="torch_native",
+        default="flashinfer",
         choices=["torch_native", "flashinfer", "triton", "fa3"],
         help="Choose the GPU attention kernels",
     )

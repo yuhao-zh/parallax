@@ -57,6 +57,7 @@ if __name__ == "__main__":
                 recv_from_peer_addr=args.recv_from_peer_addr,
                 send_to_peer_addr=args.send_to_peer_addr,
                 model_name=args.model_path,
+                max_batch_size=args.max_batch_size,
             )
         else:
             start_layer, end_layer = launch_p2p_server(

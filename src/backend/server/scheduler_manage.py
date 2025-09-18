@@ -73,7 +73,12 @@ class SchedulerManage:
         logger.info(
             f"Starting Lattica with host_maddrs={self.host_maddrs}, mdns=False, dht_prefix={self.dht_prefix}"
         )
-        self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs).with_mdns(False)
+        self.lattica = (
+            Lattica.builder()
+            .with_listen_addrs(self.host_maddrs)
+            .with_mdns(False)
+            .with_key_path(".")
+        )
 
         if len(self.relay_servers) > 0:
             print(f"Using relay servers: {self.relay_servers}")
