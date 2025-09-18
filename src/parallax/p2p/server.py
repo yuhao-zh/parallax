@@ -170,6 +170,7 @@ class GradientServer:
         hidden_layers: int = 128,
         dht_prefix: str = "gradient",
         host_maddrs: List[str] = [],
+        http_port: int = 3000,
         announce_maddrs: List[str] = [],
         notify_url: str = None,
         model_name: Optional[str] = None,
@@ -188,6 +189,7 @@ class GradientServer:
         self.dht_prefix = dht_prefix
         self.host_maddrs = host_maddrs
         self.announce_maddrs = announce_maddrs
+        self.http_port = http_port
         self.notify_url = notify_url
         self.model_name = model_name
 
@@ -199,7 +201,7 @@ class GradientServer:
         self.stubs = {}
 
     def run(self):
-        self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs).with_mdns(False)
+        self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
 
         if len(self.relay_servers) > 0:
             logger.info(f"Using relay servers: {self.relay_servers}")
@@ -454,7 +456,8 @@ class GradientServer:
     def get_node_info(self, is_update: bool = False):
         peer_id = self.lattica.peer_id() if self.lattica is not None else None
         info = {
-            "call_url": "http://127.0.0.1:3000",
+            # TODO: get real ip
+            "call_url": f"http://127.0.0.1:{self.http_port}",
             "node_id": peer_id,
             "hardware": detect_node_hardware(peer_id),
             "model_name": self.model_name,
@@ -485,6 +488,7 @@ def launch_p2p_server(
     dht_prefix: str,
     host_maddrs: Optional[List[str]],
     announce_maddrs: List[str],
+    http_port: int,
     notify_url: str,
     recv_from_peer_addr: str,
     send_to_peer_addr: str,
@@ -510,6 +514,7 @@ def launch_p2p_server(
         dht_prefix=dht_prefix,
         host_maddrs=host_maddrs,
         announce_maddrs=announce_maddrs,
+        http_port=http_port,
         notify_url=notify_url,
         model_name=model_name,
     )
