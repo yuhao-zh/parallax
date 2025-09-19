@@ -147,6 +147,24 @@ async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
+    """Send a streaming request to an OpenAI-compatible Chat Completions API.
+
+    This implementation measures client-side latencies consistently:
+    - TTFT (time-to-first-token) is recorded at the arrival time of the first
+      non-empty content delta.
+    - ITL (inter-token latencies) are measured between subsequent non-empty
+      content deltas.
+    - Overall latency is measured up to the last non-empty content delta, not
+      the trailing usage summary event. This aligns TPOT and ITL.
+
+    Args:
+        request_func_input: Request parameters and payload settings.
+        pbar: Optional progress bar to update upon completion.
+
+    Returns:
+        RequestFuncOutput populated with generated text, token counts, and
+        timing metrics captured from the streaming response.
+    """
     api_url = request_func_input.api_url
     assert api_url.endswith(
         "chat/completions"
@@ -185,9 +203,11 @@ async def async_request_openai_chat_completions(
         output.prompt_len = request_func_input.prompt_len
 
         generated_text = ""
-        ttft = 0.0
         st = time.perf_counter()
-        most_recent_timestamp = st
+        # Timestamp of last non-empty content token we observed
+        last_token_timestamp = st
+        # Timestamp of last received event (used as a fallback if no tokens arrive)
+        first_content_received = False
         try:
             async with session.post(url=api_url, json=payload, headers=headers) as response:
                 if response.status == 200:
@@ -202,25 +222,38 @@ async def async_request_openai_chat_completions(
                             data = json.loads(chunk)
 
                             if choices := data.get("choices"):
-                                content = choices[0]["delta"].get("content")
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
+                                delta = choices[0].get("delta", {})
+                                content = delta.get("content")
+                                content_str = content.strip() if isinstance(content, str) else ""
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                                # Only act on non-empty content tokens
+                                if content_str:
+                                    if not first_content_received:
+                                        first_content_received = True
+                                        output.ttft = timestamp - st
+                                        last_token_timestamp = timestamp
+                                    else:
+                                        output.itl.append(timestamp - last_token_timestamp)
+                                        last_token_timestamp = timestamp
 
-                                generated_text += content or ""
+                                    generated_text += content
                             elif usage := data.get("usage"):
+                                # Capture token count from trailing usage event
                                 output.output_tokens = usage.get("completion_tokens")
 
-                            most_recent_timestamp = timestamp
+                            # Always record last event timestamp for fallback latency
 
                     output.generated_text = generated_text
-                    output.success = True
-                    output.latency = most_recent_timestamp - st
+                    if first_content_received:
+                        output.success = True
+                        # Latency is measured to the last non-empty content token
+                        output.latency = last_token_timestamp - st
+                    else:
+                        output.success = False
+                        output.error = (
+                            "Never received a non-empty content delta to calculate TTFT. "
+                            "This response will be marked as failed!"
+                        )
                 else:
                     output.error = response.reason or ""
                     output.success = False
