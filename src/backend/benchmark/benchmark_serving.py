@@ -38,9 +38,11 @@ import warnings
 from argparse import ArgumentParser as FlexibleArgumentParser
 from dataclasses import dataclass
 from datetime import datetime
+from json import JSONDecodeError
 from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
+import requests
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
     RequestFuncInput,
@@ -53,6 +55,56 @@ from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+
+SHAREGPT_URL = "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
+
+
+def is_file_valid_json(path):
+    if not os.path.isfile(path):
+        return False
+
+    # TODO can fuse into the real file open later
+    try:
+        with open(path) as f:
+            json.load(f)
+        return True
+    except JSONDecodeError as e:
+        print(f"{path} exists but json loading fails ({e=}), thus treat as invalid file")
+        return False
+
+
+def download_and_cache_file(url: str, filename: Optional[str] = None):
+    """Read and cache a file from a url."""
+    if filename is None:
+        filename = os.path.join("/tmp", url.split("/")[-1])
+
+    # Check if the cache file already exists
+    if is_file_valid_json(filename):
+        return filename
+
+    print(f"Downloading from {url} to {filename}")
+
+    # Stream the response to show the progress bar
+    response = requests.get(url, stream=True)
+    response.raise_for_status()  # Check for request errors
+
+    # Total size of the file in bytes
+    total_size = int(response.headers.get("content-length", 0))
+    chunk_size = 1024  # Download in chunks of 1KB
+
+    # Use tqdm to display the progress bar
+    with open(filename, "wb") as f, tqdm(
+        desc=filename,
+        total=total_size,
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+    ) as bar:
+        for chunk in response.iter_content(chunk_size=chunk_size):
+            f.write(chunk)
+            bar.update(len(chunk))
+
+    return filename
 
 
 @dataclass
@@ -126,6 +178,42 @@ def sample_sharegpt_requests(
         filtered_dataset.append((prompt, prompt_len, output_len, None))
 
     return filtered_dataset
+
+
+def sample_wildchat_requests(
+    dataset_path: str,
+    num_requests: int,
+    tokenizer: PreTrainedTokenizerBase,
+    random_seed: int,
+    fixed_output_len: Optional[int] = None,
+) -> List[Tuple[str, int, int, None]]:
+    dataset = load_dataset(dataset_path, split="train")
+    filter_func = lambda x: len(x["conversation"]) >= 2
+    filtered_dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
+    sampled_requests: List[Tuple[str, int, int, Dict[str, Collection[str]]]] = []
+    for data in filtered_dataset:
+        if len(sampled_requests) == num_requests:
+            break
+
+        # Tokenize the prompts and completions.
+        prompt = data["conversation"][0]["content"]
+        prompt_token_ids = tokenizer(prompt).input_ids
+        completion = data["conversation"][1]["content"]
+        completion_token_ids = tokenizer(completion).input_ids
+        prompt_len = len(prompt_token_ids)
+        output_len = len(completion_token_ids) if fixed_output_len is None else fixed_output_len
+        if fixed_output_len is None and (prompt_len < 4 or output_len < 4):
+            # Prune too short sequences.
+            continue
+        if fixed_output_len is None and (prompt_len > 1024 or prompt_len + output_len > 2048):
+            # Prune too long sequences.
+            continue
+
+        mm_content = None
+
+        sampled_requests.append((prompt, prompt_len, output_len, mm_content))
+
+    return sampled_requests
 
 
 def sample_hf_requests(
@@ -671,10 +759,23 @@ def main(args: argparse.Namespace):
         )
 
     elif args.dataset_name == "sharegpt":
+        if args.dataset_path is not None:
+            sharegpt_path = args.dataset_path
+        else:
+            sharegpt_path = download_and_cache_file(SHAREGPT_URL)
         input_requests = sample_sharegpt_requests(
-            dataset_path=args.dataset_path,
+            dataset_path=sharegpt_path,
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
+            fixed_output_len=args.sharegpt_output_len,
+        )
+
+    elif args.dataset_name == "wildchat":
+        input_requests = sample_wildchat_requests(
+            dataset_path="allenai/WildChat",
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            random_seed=args.seed,
             fixed_output_len=args.sharegpt_output_len,
         )
 
@@ -841,7 +942,7 @@ if __name__ == "__main__":
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "sonnet", "random", "hf"],
+        choices=["sharegpt", "wildchat", "sonnet", "random", "hf"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
