@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the model repository or model name (e.g., 'mlx-community/Qwen3-0.6B-bf16')",
     )
+    parser.add_argument(
+        "--max-sequence-length",
+        type=int,
+        default=None,
+        help="Maximum sequence length for the model",
+    )
 
     parser.add_argument(
         "--start-layer",
@@ -98,7 +104,10 @@ def parse_args() -> argparse.Namespace:
 
     # Scheduler configuration
     parser.add_argument(
-        "--max-batch-size", type=int, default=16, help="Maximum batch size for processing requests"
+        "--max-batch-size",
+        type=int,
+        default=None,
+        help="Maximum batch size for processing requests",
     )
 
     parser.add_argument(
@@ -189,8 +198,15 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("kv_cache_memory_fraction must be between 0.0 and 1.0")
 
     # Validate batch sizes
-    if args.max_batch_size <= 0:
+    if getattr(args, "max_batch_size", None) is not None and args.max_batch_size <= 0:
         raise ValueError("max_batch_size must be positive")
+
+    max_seq_len = getattr(args, "max_sequence_length", None)
+    if max_seq_len is not None and max_seq_len <= 0:
+        raise ValueError("max_sequence_len must be positive")
+
+    if max_seq_len is None and getattr(args, "max_batch_size", None) is None:
+        raise ValueError("max_sequence_len or max_batch_size must be provided")
 
     if args.max_num_tokens_per_batch <= 0:
         raise ValueError("max_num_tokens_per_batch must be positive")

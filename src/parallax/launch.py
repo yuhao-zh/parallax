@@ -29,6 +29,7 @@ if __name__ == "__main__":
     multiprocessing.set_start_method("spawn", force=True)
     try:
         args = parse_args()
+        logger.info(f"args: {args}")
 
         args.recv_from_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
         args.send_to_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
@@ -58,6 +59,7 @@ if __name__ == "__main__":
                 send_to_peer_addr=args.send_to_peer_addr,
                 model_name=args.model_path,
                 max_batch_size=args.max_batch_size,
+                max_sequence_length=args.max_sequence_length,
             )
         else:
             start_layer, end_layer = launch_p2p_server(
@@ -77,6 +79,8 @@ if __name__ == "__main__":
                 recv_from_peer_addr=args.recv_from_peer_addr,
                 send_to_peer_addr=args.send_to_peer_addr,
                 model_name=args.model_path,
+                max_batch_size=args.max_batch_size,
+                max_sequence_length=args.max_sequence_length,
             )
             args.start_layer = start_layer
             args.end_layer = end_layer

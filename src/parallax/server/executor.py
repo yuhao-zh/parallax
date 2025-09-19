@@ -57,6 +57,7 @@ from parallax.utils.utils import (
     pad_prefix_caches,
 )
 from parallax_utils.logging_config import get_logger
+from parallax_utils.utils import compute_max_batch_size
 
 logger = get_logger(__name__)
 
@@ -72,7 +73,9 @@ class Executor:
         end_layer: int,
         dtype: str = "float16",
         # Scheduler Configs
-        max_batch_size: int = 16,
+        max_batch_size: Optional[int] = None,
+        max_sequence_len: Optional[int] = None,
+        max_tokens_in_kv_pool: Optional[int] = None,
         # Controlling perfill / decode ratio
         max_num_tokens_per_batch: int = 1024,
         prefill_priority: int = 0,
@@ -171,20 +174,6 @@ class Executor:
         if isinstance(self.eos_token_id, list):
             self.eos_token_id = self.eos_token_id[0]
 
-        # Scheduler
-        self.scheduler = Scheduler(
-            max_batch_size=max_batch_size,
-            max_num_tokens_per_batch=max_num_tokens_per_batch,
-            prefill_priority=prefill_priority,
-            scheduler_wait_ms=scheduler_wait_ms,
-            micro_batch_ratio=micro_batch_ratio,
-            is_first_peer=self.is_first_peer,
-            tokenizer=self.tokenizer,
-        )
-        logger.info(
-            f"Scheduler initialized (max_batch_size={max_batch_size}, max_tokens={max_num_tokens_per_batch}, wait_ms={scheduler_wait_ms})"
-        )
-
         if self.device == "mlx":
             # Other setup for MAC
             logger.info(
@@ -199,11 +188,40 @@ class Executor:
                 num_layers=self.num_shard_layers,
                 dtype=self.dtype,
                 cache_memory_fraction=kv_cache_memory_fraction,
+                max_num_tokens=max_tokens_in_kv_pool,
             )
             mx.set_wired_limit(mx.metal.device_info()["max_recommended_working_set_size"])
             logger.debug(
                 f"KVCacheManager ready; wired_limit set; prefix_cache={'on' if self.enable_prefix_cache else 'off'}"
             )
+            self.kv_cache_manager.max_num_tokens
+        elif self.device == "cuda":
+            pass  # compute inline with compute_max_batch_size below
+
+        # Scheduler: derive final max_batch_size with KV constraints
+        max_batch_size = compute_max_batch_size(
+            requested_max_batch_size=max_batch_size,
+            max_sequence_len=max_sequence_len,
+            device=self.device,
+            kv_cache_memory_fraction=kv_cache_memory_fraction,
+            num_shard_layers=self.num_shard_layers,
+            num_key_value_heads=self.num_key_value_heads,
+            head_dim=self.head_dim,
+            dtype=self.dtype,
+        )
+
+        self.scheduler = Scheduler(
+            max_batch_size=max_batch_size,
+            max_num_tokens_per_batch=max_num_tokens_per_batch,
+            prefill_priority=prefill_priority,
+            scheduler_wait_ms=scheduler_wait_ms,
+            micro_batch_ratio=micro_batch_ratio,
+            is_first_peer=self.is_first_peer,
+            tokenizer=self.tokenizer,
+        )
+        logger.info(
+            f"Scheduler initialized (max_batch_size={max_batch_size}, max_tokens={max_num_tokens_per_batch}, wait_ms={scheduler_wait_ms})"
+        )
 
         # Prefix Cache Manager
         self.prefix_cache = RadixCache(
@@ -1136,7 +1154,8 @@ def create_executor_config(args: argparse.Namespace):
         "start_layer": args.start_layer,
         "end_layer": args.end_layer,
         "dtype": args.dtype,
-        "max_batch_size": args.max_batch_size,
+        "max_sequence_len": args.max_sequence_len if "max_sequence_len" in args else None,
+        "max_batch_size": args.max_batch_size if "max_batch_size" in args else None,
         "kv_block_size": args.kv_block_size,
         "kv_cache_memory_fraction": args.kv_cache_memory_fraction,
         "enable_prefix_cache": args.enable_prefix_cache,

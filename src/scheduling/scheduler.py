@@ -77,7 +77,9 @@ class Scheduler:
         self._event_thread: Optional[threading.Thread] = None
         self._dispatch_thread: Optional[threading.Thread] = None
         self._alloc_log_thread: Optional[threading.Thread] = None
+        # Thread-safe bootstrap state
         self._bootstrapped: bool = False
+        self._bootstrapped_event: threading.Event = threading.Event()
         logger.info(
             f"Scheduler initialized, min_nodes_bootstrapping {self.min_nodes_bootstrapping}, "
             f"strategy {strategy}, rebalance threshold {rebalance_threshold}"
@@ -121,6 +123,7 @@ class Scheduler:
             logger.warning("Bootstrapping failed to produce a full pipeline")
             return False
         self._bootstrapped = True
+        self._bootstrapped_event.set()
         logger.info("Bootstrapping completed successfully; full pipeline established")
         return True
 
@@ -252,6 +255,7 @@ class Scheduler:
             # TODO: send a signal to the nodes to stop running requests
             #       and re-assign start/end layers so nodes can re-shard
             self._bootstrapped = False
+            self._bootstrapped_event.clear()
             for n in self.nodes:
                 if n.start_layer is not None and n.end_layer is not None:
                     self.layer_allocator.deallocate(n)
@@ -387,7 +391,7 @@ class Scheduler:
     def _wait_for_bootstrap(self, poll_interval: float) -> bool:
         """Wait until enough nodes then run bootstrap. Returns False if stopped."""
         logger.info("Waiting for bootstrap")
-        while not self._stop_event.is_set() and not self._bootstrapped:
+        while not self._stop_event.is_set() and not self._bootstrapped_event.is_set():
             with self._node_count_cv:
                 if len(self.nodes) < self.min_nodes_bootstrapping:
                     self._node_count_cv.wait(timeout=max(0.5, poll_interval))
@@ -420,7 +424,9 @@ class Scheduler:
                 node = self._pending_joins.get_nowait()
             except queue.Empty:
                 break
-            self.join(node, bootstrap=not self._bootstrapped)
+            # During bootstrap (no full pipeline yet), only declare nodes; no dynamic assignment.
+            # After bootstrap, allow dynamic light-weight joins.
+            self.join(node, bootstrap=not self._bootstrapped_event.is_set())
 
     def _process_leaves(self) -> None:
         """Handle pending leave events safely."""

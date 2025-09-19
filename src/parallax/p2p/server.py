@@ -175,7 +175,8 @@ class GradientServer:
         announce_maddrs: List[str] = [],
         notify_url: str = None,
         model_name: Optional[str] = None,
-        max_batch_size: int = 16,
+        max_batch_size: Optional[int] = None,
+        max_sequence_length: Optional[int] = None,
     ):
         assert not (
             scheduler_addr is not None and len(initial_peers) > 0
@@ -196,6 +197,7 @@ class GradientServer:
         self.notify_url = notify_url
         self.model_name = model_name
         self.max_batch_size = max_batch_size
+        self.max_sequence_length = max_sequence_length
         self.node_id = f"{dht_prefix}_announce"
         self.lattica = None
         self.routing_table = None
@@ -476,7 +478,7 @@ class GradientServer:
             "kv_cache_ratio": 0.2,
             "param_hosting_ratio": 0.7,
             "max_concurrent_requests": self.max_batch_size,
-            "max_sequence_length": 1024,
+            "max_sequence_length": self.max_sequence_length,
         }
         if is_update:
             metrics = get_metrics()
@@ -506,7 +508,8 @@ def launch_p2p_server(
     recv_from_peer_addr: str,
     send_to_peer_addr: str,
     model_name: Optional[str],
-    max_batch_size: int = 16,
+    max_batch_size: Optional[int] = None,
+    max_sequence_length: Optional[int] = None,
 ):
     if dht_port is not None:
         assert host_maddrs is None, "You can't use --dht-port and --host-maddrs at the same time"
@@ -533,6 +536,7 @@ def launch_p2p_server(
         notify_url=notify_url,
         model_name=model_name,
         max_batch_size=max_batch_size,
+        max_sequence_length=max_sequence_length,
     )
     # Start the server
     thread = threading.Thread(target=server.run, daemon=True)

@@ -116,6 +116,8 @@ class TestParseArgs:
             "bfloat16",
             "--kv-cache-memory-fraction",
             "0.8",
+            "--max-sequence-length",
+            "1024",
         ],
     )
     def test_parse_valid_args(self):

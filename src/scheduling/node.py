@@ -15,6 +15,7 @@ from math import floor
 from typing import Callable, Dict, List, Optional
 
 from parallax_utils.logging_config import get_logger
+from parallax_utils.utils import bytes_per_element, compute_max_batch_size
 from scheduling.model_info import ModelInfo
 
 logger = get_logger(__name__)
@@ -168,7 +169,7 @@ class Node:
     param_hosting_ratio: float = 0.5
 
     max_concurrent_requests: int = 16
-    max_sequence_length: int = 1024
+    max_sequence_length: int = 4096
 
     start_layer: Optional[int] = None  # inclusive
     end_layer: Optional[int] = None  # exclusive
@@ -183,6 +184,8 @@ class Node:
     rtt_to_nodes: Optional[Dict[str, float]] = None
     rtt_getter: Optional[Callable[["Node", "Node"], float]] = None
 
+    _force_max_concurrent_requests: bool = False
+
     def __post_init__(self):
         if self.last_heartbeat == 0.0:
             self.last_heartbeat = time.time()
@@ -191,18 +194,40 @@ class Node:
 
     @property
     def max_requests(self) -> int:
-        """Number of requests given by max num KV tokens, assuming all requests have max sequence length."""
-        if self.start_layer is None or self.end_layer is None:
+        """Max concurrent requests bounded by KV budget using sequence length."""
+        if self._force_max_concurrent_requests:
             return self.max_concurrent_requests
 
-        kv_size = self.model_info.per_token_per_layer_kv_size * self.num_decoder_layers
-        num_kv_tokens_can_host = floor(
-            self.hardware.memory_gb * 1024 * 1024 * 1024 * self.kv_cache_ratio / kv_size
+        if self.start_layer is None or self.end_layer is None:
+            return self.max_concurrent_requests
+        try:
+            elem_bytes = bytes_per_element(
+                getattr(self.model_info, "cache_bytes_per_element", None)
+            )
+        except Exception:
+            elem_bytes = 2
+        logger.info(
+            f"Node {self.node_id} max_concurrent_requests: {self.max_concurrent_requests}, max_sequence_length: {self.max_sequence_length}, kv_cache_ratio: {self.kv_cache_ratio}, num_decoder_layers: {self.num_decoder_layers}, num_key_value_heads: {self.model_info.num_kv_heads}, head_dim: {self.model_info.head_size}, elem_bytes: {elem_bytes}, memory_gb: {self.hardware.memory_gb}"
         )
-        max_requests = min(
-            self.max_concurrent_requests, floor(num_kv_tokens_can_host / self.max_sequence_length)
+        derived_max = compute_max_batch_size(
+            requested_max_batch_size=self.max_concurrent_requests,
+            max_sequence_len=self.max_sequence_length,
+            device=None,
+            kv_cache_memory_fraction=self.kv_cache_ratio,
+            num_shard_layers=self.num_decoder_layers,
+            num_key_value_heads=self.model_info.num_kv_heads,
+            head_dim=self.model_info.head_size,
+            elem_bytes=elem_bytes,
+            memory_gb=self.hardware.memory_gb,
         )
-        return max_requests
+        if derived_max <= 0:
+            raise ValueError(
+                f"Node {self.node_id} has invalid max concurrent requests: {derived_max}"
+            )
+        if self.max_concurrent_requests is None:
+            return derived_max
+        else:
+            return min(self.max_concurrent_requests, derived_max)
 
     @property
     def num_current_layers(self) -> int:
