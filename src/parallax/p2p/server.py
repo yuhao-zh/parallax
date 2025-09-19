@@ -204,6 +204,9 @@ class GradientServer:
         self.routing_table_update_interval = 10
         self.server_info = ServerInfo(state=ServerState.JOINING)
         self.stubs = {}
+        self.rtts = {}
+        self.rtt_last_update = 0
+        self.rtt_update_interval = 60
 
     def run(self):
         self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
@@ -234,7 +237,6 @@ class GradientServer:
                 self.scheduler_stub = RPCConnectionHandler(self.lattica, None).get_stub(
                     self.scheduler_peer_id
                 )
-                logger.info(f"Send node_join request to scheduler")
                 response = self.scheduler_stub.node_join(self.get_node_info())
                 response = response.result()
                 if response == {}:
@@ -379,7 +381,6 @@ class GradientServer:
 
                     next_peer_id = routing_table[(self_index + 1) % len(routing_table)]
                     stub = self.get_stub(next_peer_id)
-                    self.lattica.get_peer_rtt(next_peer_id)
                     start = time.time()
                     logger.info(f"Start forwarding data to {next_peer_id}")
                     response = stub.rpc_pp_forward(forward_request)
@@ -469,25 +470,45 @@ class GradientServer:
         self.announcer.start()
 
     def get_node_info(self, is_update: bool = False):
-        peer_id = self.lattica.peer_id() if self.lattica is not None else None
+        if time.time() - self.rtt_last_update > self.rtt_update_interval:
+            self.rtts = {}
+            all_peers = []
+            for _ in range(1 if is_update else 30):
+                all_peers = self.lattica.get_all_peers()
+                if len(all_peers) > 0:
+                    break
+                logger.warning("No peers found, waiting for 1 second.")
+                time.sleep(1)
+
+            if len(all_peers) == 0:
+                logger.warning("No peers found, send empty rtt_to_nodes.")
+
+            for peer_id in all_peers:
+                self.rtts[peer_id] = self.lattica.get_peer_rtt(peer_id) * 1000
+            self.rtt_last_update = time.time()
+
         info = {
             "call_url": f"http://{self.public_ip}:{self.http_port}",
-            "node_id": peer_id,
-            "hardware": detect_node_hardware(peer_id),
+            "node_id": self.lattica.peer_id(),
+            "hardware": detect_node_hardware(self.lattica.peer_id()),
             "model_name": self.model_name,
             "kv_cache_ratio": 0.2,
             "param_hosting_ratio": 0.7,
             "max_concurrent_requests": self.max_batch_size,
-            "max_sequence_length": self.max_sequence_length,
+            "max_sequence_length": (
+                1024 if self.max_sequence_length is None else self.max_sequence_length
+            ),
+            "rtt_to_nodes": self.rtts,
         }
+
         if is_update:
             metrics = get_metrics()
             info["current_requests"] = metrics.get("current_requests", 0)
             if metrics.get("layer_latency_ms") is not None:
                 info["layer_latency_ms"] = metrics.get("layer_latency_ms")
-            info["rtt_to_nodes"] = {}
             info["start_layer"] = self.block_start_index
             info["end_layer"] = self.block_end_index
+
         return info
 
 
