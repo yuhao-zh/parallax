@@ -144,9 +144,10 @@ class RooflinePerformanceModel:
 
         compute_time_ms = self.get_compute_roofline_latency_ms(flops)
         io_time_ms = self.get_io_roofline_latency_ms(io_bytes)
-        return num_decoder_layers * max(
-            decoder_layer_compute_latency, decoder_layer_io_latency
-        ) + max(compute_time_ms, io_time_ms)
+        return (
+            num_decoder_layers * max(decoder_layer_compute_latency, decoder_layer_io_latency)
+            + max(compute_time_ms, io_time_ms)
+        ) / num_decoder_layers
 
 
 @dataclass
@@ -180,6 +181,7 @@ class Node:
     # Will be updated by node broadcasting
     # otherwise, use roofline performance model to estimate
     avg_layer_latency_ms: Optional[float] = None
+    load_compensator: float = 0.05
 
     rtt_to_nodes: Optional[Dict[str, float]] = None
     rtt_getter: Optional[Callable[["Node", "Node"], float]] = None
@@ -206,9 +208,6 @@ class Node:
             )
         except Exception:
             elem_bytes = 2
-        logger.info(
-            f"Node {self.node_id} max_concurrent_requests: {self.max_concurrent_requests}, max_sequence_length: {self.max_sequence_length}, kv_cache_ratio: {self.kv_cache_ratio}, num_decoder_layers: {self.num_decoder_layers}, num_key_value_heads: {self.model_info.num_kv_heads}, head_dim: {self.model_info.head_size}, elem_bytes: {elem_bytes}, memory_gb: {self.hardware.memory_gb}"
-        )
         derived_max = compute_max_batch_size(
             requested_max_batch_size=self.max_concurrent_requests,
             max_sequence_len=self.max_sequence_length,
@@ -266,9 +265,6 @@ class Node:
     @property
     def is_overloaded(self) -> bool:
         """Check if node is at capacity for requests."""
-        logger.warning(
-            f"Node {self.node_id} is overloaded: {self.current_requests} >= {self.max_requests}"
-        )
         return self.current_requests >= self.max_requests
 
     def get_decoder_layer_capacity(
@@ -342,10 +338,15 @@ class Node:
     def layer_latency_ms(self) -> float:
         """Get effective layer latency considering both roofline and load."""
         if self.is_overloaded:
+            logger.warning(
+                f"Node {self.node_id} is overloaded: {self.current_requests} >= {self.max_requests}"
+            )
             return float("inf")
         if self.avg_layer_latency_ms is None:
             return self.roofline_layer_latency_ms()
-        return self.avg_layer_latency_ms
+        return self.avg_layer_latency_ms + self.load_compensator * (
+            self.current_requests // self.max_requests
+        )
 
     def update_rtt(self, target_node_id: str, rtt_ms: float):
         """Update RTT measurement to another node."""

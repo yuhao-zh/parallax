@@ -297,7 +297,7 @@ class Scheduler:
         )
         return req.request_id, path, latency
 
-    def run(self, *, poll_interval: float = 0.05, allocation_log_interval: float = 30.0) -> None:
+    def run(self, *, poll_interval: float = 0.05, allocation_log_interval: float = 5.0) -> None:
         """Run the scheduler concurrently until `stop()` is called.
 
         Starts background threads for event processing (joins/leaves/updates/heartbeats)
@@ -332,7 +332,25 @@ class Scheduler:
             while not self._stop_event.is_set():
                 try:
                     assignments = self.list_node_allocations()
-                    logger.info("Current allocations (%d nodes): %s", len(self.nodes), assignments)
+                    header = f"Current allocations ({len(assignments)} nodes)"
+                    sep = "-" * len(header)
+                    logger.info("%s\n%s", header, sep)
+                    for node_id, start_layer, end_layer in assignments:
+                        node = self.node_id_to_node[node_id]
+                        # Snapshot values to avoid recomputing/logging side-effects twice
+                        capacity = node.max_requests
+                        current = node.current_requests
+                        latency = node.layer_latency_ms
+                        latency_str = "inf" if latency == float("inf") else f"{latency:.2f}"
+                        logger.info(
+                            "  %-16s layers [%3d, %3d) | load %3d/%-3d | latency %7s ms",
+                            node_id,
+                            start_layer,
+                            end_layer,
+                            current,
+                            capacity,
+                            latency_str,
+                        )
                 except Exception as exc:
                     logger.warning(f"Allocation logger error: {exc}")
                 time.sleep(max(1.0, allocation_log_interval))

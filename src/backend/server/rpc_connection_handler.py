@@ -76,7 +76,7 @@ class RPCConnectionHandler(ConnectionHandler):
             self.scheduler.enqueue_node_update(
                 node.node_id,
                 current_requests=node.current_requests,
-                layer_latency_ms=node.avg_layer_latency_ms,
+                layer_latency_ms=node.layer_latency_ms,
                 new_rtt_to_nodes=node.rtt_to_nodes,
             )
             return {}

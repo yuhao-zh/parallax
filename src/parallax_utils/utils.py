@@ -79,9 +79,6 @@ def derive_max_batch_size(
     max_batch_capacity: Optional[int] = None
     if max_sequence_len and max_tokens_in_cache:
         max_batch_capacity = max(1, max_tokens_in_cache // int(max_sequence_len))
-        logger.info(
-            f"Max batch capacity: {max_batch_capacity}, max_tokens_in_cache: {max_tokens_in_cache}, max_sequence_len: {max_sequence_len}"
-        )
     if requested_max_batch_size is None:
         if max_batch_capacity is None:
             logger.warning("Overriding max_batch_size to 16 due to no max_sequence_len provided")

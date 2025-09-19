@@ -26,7 +26,7 @@ class Scheduler:
     def __init__(
         self,
         max_batch_size: int = 16,
-        max_num_tokens_per_batch: int = 1024,
+        max_num_tokens_per_batch: int = 4096,
         prefill_priority: Literal[0, 1] = 0,
         scheduler_wait_ms: int = 500,
         micro_batch_ratio: int = 2,

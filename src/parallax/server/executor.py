@@ -74,7 +74,7 @@ class Executor:
         dtype: str = "float16",
         # Scheduler Configs
         max_batch_size: Optional[int] = None,
-        max_sequence_len: Optional[int] = None,
+        max_sequence_length: Optional[int] = None,
         max_tokens_in_kv_pool: Optional[int] = None,
         # Controlling perfill / decode ratio
         max_num_tokens_per_batch: int = 1024,
@@ -82,7 +82,7 @@ class Executor:
         micro_batch_ratio: int = 2,
         scheduler_wait_ms: int = 500,
         # Metrics Configs
-        layer_latency_update_every: int = 16384,
+        layer_latency_update_every: int = 4096,
         # KV Cache Configs
         kv_block_size: int = 64,
         kv_cache_memory_fraction: float = 0.8,
@@ -195,13 +195,11 @@ class Executor:
                 f"KVCacheManager ready; wired_limit set; prefix_cache={'on' if self.enable_prefix_cache else 'off'}"
             )
             self.kv_cache_manager.max_num_tokens
-        elif self.device == "cuda":
-            pass  # compute inline with compute_max_batch_size below
 
         # Scheduler: derive final max_batch_size with KV constraints
         max_batch_size = compute_max_batch_size(
             requested_max_batch_size=max_batch_size,
-            max_sequence_len=max_sequence_len,
+            max_sequence_len=max_sequence_length,
             device=self.device,
             kv_cache_memory_fraction=kv_cache_memory_fraction,
             num_shard_layers=self.num_shard_layers,
@@ -1154,7 +1152,7 @@ def create_executor_config(args: argparse.Namespace):
         "start_layer": args.start_layer,
         "end_layer": args.end_layer,
         "dtype": args.dtype,
-        "max_sequence_len": args.max_sequence_len if "max_sequence_len" in args else None,
+        "max_sequence_length": args.max_sequence_length if "max_sequence_length" in args else None,
         "max_batch_size": args.max_batch_size if "max_batch_size" in args else None,
         "kv_block_size": args.kv_block_size,
         "kv_cache_memory_fraction": args.kv_cache_memory_fraction,
