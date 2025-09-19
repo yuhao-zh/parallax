@@ -115,6 +115,7 @@ class TransformerConnectionHandler(ConnectionHandler):
         self.block_end_index = block_end_index
         self.notify_url = notify_url
         self._recv_from_peer = None
+        self._recv_from_peer_lock = threading.Lock()
 
     @property
     def recv_from_peer(self):
@@ -134,7 +135,8 @@ class TransformerConnectionHandler(ConnectionHandler):
             send_notify(
                 self.notify_url, self.block_start_index, self.block_end_index, request, "started"
             )
-            self.recv_from_peer.send_multipart([b"forward", request.SerializeToString()])
+            with self._recv_from_peer_lock:
+                self.recv_from_peer.send_multipart([b"forward", request.SerializeToString()])
         except Exception as e:
             logger.exception(f"Error in rpc_pp_forward: {e}")
         return forward_pb2.ForwardResponse()
@@ -145,7 +147,8 @@ class TransformerConnectionHandler(ConnectionHandler):
         request: forward_pb2.AbortRequest,
     ) -> forward_pb2.AbortResponse:
         try:
-            self.recv_from_peer.send_multipart([b"abort", request.SerializeToString()])
+            with self._recv_from_peer_lock:
+                self.recv_from_peer.send_multipart([b"abort", request.SerializeToString()])
         except Exception as e:
             logger.exception(f"Error in rpc_abort: {e}")
         return forward_pb2.AbortResponse()
@@ -338,6 +341,22 @@ class GradientServer:
     def start_node_sender(self):
         send_to_peer = get_zmq_socket(zmq.Context(2), zmq.PULL, self.send_to_peer_addr, True)
 
+        def group_requests_by_next_peer(requests: List[forward_pb2.Req]):
+            grouped_requests = {}
+            for req in requests:
+                assert len(req.routing_table) > 0, "Request routing table is not set"
+                try:
+                    self_index = list(req.routing_table).index(self.lattica.peer_id())
+                except ValueError as exc:
+                    raise RuntimeError("Can not find self in the routing table") from exc
+
+                next_peer_id = req.routing_table[(self_index + 1) % len(req.routing_table)]
+                if next_peer_id not in grouped_requests:
+                    grouped_requests[next_peer_id] = []
+                grouped_requests[next_peer_id].append(req)
+
+            return grouped_requests
+
         while True:
             try:
                 if (
@@ -357,12 +376,10 @@ class GradientServer:
                     if len(forward_request.reqs) == 0:
                         raise RuntimeError("No requests in the forward request")
 
-                    # suppose all requests have same routing table
-                    routing_table = None
+                    requests = []
                     for req in forward_request.reqs:
-                        if len(req.routing_table) == 0:
-                            if self.scheduler_addr is not None:
-                                logger.error("Routing table is not set for scheduler mode")
+                        # set routing table if not scheduler mode
+                        if len(req.routing_table) == 0 and self.scheduler_addr is None:
                             assert (
                                 self.block_start_index == 0
                             ), "Request routing table is not set for non-head rank"
@@ -371,34 +388,37 @@ class GradientServer:
                             logger.info(
                                 f"Set routing table {self.routing_table} for request {req.rid}"
                             )
-                        # Assume all requests have same routing table
-                        routing_table = list(req.routing_table)
 
-                    try:
-                        self_index = routing_table.index(self.lattica.peer_id())
-                    except ValueError as exc:
-                        raise RuntimeError("Can not find self in the routing table") from exc
+                        if len(req.routing_table) > 0:
+                            requests.append(req)
+                        else:
+                            logger.error(f"Request {req.rid} has no routing table, drop it")
 
-                    next_peer_id = routing_table[(self_index + 1) % len(routing_table)]
-                    stub = self.get_stub(next_peer_id)
-                    start = time.time()
-                    logger.info(f"Start forwarding data to {next_peer_id}")
-                    response = stub.rpc_pp_forward(forward_request)
-                    response.result()
-                    send_notify(
-                        self.notify_url,
-                        self.block_start_index,
-                        self.block_end_index,
-                        forward_request,
-                        "completed",
-                    )
+                    grouped_requests = group_requests_by_next_peer(requests)
 
-                    logger.info(
-                        f"Forwarding data to {next_peer_id}, "
-                        f"total size: {len(message_body) / (1024 * 1024):.3f} MB, "
-                        f"cost time: {(time.time() - start) * 1000:.3f} ms, "
-                        f"speed: {len(message_body) / (time.time() - start) / (1024 * 1024):.3f} MB/s"
-                    )
+                    for next_peer_id, requests in grouped_requests.items():
+                        stub = self.get_stub(next_peer_id)
+                        start = time.time()
+                        logger.info(f"Start forwarding data to {next_peer_id}")
+                        new_forward_request = forward_pb2.ForwardRequest()
+                        new_forward_request.forward_mode = forward_request.forward_mode
+                        new_forward_request.reqs.extend(requests)
+                        response = stub.rpc_pp_forward(new_forward_request)
+                        response.result()
+                        send_notify(
+                            self.notify_url,
+                            self.block_start_index,
+                            self.block_end_index,
+                            new_forward_request,
+                            "completed",
+                        )
+
+                        logger.info(
+                            f"Forwarding data to {next_peer_id}, "
+                            f"total size: {len(message_body) / (1024 * 1024):.3f} MB, "
+                            f"cost time: {(time.time() - start) * 1000:.3f} ms, "
+                            f"speed: {len(message_body) / (time.time() - start) / (1024 * 1024):.3f} MB/s"
+                        )
 
                 elif message_type == b"abort":
                     abort_request = forward_pb2.AbortRequest()
@@ -406,30 +426,37 @@ class GradientServer:
                     if len(abort_request.reqs) == 0:
                         raise RuntimeError("No requests in the abort request")
 
-                    # suppose all requests have same routing table
-                    routing_table = None
-                    for req in forward_request.reqs:
-                        if len(req.routing_table) == 0:
+                    grouped_requests = {}
+                    for req in abort_request.reqs:
+                        # set routing table if not scheduler mode
+                        if len(req.routing_table) == 0 and self.scheduler_addr is None:
                             assert (
                                 self.block_start_index == 0
                             ), "Request routing table is not set for non-head rank"
+
                             req.routing_table.extend(self.routing_table)
-                        # Assume all requests have same routing table
-                        routing_table = list(req.routing_table)
+                            logger.info(
+                                f"Set routing table {self.routing_table} for request {req.rid}"
+                            )
 
-                    try:
-                        self_index = routing_table.index(self.lattica.peer_id())
-                    except ValueError as exc:
-                        raise RuntimeError("Can not find self in the routing table") from exc
+                        if len(req.routing_table) > 0:
+                            # broadcast to all other nodes
+                            for peer_id in req.routing_table:
+                                if peer_id not in grouped_requests:
+                                    grouped_requests[peer_id] = []
+                                grouped_requests[peer_id].append(req)
+                        else:
+                            logger.error(f"Abort Request {req.rid} has no routing table, drop it")
 
-                    # broadcast to all other nodes
-                    for index, peer_id in enumerate(routing_table):
-                        if index != self_index:
+                    for peer_id, requests in grouped_requests.items():
+                        if peer_id != self.lattica.peer_id():
                             stub = self.get_stub(peer_id)
                             logger.info(
-                                f"Send abort request: {[r.rid for r in abort_request.reqs]} to: {peer_id}"
+                                f"Send abort request: {[r.rid for r in requests]} to: {peer_id}"
                             )
-                            stub.rpc_abort(abort_request)
+                            new_abort_request = forward_pb2.AbortRequest()
+                            new_abort_request.reqs.extend(requests)
+                            stub.rpc_abort(new_abort_request)
                 else:
                     logger.error(f"Unknown message type: {message_type}")
 
@@ -537,7 +564,7 @@ def launch_p2p_server(
     else:
         dht_port = 0
     if host_maddrs is None:
-        host_maddrs = [f"/ip4/0.0.0.0/tcp/{dht_port}", f"/ip6/::/tcp/{dht_port}"]
+        host_maddrs = [f"/ip4/0.0.0.0/tcp/{dht_port}", f"/ip4/0.0.0.0/udp/{dht_port}/quic-v1"]
 
     # Run the server in a separate thread to keep the main thread free for event loop
     server = GradientServer(

@@ -28,7 +28,7 @@ class Scheduler:
         max_batch_size: int = 16,
         max_num_tokens_per_batch: int = 4096,
         prefill_priority: Literal[0, 1] = 0,
-        scheduler_wait_ms: int = 500,
+        scheduler_wait_ms: int = 200,
         micro_batch_ratio: int = 2,
         is_first_peer: bool = False,
         **kwargs,
@@ -138,7 +138,7 @@ class Scheduler:
         """Cancels a request from the scheduler."""
         if request_id in self._running_requests:
             req = self._running_requests[request_id]
-            req.update_status(RequestStatus.CANCELLED)
+            req.abort = True
             logger.info(f"Cancelled request {request_id} from scheduler.")
         else:
             raise ValueError(f"Attempted to cancel non-existent request {request_id}.")
@@ -154,7 +154,8 @@ class Scheduler:
 
         finished = False
         last_token_id = request.output_ids[-1] if request.output_ids else None
-
+        if request.abort:
+            finished = True
         if last_token_id == self.eos_token_id:
             request.update_status(RequestStatus.FINISHED_EOS)
             finished = True
@@ -221,4 +222,5 @@ class Scheduler:
                 self._last_reported_running_requests = curr
         except Exception:
             pass
+
         return batch

@@ -285,6 +285,7 @@ class Executor:
         while True:
             try:
                 recv_req = self.recv_from_peer_socket.recv_multipart(zmq.NOBLOCK)
+                assert len(recv_req) == 2, f"Received invalid request: {recv_req}"
                 if recv_req[0] == b"forward":
                     # Create a new ForwardRequest instance and parse from bytes
                     forward_request = forward_pb2.ForwardRequest()
@@ -778,8 +779,12 @@ class Executor:
 
                     # Check for termination.
                     if self.scheduler.check_and_update_request_status(original_req):
-                        logger.info(f"Releasing resources for finished request {req.request_id}")
                         self.kv_cache_manager.release_request(original_req.request_id)
+                        logger.info(
+                            f"Released resources for finished request {req.request_id}, "
+                            f"kv cache manager has {self.kv_cache_manager.tokens_in_cache} tokens, "
+                            f"memory usage: {mx.get_active_memory() / 1024**3 :.3f} GB"
+                        )
                         if not self.is_last_peer:
                             self.finished_batch.append(req)
                     else:
