@@ -17,7 +17,10 @@ from scheduling.layer_allocation import (
 )
 from scheduling.model_info import ModelInfo
 from scheduling.node import Node, RequestSignal
-from scheduling.request_routing import DynamicProgrammingRouting
+from scheduling.request_routing import (
+    DynamicProgrammingRouting,
+    RoundRobinPipelineRouting,
+)
 
 logger = get_logger(__name__)
 
@@ -31,6 +34,7 @@ class Scheduler:
         nodes: List[Node],
         min_nodes_bootstrapping: int = 1,
         strategy: Literal["greedy", "dp"] = "dp",
+        routing_strategy: Literal["rr", "dp"] = "dp",
         *,
         request_arrival_horizon_sec: float = 600.0,
         rebalance_threshold: float = float("inf"),
@@ -38,6 +42,21 @@ class Scheduler:
         request_warm_up_for_reshard: int = 0,
         heartbeat_timeout: float = 60.0,
     ) -> None:
+        """Initialize the scheduler.
+
+        Args:
+            model_info: Model architecture information used by allocators and routers.
+            nodes: Initial list of candidate nodes.
+            min_nodes_bootstrapping: Minimum nodes required to attempt initial allocation.
+            strategy: Layer allocation strategy ("dp" or "greedy").
+            routing_strategy: Request routing strategy ("dp" for dynamic programming, or
+                "greedy" for round-robin over complete pipelines skipping overloaded ones).
+            request_arrival_horizon_sec: Sliding window horizon for arrival-rate tracking.
+            rebalance_threshold: Threshold for triggering rebalancing in allocation.
+            water_filling_max_iterations: Max iterations for water-filling allocation.
+            request_warm_up_for_reshard: Number of warm-up requests to detect truncation.
+            heartbeat_timeout: Time in seconds to consider node heartbeat stale.
+        """
         self.model_info = model_info
         self.num_layers = model_info.num_layers
 
@@ -55,7 +74,9 @@ class Scheduler:
         self.node_id_to_node: Dict[str, Node] = self.layer_allocator.node_id_to_node
         self.min_nodes_bootstrapping = min_nodes_bootstrapping
 
-        self.request_router = DynamicProgrammingRouting()
+        self.request_router = (
+            DynamicProgrammingRouting() if routing_strategy == "dp" else RoundRobinPipelineRouting()
+        )
         self.request_warm_up_for_reshard = request_warm_up_for_reshard
 
         self._request_queue: "queue.Queue[RequestSignal]" = queue.Queue()
