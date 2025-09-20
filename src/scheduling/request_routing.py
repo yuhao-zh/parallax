@@ -4,6 +4,7 @@ Phase 2: Request routing.
 Provides:
 - A base strategy interface.
 - A dynamic-programming router that minimizes end-to-end latency across nodes.
+- A round-robin router that uses round-robin over complete pipelines.
 
 Routing is at node granularity: once a request enters a node, it runs all layers
 hosted by that node. We can optionally compute layer-level turning points for a
@@ -14,7 +15,10 @@ final node path and total latency.
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
 
+from parallax_utils.logging_config import get_logger
 from scheduling.node import Node
+
+logger = get_logger(__name__)
 
 
 class RequestRoutingStrategy(ABC):
@@ -212,107 +216,123 @@ class RoundRobinPipelineRouting(RequestRoutingStrategy):
     exactly covers [0, num_layers). We enumerate all such pipelines from current
     node allocations, skip any pipeline that contains an overloaded node, and
     dispatch requests by rotating among the remaining pipelines.
+
+    This implementation discovers all complete pipelines once, caches them as
+    node-id sequences sorted by their estimated end-to-end latency (including
+    RTT), and then round-robins over that cached list. Use `reset_pipelines()`
+    to force rediscovery if allocations change.
     """
 
     def __init__(self) -> None:
-        # Cursor for round-robin among viable pipelines
         self._rr_cursor: int = 0
+        self._pipelines: Optional[List[List[str]]] = None
+
+    def pipeline_discovery(self, nodes: List[Node], num_layers: int) -> List[List[str]]:
+        """Discover and return all complete pipelines greedily.
+
+        A naive greedy procedure:
+        - Build a mapping from start_layer to nodes starting there.
+        - For each head node with start_layer == 0, repeatedly choose the next
+          node that starts at the current end and has the smallest end_layer
+          (strictly greater than current), until we reach num_layers.
+        - If the chain reaches exactly num_layers, record the node-id sequence
+          as a pipeline.
+
+        Returns a list of pipelines as node-id sequences. Does not cache.
+        """
+        if not nodes or num_layers <= 0:
+            return []
+
+        # Index nodes by start layer
+        start_to_nodes: Dict[int, List[Node]] = {}
+        for n in nodes:
+            if n.start_layer is None or n.end_layer is None:
+                continue
+            start_to_nodes.setdefault(n.start_layer, []).append(n)
+
+        heads = start_to_nodes.get(0, [])
+        pipelines: List[List[str]] = []
+
+        seen = set()
+        for head in heads:
+            path_ids: List[str] = [head.node_id]
+            current_end = head.end_layer
+            ok = True
+            while current_end < num_layers:
+                candidates = [
+                    n
+                    for n in start_to_nodes.get(current_end, [])
+                    if n.end_layer and n.end_layer > current_end and n.node_id not in seen
+                ]
+                if not candidates:
+                    ok = False
+                    break
+                # Greedy pick: choose the node that ends earliest among candidates
+                nxt = min(candidates, key=lambda n: n.end_layer)  # type: ignore[arg-type]
+                path_ids.append(nxt.node_id)
+                current_end = int(nxt.end_layer)  # type: ignore[arg-type]
+            if ok and current_end == num_layers:
+                for nid in path_ids:
+                    seen.add(nid)
+                pipelines.append(path_ids)
+
+        logger.info(f"Discovered {len(pipelines)} pipelines")
+        logger.info(f"Pipelines: {pipelines}")
+        return pipelines
 
     def find_turning_points(self, nodes: List[Node], num_layers: int) -> List[Tuple[str, int, str]]:
         """No warm-up/truncation in the baseline; return no turning points."""
         return []
 
-    def _enumerate_pipelines(self, nodes: List[Node], num_layers: int) -> List[List[int]]:
-        """Enumerate all complete pipelines as lists of node indices.
-
-        A pipeline is valid if:
-        - It starts with a node whose `start_layer == 0`;
-        - Each subsequent node starts where the previous ends;
-        - The final node has `end_layer == num_layers`.
-        """
-        if num_layers <= 0 or not nodes:
-            return []
-
-        # Filter nodes with valid ranges and index them by start layer
-        start_to_indices: Dict[int, List[int]] = {}
-        for idx, n in enumerate(nodes):
-            if n.start_layer is None or n.end_layer is None:
-                continue
-            start_to_indices.setdefault(n.start_layer, []).append(idx)
-
-        # DFS to enumerate all contiguous sequences from 0 to num_layers
-        complete: List[List[int]] = []
-
-        def dfs(current_path: List[int], current_end: int) -> None:
-            if current_end == num_layers:
-                complete.append(list(current_path))
-                return
-            for nxt in start_to_indices.get(current_end, []):
-                nxt_node = nodes[nxt]
-                # Ensure strict forward progress
-                if nxt_node.end_layer is None or nxt_node.end_layer <= current_end:
-                    continue
-                current_path.append(nxt)
-                dfs(current_path, nxt_node.end_layer)
-                current_path.pop()
-
-        for head in start_to_indices.get(0, []):
-            head_node = nodes[head]
-            if head_node.end_layer is None:
-                continue
-            dfs([head], head_node.end_layer)
-
-        # Deduplicate in case different paths resolve to same node index sequence
-        # (unlikely but safe). Maintain stable order.
-        seen: set = set()
-        unique: List[List[int]] = []
-        for path in complete:
-            key = tuple(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(path)
-        return unique
-
-    def _estimate_pipeline_latency(self, pipeline: List[int], nodes: List[Node]) -> float:
-        """Estimate latency for a pipeline using per-node layer latency and RTT."""
-        if not pipeline:
-            return float("inf")
-        total = 0.0
-        prev_idx: Optional[int] = None
-        for idx in pipeline:
-            node = nodes[idx]
-            total += float(node.layer_latency_ms)
-            if prev_idx is not None:
-                prev_node = nodes[prev_idx]
-                total += (
-                    float(prev_node.get_rtt_to(node)) if prev_node.node_id != node.node_id else 0.0
-                )
-            prev_idx = idx
-        return total
+    def _ensure_pipelines(self, nodes: List[Node], num_layers: int) -> None:
+        """Ensure cached pipelines exist; discover and cache if missing."""
+        if self._pipelines is None:
+            self._pipelines = self.pipeline_discovery(nodes, num_layers)
 
     def find_optimal_path(self, nodes: List[Node], num_layers: int) -> Tuple[List[str], float]:
-        """Round-robin among complete, non-overloaded pipelines.
+        """Round-robin among cached pipelines, skipping overloaded ones.
 
-        Returns an empty path with infinite latency if none are currently viable.
+        Selection procedure:
+        - On first use, greedily discover and cache all full pipelines.
+        - Pick the pipeline at `rr_cursor % len(pipelines)`.
+        - If any node in that pipeline is overloaded or missing, advance cursor
+          and try the next one, up to the number of pipelines.
+        - Return the first viable pipeline and its latency estimate using
+          current per-node stats and RTTs. If none are viable, return empty.
         """
-        pipelines = self._enumerate_pipelines(nodes, num_layers)
-        if not pipelines:
+        if not nodes or num_layers <= 0:
             return [], float("inf")
 
-        # Filter out pipelines that have any overloaded node
-        viable: List[List[int]] = []
-        for path in pipelines:
-            if all(not nodes[idx].is_overloaded for idx in path):
-                viable.append(path)
-
-        if not viable:
+        self._ensure_pipelines(nodes, num_layers)
+        if not self._pipelines:
             return [], float("inf")
 
-        # Round-robin selection among viable pipelines
-        sel = viable[self._rr_cursor % len(viable)]
-        self._rr_cursor += 1
+        id_to_node: Dict[str, Node] = {n.node_id: n for n in nodes}
 
-        path_ids = [nodes[i].node_id for i in sel]
-        latency = self._estimate_pipeline_latency(sel, nodes)
-        return path_ids, latency
+        attempts = 0
+        total_pipelines = len(self._pipelines)
+        self._rr_cursor %= total_pipelines
+        while attempts < total_pipelines:
+            idx = self._rr_cursor % total_pipelines
+            candidate_ids = self._pipelines[idx]
+            # Check overloaded / presence
+            viable = True
+            prev: Optional[Node] = None
+            total_latency = 0.0
+            for nid in candidate_ids:
+                node = id_to_node.get(nid)
+                if node is None or node.is_overloaded:
+                    viable = False
+                    break
+                total_latency += float(node.layer_latency_ms)
+                if prev is not None:
+                    total_latency += (
+                        0.0 if prev.node_id == node.node_id else float(prev.get_rtt_to(node))
+                    )
+                prev = node
+            self._rr_cursor += 1
+            attempts += 1
+            if viable:
+                return candidate_ids, total_latency
+
+        return [], float("inf")

@@ -34,7 +34,7 @@ class Scheduler:
         nodes: List[Node],
         min_nodes_bootstrapping: int = 1,
         strategy: Literal["greedy", "dp"] = "dp",
-        routing_strategy: Literal["rr", "dp"] = "dp",
+        routing_strategy: Literal["rr", "dp"] = "rr",
         *,
         request_arrival_horizon_sec: float = 600.0,
         rebalance_threshold: float = float("inf"),
@@ -105,6 +105,7 @@ class Scheduler:
             f"Scheduler initialized, min_nodes_bootstrapping {self.min_nodes_bootstrapping}, "
             f"strategy {strategy}, rebalance threshold {rebalance_threshold}"
         )
+        self._node_assigned_request_count: Dict[str, int] = {}
 
         # Eager bootstrap for initial allocation if enough nodes are present
         try:
@@ -200,13 +201,13 @@ class Scheduler:
         if new_rtt_to_nodes is not None:
             node.rtt_to_nodes.update(new_rtt_to_nodes)
         node.last_heartbeat = time.time()
-        logger.debug(
-            "Node updated: %s (requests=%s, latency_ms=%s, rtt_updates=%s)",
-            node.node_id,
-            current_requests if current_requests is not None else node.current_requests,
-            layer_latency_ms if layer_latency_ms is not None else node.avg_layer_latency_ms,
-            0 if new_rtt_to_nodes is None else len(new_rtt_to_nodes),
-        )
+        # logger.debug(
+        #     "Node updated: %s (requests=%s, latency_ms=%s, rtt_updates=%s)",
+        #     node.node_id,
+        #     current_requests if current_requests is not None else node.current_requests,
+        #     layer_latency_ms if layer_latency_ms is not None else node.avg_layer_latency_ms,
+        #     0 if new_rtt_to_nodes is None else len(new_rtt_to_nodes),
+        # )
 
     # Async-style event enqueuers for main loop
     def enqueue_join(self, node: Node) -> None:
@@ -233,13 +234,13 @@ class Scheduler:
             (node_id, current_requests, layer_latency_ms, new_rtt_to_nodes)
         )
         self._wake_event.set()
-        logger.debug(
-            "Enqueued node update: %s (requests=%s, latency_ms=%s, rtt_updates=%s)",
-            node_id,
-            current_requests,
-            layer_latency_ms,
-            0 if new_rtt_to_nodes is None else len(new_rtt_to_nodes),
-        )
+        # logger.debug(
+        #     "Enqueued node update: %s (requests=%s, latency_ms=%s, rtt_updates=%s)",
+        #     node_id,
+        #     current_requests,
+        #     layer_latency_ms,
+        #     0 if new_rtt_to_nodes is None else len(new_rtt_to_nodes),
+        # )
 
     def checking_node_heartbeat(self) -> None:
         """Check the heartbeat of all nodes."""
@@ -312,6 +313,9 @@ class Scheduler:
         for node_id in path:
             n = self.node_id_to_node[node_id]
             if n is not None:
+                self._node_assigned_request_count[node_id] = (
+                    self._node_assigned_request_count.get(node_id, 0) + 1
+                )
                 n.add_request()
         logger.info(
             "Dispatched request %s via path %s (est_lat=%.2fms)", req.request_id, path, latency
@@ -363,14 +367,18 @@ class Scheduler:
                         current = node.current_requests
                         latency = node.layer_latency_ms
                         latency_str = "inf" if latency == float("inf") else f"{latency:.2f}"
+                        n_hosted_requests = 0
+                        if node_id in self._node_assigned_request_count:
+                            n_hosted_requests = self._node_assigned_request_count[node_id]
                         logger.info(
-                            "  %-16s layers [%3d, %3d) | load %3d/%-3d | latency %7s ms",
+                            "  %-16s layers [%3d, %3d) | load %3d/%-3d | latency %7s ms | assigned request count %3d",
                             node_id,
                             start_layer,
                             end_layer,
                             current,
                             capacity,
                             latency_str,
+                            n_hosted_requests,
                         )
                 except Exception as exc:
                     logger.warning(f"Allocation logger error: {exc}")
@@ -420,6 +428,9 @@ class Scheduler:
                 for node_id in path:
                     n = self.node_id_to_node[node_id]
                     if n is not None:
+                        self._node_assigned_request_count[node_id] = (
+                            self._node_assigned_request_count.get(node_id, 0) + 1
+                        )
                         n.add_request()
                 logger.info(
                     "Dispatched request %s via path %s", getattr(req, "request_id", "?"), path

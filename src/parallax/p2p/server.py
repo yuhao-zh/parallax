@@ -354,7 +354,10 @@ class GradientServer:
                 if next_peer_id not in grouped_requests:
                     grouped_requests[next_peer_id] = []
                 grouped_requests[next_peer_id].append(req)
-
+            if len(grouped_requests) > 1:
+                logger.warning(
+                    f"Grouped requests by next peer: {len(grouped_requests)}, {grouped_requests.keys()}"
+                )
             return grouped_requests
 
         while True:
@@ -519,8 +522,8 @@ class GradientServer:
             "node_id": self.lattica.peer_id(),
             "hardware": detect_node_hardware(self.lattica.peer_id()),
             "model_name": self.model_name,
-            "kv_cache_ratio": 0.2,
-            "param_hosting_ratio": 0.7,
+            "kv_cache_ratio": 0.25,
+            "param_hosting_ratio": 0.65,
             "max_concurrent_requests": self.max_batch_size,
             "max_sequence_length": (
                 1024 if self.max_sequence_length is None else self.max_sequence_length

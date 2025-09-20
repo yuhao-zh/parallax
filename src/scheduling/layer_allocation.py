@@ -475,28 +475,17 @@ class BaseLayerAllocator:
         Checks whether we can chain contiguous node allocations starting at 0 to reach L.
         """
         total_layers = self.num_total_layers
-        start_to_max_end: Dict[int, int] = {}
+        layer_count: Dict[int, int] = {}
         for _, (s, e) in self.node_allocation.items():
-            if s < 0 or e <= s:
+            if s is None or e is None:
                 continue
-            if s not in start_to_max_end or e > start_to_max_end[s]:
-                start_to_max_end[s] = e
+            for layer in range(s, e):
+                layer_count[layer] = layer_count.get(layer, 0) + 1
 
-        current_end = 0
-        steps = 0
-        # Greedily hop by contiguous starts until we cover all layers or fail
-        while True:
-            if current_end == total_layers:
-                return True
-            if steps > len(start_to_max_end) + 1:
+        for layer in range(total_layers):
+            if layer not in layer_count or layer_count[layer] == 0:
                 return False
-            if current_end not in start_to_max_end:
-                return False
-            next_end = start_to_max_end[current_end]
-            if next_end <= current_end:
-                return False
-            current_end = next_end
-            steps += 1
+        return True
 
     def layer_replication_stats(self) -> Tuple[int, int, float]:
         """Return (min, max, avg) number of nodes hosting each layer.
@@ -837,13 +826,13 @@ class DynamicProgrammingLayerAllocator(BaseLayerAllocator):
                 continue
             logger.info("[DP] Adjusting pipeline with %d nodes", len(pl_nodes))
             self.adjust_pipeline_layers(pl_nodes, assume_sorted=False)
-        if not self.has_full_pipeline():
-            logger.info("[DP] Allocation did not produce a full pipeline")
-            return False
         # Assign any nodes that were left unallocated using dynamic policy
         if self.assign_left_over_nodes:
             logger.info("[DP] Assigning left-over nodes")
             self.allocate_left_over_nodes()
+        if not self.has_full_pipeline():
+            logger.info("[DP] Allocation did not produce a full pipeline")
+            return False
         logger.info("[DP] global_allocation completed successfully")
         return True
 
