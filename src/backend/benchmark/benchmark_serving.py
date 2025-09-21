@@ -1087,7 +1087,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--metric-percentiles",
         type=str,
-        default="96,97,98,99",
+        default="95,96,97,98,99,100",
         help="Comma-seperated list of percentiles for selected metrics. "
         'To report 25-th, 50-th, and 75-th percentiles, use "25,50,75". '
         'Default value is "99". '
