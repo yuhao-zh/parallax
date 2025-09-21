@@ -512,7 +512,18 @@ class GradientServer:
                 logger.warning("No peers found, send empty rtt_to_nodes.")
 
             for peer_id in all_peers:
-                self.rtts[peer_id] = self.lattica.get_peer_rtt(peer_id) * 1000
+                rtt = None
+                for _ in range(1 if is_update else 30):
+                    try:
+                        rtt = self.lattica.get_peer_rtt(peer_id) * 1000
+                    except Exception as e:
+                        logger.warning(f"Failed to get rtt to {peer_id}: {e}")
+                    if rtt is not None:
+                        break
+                    logger.warning(f"Failed to get rtt to {peer_id}, waiting for 1 second.")
+                    time.sleep(1)
+
+                self.rtts[peer_id] = rtt if rtt is not None else 100
             self.rtt_last_update = time.time()
 
         info = {
