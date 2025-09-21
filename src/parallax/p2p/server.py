@@ -564,7 +564,7 @@ def launch_p2p_server(
     else:
         dht_port = 0
     if host_maddrs is None:
-        host_maddrs = [f"/ip4/0.0.0.0/tcp/{dht_port}", f"/ip4/0.0.0.0/udp/{dht_port}/quic-v1"]
+        host_maddrs = [f"/ip4/0.0.0.0/tcp/{dht_port}"]
 
     # Run the server in a separate thread to keep the main thread free for event loop
     server = GradientServer(
