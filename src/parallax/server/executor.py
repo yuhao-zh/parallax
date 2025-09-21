@@ -147,10 +147,6 @@ class Executor:
         self.is_first_peer = start_layer == 0
         self.is_last_peer = end_layer == self.config.get("num_hidden_layers")
         self.num_shard_layers = end_layer - start_layer
-        # For CUDA graph runner: cache the initially captured decode batch size
-        # and keep subsequent decode batches <= this size to avoid shape mismatch
-        # during graph replay. When larger, we re-enqueue overflow requests.
-        self._cuda_decode_graph_bs: Optional[int] = None
 
         # Metrics throttling for per-layer latency updates
         self.layer_latency_update_every = int(max(1, layer_latency_update_every))
@@ -608,27 +604,6 @@ class Executor:
                 prefill_reqs.append(req)
             elif req.is_decoding:
                 decode_reqs.append(req)
-
-        # CUDA graph runner requires stable shapes across replays. To avoid
-        # cuda_graph_runner replay errors when the decode batch size grows
-        # beyond the initially captured graph, clamp the decode batch size to
-        # the first observed size and re-enqueue overflow requests.
-        if self.device == "cuda":
-            if self._cuda_decode_graph_bs is None and len(decode_reqs) > 0:
-                self._cuda_decode_graph_bs = len(decode_reqs)
-            if (
-                self._cuda_decode_graph_bs is not None
-                and len(decode_reqs) > self._cuda_decode_graph_bs
-            ):
-                overflow = decode_reqs[self._cuda_decode_graph_bs :]
-                decode_reqs = decode_reqs[: self._cuda_decode_graph_bs]
-                # Return overflow requests back to the scheduler queue to be processed later
-                try:
-                    for overflow_req in overflow:
-                        self.scheduler.enque_request(overflow_req)
-                except Exception:
-                    # Best-effort safety; continue even if re-enqueue fails
-                    pass
         if self.device == "cuda":
             prefill_batch = self._prepare_cuda_prefill_batch(prefill_reqs)
             decode_batch = self._prepare_cuda_decode_batch(decode_reqs)

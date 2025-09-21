@@ -345,7 +345,7 @@ class Node:
         if self.avg_layer_latency_ms is None:
             return self.roofline_layer_latency_ms()
         return self.avg_layer_latency_ms + self.load_compensator * (
-            self.current_requests // self.max_requests
+            1.0 * self.current_requests / self.max_requests
         )
 
     def update_rtt(self, target_node_id: str, rtt_ms: float):
