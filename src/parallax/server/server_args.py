@@ -30,6 +30,10 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--port", type=int, default=3000, help="Port of the HTTP server")
 
+    parser.add_argument(
+        "--announce-http-addr", type=str, default=None, help="HTTP address to announce"
+    )
+
     # P2P configuration
     parser.add_argument("--initial-peers", nargs="+", default=[], help="List of initial DHT peers")
 
@@ -37,15 +41,13 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--relay-servers", nargs="+", default=[], help="List of relay DHT peers")
 
-    parser.add_argument(
-        "--announce-maddrs", nargs="+", default=[], help="List of multiaddresses to announce"
-    )
-
-    parser.add_argument("--public-ip", type=str, default=None, help="Public IP address to announce")
-
     parser.add_argument("--dht-port", type=int, default=None, help="Port for DHT communication")
 
     parser.add_argument("--host-maddrs", type=str, default=None, help="Multiaddress to host")
+
+    parser.add_argument(
+        "--announce-maddrs", nargs="+", default=[], help="List of multiaddresses to announce"
+    )
 
     parser.add_argument("--dht-prefix", type=str, default="gradient", help="Prefix for DHT keys")
 

@@ -173,8 +173,7 @@ class GradientServer:
         hidden_layers: int = 128,
         dht_prefix: str = "gradient",
         host_maddrs: List[str] = [],
-        public_ip: Optional[str] = None,
-        http_port: int = 3000,
+        announce_http_addr: Optional[str] = None,
         announce_maddrs: List[str] = [],
         notify_url: str = None,
         model_name: Optional[str] = None,
@@ -195,8 +194,7 @@ class GradientServer:
         self.dht_prefix = dht_prefix
         self.host_maddrs = host_maddrs
         self.announce_maddrs = announce_maddrs
-        self.public_ip = public_ip
-        self.http_port = http_port
+        self.announce_http_addr = announce_http_addr
         self.notify_url = notify_url
         self.model_name = model_name
         self.max_batch_size = max_batch_size
@@ -518,7 +516,7 @@ class GradientServer:
             self.rtt_last_update = time.time()
 
         info = {
-            "call_url": f"http://{self.public_ip}:{self.http_port}",
+            "call_url": f"http://{self.announce_http_addr}",
             "node_id": self.lattica.peer_id(),
             "hardware": detect_node_hardware(self.lattica.peer_id()),
             "model_name": self.model_name,
@@ -553,8 +551,7 @@ def launch_p2p_server(
     dht_prefix: str,
     host_maddrs: Optional[List[str]],
     announce_maddrs: List[str],
-    public_ip: Optional[str],
-    http_port: int,
+    announce_http_addr: Optional[str],
     notify_url: str,
     recv_from_peer_addr: str,
     send_to_peer_addr: str,
@@ -582,8 +579,9 @@ def launch_p2p_server(
         dht_prefix=dht_prefix,
         host_maddrs=host_maddrs,
         announce_maddrs=announce_maddrs,
-        public_ip=public_ip if public_ip is not None else "127.0.0.1",
-        http_port=http_port,
+        announce_http_addr=(
+            announce_http_addr if announce_http_addr is not None else "127.0.0.1:3000"
+        ),
         notify_url=notify_url,
         model_name=model_name,
         max_batch_size=max_batch_size,
