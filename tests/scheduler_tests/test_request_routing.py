@@ -202,3 +202,60 @@ def test_round_robin_skips_overloaded_pipeline():
     node_ids, latency = rr.find_optimal_path(nodes, num_layers)
     assert node_ids == []
     assert latency == float("inf")
+
+
+def test_round_robin_pipeline_discovery_overlapping_heads_and_tails():
+    """Ensure pipeline_discovery finds multiple pipelines with overlapping heads/tails.
+
+    Scenario layers [0, 64): nodes with ranges
+        [0, 22), [0, 23), [22, 43), [23, 42), [23, 47), [43, 64), [47, 64)
+    Expected pipelines:
+        - 0 -> 22 -> 43 -> 47 -> 64
+        - 0 -> 23 -> 47 -> 64
+    """
+    num_layers = 64
+    model = build_model(num_layers)
+
+    def N(nid: str, s: int, e: int) -> Node:
+        n = build_node(nid, model, tflops=200.0, x=0.0, y=0.0)
+        n.set_layer_allocation(s, e)
+        return n
+
+    nodes = [
+        N("h1", 0, 22),
+        N("h2", 0, 23),
+        N("m1", 22, 43),
+        N("m2", 23, 42),
+        N("m3", 23, 47),
+        N("t1", 43, 64),
+        N("t2", 47, 64),
+    ]
+
+    rr = RoundRobinPipelineRouting()
+    pipelines = rr.pipeline_discovery(nodes, num_layers)
+
+    # Pipelines should be sequences of node ids
+    assert len(pipelines) >= 2
+    # Convert to layer ranges to validate coverage and specific two expected pipelines
+    id_to_node = {n.node_id: n for n in nodes}
+    ranges = [
+        [(id_to_node[nid].start_layer, id_to_node[nid].end_layer) for nid in p] for p in pipelines
+    ]
+
+    expected1 = [
+        (0, 22),
+        (22, 43),
+        (43, 64),
+    ]  # path via h1 -> m1 -> t1/t2 (choose minimal ends greedily)
+    # Given the greedy rule, 43->47->64 is also a possible chain; we accept either tail
+    expected1_alt = [(0, 22), (22, 43), (47, 64)]
+    expected2 = [(0, 23), (23, 47), (47, 64)]
+
+    def matches_path(path, expected):
+        return len(path) == len(expected) and all(a == b for a, b in zip(path, expected))
+
+    has_expected1 = any(
+        matches_path(r, expected1) or matches_path(r, expected1_alt) for r in ranges
+    )
+    has_expected2 = any(matches_path(r, expected2) for r in ranges)
+    assert has_expected1 and has_expected2

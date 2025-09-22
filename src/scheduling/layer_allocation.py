@@ -436,6 +436,65 @@ class BaseLayerAllocator:
                 f"Assignment did not cover all layers: assigned {start_layer} of {total_layers}"
             )
 
+    def adjust_pipeline_layers_greedy(self, pipeline_nodes: List[Node]) -> None:
+        """Greedily assign contiguous layers to `pipeline_nodes` from 0 to L.
+
+        This simpler alternative to `adjust_pipeline_layers` walks nodes in the given
+        order and assigns as many layers as each node can host based on its capacity.
+        The first node includes input embedding allowance; the final closing node
+        includes LM head allowance. Previous allocations for participating nodes are
+        cleared to avoid double counting load.
+
+        Args:
+            pipeline_nodes: Nodes that form a full pipeline in stage order.
+
+        Raises:
+            ValueError: If total capacity is insufficient to cover all layers.
+        """
+
+        total_layers = self.num_total_layers
+        if not pipeline_nodes or total_layers <= 0:
+            raise ValueError("No nodes or total layers is non-positive")
+
+        # Clear previous allocations for participating nodes (avoid double counting loads)
+        for node in pipeline_nodes:
+            if node.start_layer is not None and node.end_layer is not None:
+                self.deallocate(node)
+
+        start_layer = 0
+        remaining_layers = total_layers
+
+        for idx, node in enumerate(pipeline_nodes):
+            include_input_embed = start_layer == 0
+
+            # Base capacity without LM head
+            base_cap = node.get_decoder_layer_capacity(include_input_embed=include_input_embed)
+
+            # If this node will be the tail that closes the pipeline, allow LM head
+            if base_cap >= remaining_layers:
+                tail_cap = node.get_decoder_layer_capacity(
+                    include_input_embed=include_input_embed, include_lm_head=True
+                )
+                assign_layers = min(tail_cap, remaining_layers)
+            else:
+                assign_layers = min(base_cap, remaining_layers)
+
+            if assign_layers <= 0:
+                continue
+
+            end_layer = start_layer + assign_layers
+            self.allocate(node, start_layer, end_layer)
+            start_layer = end_layer
+            remaining_layers -= assign_layers
+
+            if remaining_layers == 0:
+                break
+
+        if remaining_layers != 0:
+            raise ValueError(
+                f"Greedy assignment did not cover all layers: remaining {remaining_layers}"
+            )
+
     def list_node_allocations(self) -> List[Tuple[str, int, int]]:
         """List current per-node layer allocations as (node_id, start_layer, end_layer).
 
@@ -542,6 +601,29 @@ class GreedyLayerAllocator(BaseLayerAllocator):
     remaining nodes.
     """
 
+    def init(
+        self,
+        *,
+        look_ahead_enable: bool = True,
+        pipeline_rebalance_strategy: Literal["greedy", "water_filling"] = "water_filling",
+    ) -> None:
+        """Initialize Greedy allocator runtime knobs.
+
+        Args:
+            look_ahead_enable: Toggle the look-ahead optimization when selecting
+                the tail node to close a pipeline.
+            pipeline_rebalance_strategy: Strategy for in-place per-pipeline
+                rebalancing after a pipeline is formed. "greedy" assigns
+                contiguous layers in capacity order; "water_filling" uses
+                proportional water-filling based on compute power.
+
+        Returns:
+            None. Sets internal flags `_look_ahead_enable` and
+            `_pipeline_rebalance_strategy`.
+        """
+        self._look_ahead_enable = look_ahead_enable
+        self._pipeline_rebalance_strategy = pipeline_rebalance_strategy
+
     def global_allocation(self) -> bool:
         """
         Allocate layers to nodes greedily to maximize the number of pipelines.
@@ -557,7 +639,13 @@ class GreedyLayerAllocator(BaseLayerAllocator):
         num_total_layers = self.model_info.num_layers
 
         available_nodes = self.nodes.copy()
+        for n in available_nodes:
+            logger.warning(f"Node {n.node_id} has capacity {n.get_decoder_layer_capacity()}")
         any_assigned = False
+
+        # Read runtime knobs with sensible defaults if `init` wasn't called
+        look_ahead_enabled = getattr(self, "_look_ahead_enable", True)
+        rebalance_strategy = getattr(self, "_pipeline_rebalance_strategy", "water_filling")
 
         while available_nodes:
             total_remaining_capacity = sum(
@@ -579,7 +667,8 @@ class GreedyLayerAllocator(BaseLayerAllocator):
                 is_start = len(pipeline_nodes) == 0
                 # Look-ahead optimization (only for picking the last node to finish a pipeline)
                 look_ahead_possible = (
-                    is_start
+                    look_ahead_enabled
+                    and is_start
                     and current_pipeline_total_capacity - remaining_layers >= num_total_layers + 1
                 )
                 best_fit_idx = -1
@@ -622,7 +711,10 @@ class GreedyLayerAllocator(BaseLayerAllocator):
                     "[Greedy] Built pipeline with %d nodes; adjusting layers",
                     len(pipeline_nodes),
                 )
-                self.adjust_pipeline_layers(pipeline_nodes, assume_sorted=False)
+                if rebalance_strategy == "greedy":
+                    self.adjust_pipeline_layers_greedy(pipeline_nodes)
+                else:
+                    self.adjust_pipeline_layers(pipeline_nodes, assume_sorted=False)
                 any_assigned = True
             else:
                 # Cannot form a complete pipeline with remaining nodes
