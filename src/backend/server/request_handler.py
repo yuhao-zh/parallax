@@ -12,6 +12,17 @@ AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20 * 60 * 60)
 
 
 class RequestHandler:
+    """HTTP request forwarder with scheduler-aware routing and retry logic.
+
+    Behavior for routing resolution:
+    - routing_table is None: scheduler has not decided yet -> treat as error for this attempt
+    - routing_table is []: all pipelines are full now -> retry up to max attempts
+    - routing_table is non-empty: forward to first hop
+    """
+
+    MAX_ROUTING_RETRY = 20
+    RETRY_DELAY_SEC = 5
+
     def __init__(self):
         self.scheduler_manage = None
 
@@ -33,20 +44,46 @@ class RequestHandler:
                 status_code=500,
             )
 
-        try:
-            routing_table = self.scheduler_manage.get_routing_table(request_id, received_ts)
-            logger.info(f"get_routing_table for request {request_id} return: {routing_table}")
-        except Exception as e:
-            logger.exception(f"get_routing_table error: {e}")
-            return JSONResponse(
-                content={"error": "Routing table not found"},
-                status_code=500,
-            )
+        # Try to resolve routing; retry if table is an empty list (capacity full)
+        attempts = 0
+        routing_table = None
+        while attempts < self.MAX_ROUTING_RETRY:
+            try:
+                routing_table = self.scheduler_manage.get_routing_table(request_id, received_ts)
+                logger.info(
+                    f"get_routing_table for request {request_id} return: {routing_table} (attempt {attempts+1})"
+                )
+            except Exception as e:
+                logger.exception(f"get_routing_table error: {e}")
+                return JSONResponse(
+                    content={"error": "Routing table not found"},
+                    status_code=500,
+                )
 
-        if not routing_table or len(routing_table) == 0:
+            # None -> scheduler has not set yet; treat as hard error (no waiting here)
+            if routing_table is None:
+                return JSONResponse(
+                    content={"error": "Routing not ready"},
+                    status_code=503,
+                )
+
+            # Non-empty -> proceed
+            if len(routing_table) > 0:
+                break
+
+            # Empty list -> capacity full now, retry after short delay
+            attempts += 1
+            if attempts < self.MAX_ROUTING_RETRY:
+                # small async delay before re-forwarding
+                import asyncio
+
+                await asyncio.sleep(self.RETRY_DELAY_SEC)
+
+        # If still empty after retries, return 429 Too Many Requests
+        if routing_table is not None and len(routing_table) == 0:
             return JSONResponse(
-                content={"error": "Routing table not found"},
-                status_code=500,
+                content={"error": "All pipelines are busy. Please retry later."},
+                status_code=429,
             )
 
         request_data["routing_table"] = routing_table

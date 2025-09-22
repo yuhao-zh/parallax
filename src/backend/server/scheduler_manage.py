@@ -102,18 +102,24 @@ class SchedulerManage:
         logger.info("RPCConnectionHandler initialized")
 
     def get_routing_table(self, request_id, received_ts):
-        """Block briefly until the scheduler assigns a routing path for the request."""
+        """Block briefly until the scheduler assigns a routing path for the request.
+
+        Distinguish three states via `RequestSignal.routing_table`:
+        - None: not yet decided, keep waiting up to timeout
+        - []: decided but no capacity (pipelines full), return immediately
+        - [..]: valid routing path, return immediately
+        """
         logger.info(f"Routing table requested for request_id={request_id}")
         request = RequestSignal(request_id, received_ts)
         self.scheduler.receive_request(request)
 
-        # 等待最长 5s
+        # 等待最长 5s, 但如果路由表已被设置（包括空列表），则立即返回
         start_time = time.time()
-        while len(request.routing_table) == 0 and (time.time() - start_time) < 5.0:
+        while request.routing_table is None and (time.time() - start_time) < 5.0:
             time.sleep(0.05)
 
         # 返回routing_table
-        if not request.routing_table:
+        if request.routing_table is None:
             logger.info(
                 f"Routing table not ready after {(time.time() - start_time):.2f}s for request_id={request_id}"
             )

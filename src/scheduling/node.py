@@ -43,11 +43,13 @@ class RequestSignal:
 
     - request_id: Unique identifier (hash) for the request
     - received_ts: UNIX timestamp (seconds) when the request was received
+    - routing_table: Set by the scheduler when a path is assigned. Semantics:
+        None -> not assigned yet; [] -> all pipelines full at the moment; [..] -> route
     """
 
     request_id: str
     received_ts: float = field(default_factory=time.time)
-    routing_table: List[str] = field(default_factory=list)
+    routing_table: Optional[List[str]] = None
 
 
 class RooflinePerformanceModel:
