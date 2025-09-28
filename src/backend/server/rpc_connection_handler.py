@@ -28,10 +28,32 @@ class RPCConnectionHandler(ConnectionHandler):
 
     @rpc_stream
     def node_join(self, message):
-        logger.debug(f"receive node_join request: {message}")
+        # node = {
+        #     "http_port": "8000",
+        #     "node_id": "lattica peer id",
+        #     "hardware": {
+        #         "node_id": "lattica peer id",
+        #         "tflops_fp16": 100,
+        #         "memory_gb": 100,
+        #         "memory_bandwidth_gbps": 100,
+        #     },
+        #     "model_name": "",
+        #     "kv_cache_ratio": 0.3,
+        #     "param_hosting_ratio": 0.5,
+        #     "max_concurrent_requests": 16,
+        #     "max_sequence_length": 1024,
+        # }
+        logger.info(f"receive node_join request: {message}")
         try:
             node = self.build_node(message)
-            self.call_url_map[node.node_id] = message.get("call_url")
+
+            try:
+                node_ip = self.lattica_instance.get_peer_addresses(node.node_id)[0].split("/")[2]
+                logger.info(f"get ip for {node.node_id}: {node_ip}")
+            except Exception as e:
+                logger.warning(f"Failed to get ip for {node.node_id}: {e}, using 127.0.0.1")
+                node_ip = "127.0.0.1"
+            self.call_url_map[node.node_id] = f"http://{node_ip}:{message.get('http_port')}"
             self.scheduler.enqueue_join(node)
 
             response = self.wait_layer_allocation(node.node_id, wait_seconds=300)
