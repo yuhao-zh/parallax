@@ -9,6 +9,7 @@ import {
   IconSquare,
   IconSquareFilled,
 } from '@tabler/icons-react';
+import { DotPulse } from './dot-pulse';
 
 export const ChatInput: FC = () => {
   const [
@@ -27,24 +28,30 @@ export const ChatInput: FC = () => {
   });
 
   return (
-    <Stack>
-      <Stack direction='row' sx={{ gap: 1, p: 1 }}>
+    <Stack data-status={status}>
+      {/* <Stack direction='row' sx={{ gap: 1, p: 1 }}>
         {modelName}
-      </Stack>
+      </Stack> */}
       <TextField
         value={input}
         onChange={(event) => setInput(event.target.value)}
         multiline
         maxRows={4}
-        placeholder='Enter your system prompt here...'
+        placeholder='Ask anything...'
         fullWidth
         onKeyDown={onKeyDown}
         slotProps={{
           input: {
             sx: { flexDirection: 'column' },
             endAdornment: (
-              <Stack direction='row' sx={{ alignSelf: 'flex-end', alignItems: 'center', gap: 1 }}>
-                <Button variant='text' startIcon={<IconArrowBackUp />} onClick={clear}>
+              <Stack direction='row' sx={{ alignSelf: 'flex-end', alignItems: 'center', gap: 2 }}>
+                <Button
+                  variant='text'
+                  sx={{ color: 'text.secondary' }}
+                  startIcon={<IconArrowBackUp />}
+                  disabled={status === 'opened' || status === 'generating'}
+                  onClick={clear}
+                >
                   Clear
                 </Button>
                 <Button
@@ -61,7 +68,7 @@ export const ChatInput: FC = () => {
                   }}
                 >
                   {status === 'opened' ?
-                    <IconLoader size='1.25rem' />
+                    <DotPulse size='medium' />
                   : status === 'generating' ?
                     <IconSquareFilled size='1.25rem' />
                   : <IconArrowUp size='1.25rem' />}

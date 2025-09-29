@@ -4,6 +4,8 @@ import { useCluster } from '../../services';
 import { useAlertDialog } from '../mui';
 import { IconBrandGradient } from '../brand';
 import {
+  IconCirclePlus,
+  IconInfoCircle,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
   IconLayoutSidebarRightCollapse,
@@ -78,16 +80,46 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
     },
   ] = useCluster();
 
+  const [dialogWaiting, { open: openWaiting }] = useAlertDialog({
+    color: 'primary',
+    titleIcon: <IconInfoCircle />,
+    title: 'Reconnect your nodes',
+    content: (
+      <Stack sx={{ gap: 7 }}>
+        <Stack sx={{ gap: 1 }}>
+          <Typography variant='body1'>Run join command on your new Node</Typography>
+          <JoinCommand />
+        </Stack>
+        <Stack sx={{ gap: 1 }}>
+          <Typography variant='body1'>Check your live node status</Typography>
+          <Typography variant='body2' color='text.disabled'>
+            After you successfully start the server on the nodes, you should see them show up on the
+            below dashboard.
+          </Typography>
+          <NodeList />
+        </Stack>
+      </Stack>
+    ),
+    confirmLabel: 'Finish',
+  });
+  useEffect(() => {
+    if (clusterStatus === 'waiting') {
+      openWaiting();
+    }
+  }, [clusterStatus, openWaiting]);
+
   const [dialogRebalancing, { open: openRebalancing }] = useAlertDialog({
-    color: 'error',
-    titleIcon: true,
+    color: 'primary',
     title: '',
     content: (
       <>
-        <Typography variant='subtitle1'>Cluster rebalancing</Typography>
-        <Typography variant='body1'>
-          The cluster is rebalancing. Please wait for a moment.
+        <Typography variant='body1'>Cluster rebalancing</Typography>
+        <Typography variant='body2' color='text.disabled'>
+          We have noticed one of your nodes has been disconnected. We are now rebalancing your
+          inference requests onto working nodes. Please wait a few seconds for the cluster to
+          rebalance itself.
         </Typography>
+        <NodeList variant='menu' />
       </>
     ),
     confirmLabel: 'Finish',
@@ -101,13 +133,24 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
   const [sidebarExpanded, setMenuOpen] = useState(true);
 
   const [dialogJoinCommand, { open: openJoinCommand }] = useAlertDialog({
-    color: 'success',
+    color: 'primary',
+    titleIcon: <IconCirclePlus />,
     title: 'Add Nodes',
     content: (
-      <>
-        <Typography variant='subtitle1'>To add nodes, use the join command below.</Typography>
-        <JoinCommand />
-      </>
+      <Stack sx={{ gap: 7 }}>
+        <Stack sx={{ gap: 1 }}>
+          <Typography variant='body1'>Run join command on your new Node</Typography>
+          <JoinCommand />
+        </Stack>
+        <Stack sx={{ gap: 1 }}>
+          <Typography variant='body1'>Check your live node status</Typography>
+          <Typography variant='body2' color='text.disabled'>
+            After you successfully start the server on the nodes, you should see them show up on the
+            below dashboard.
+          </Typography>
+          <NodeList />
+        </Stack>
+      </Stack>
     ),
   });
 
@@ -133,7 +176,6 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
             <Button color='info' startIcon={<IconPlus />} onClick={openJoinCommand}>
               Add Nodes
             </Button>
-            {dialogJoinCommand}
           </Stack>
         )}
       </DrawerLayoutSide>
@@ -145,6 +187,8 @@ export const DrawerLayout: FC<PropsWithChildren> = ({ children }) => {
         </DrawerLayoutHeader>
         <DrawerLayoutContent>{children}</DrawerLayoutContent>
       </DrawerLayoutContainer>
+      {dialogJoinCommand}
+      {dialogWaiting}
       {dialogRebalancing}
     </DrawerLayoutRoot>
   );
