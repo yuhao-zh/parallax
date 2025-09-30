@@ -952,12 +952,21 @@ class Executor:
                 hidden_state_for_req = hidden_states[i : i + 1]
             else:
                 # Other peers get a 3D array of hidden states
-                true_length = int(lengths[i])
-                if hidden_states.ndim == 3:
-                    hidden_state_for_req = hidden_states[i, :true_length, :]
+                if src_request.is_prefill:
+                    true_length = int(lengths[i])
+                    if hidden_states.ndim == 3:
+                        hidden_state_for_req = hidden_states[i, :true_length, :]
+                    else:
+                        hidden_state_for_req = hidden_states[
+                            pre_length : pre_length + true_length, :
+                        ]
+                    pre_length += true_length
                 else:
-                    hidden_state_for_req = hidden_states[pre_length : pre_length + true_length, :]
-                pre_length += true_length
+                    if hidden_states.ndim == 3:
+                        hidden_state_for_req = hidden_states[i, :, :]
+                    else:
+                        hidden_state_for_req = hidden_states[pre_length : pre_length + 1, :]
+                    pre_length += 1
 
             next_req = self._prepare_next_single_request(src_request, hidden_state_for_req)
             batched_requests.append(next_req)
