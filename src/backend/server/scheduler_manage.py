@@ -133,28 +133,39 @@ class SchedulerManage:
         self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs).with_key_path(".")
 
         if len(self.relay_servers) > 0:
-            print(f"Using relay servers: {self.relay_servers}")
-            self.lattica.with_relay_servers(self.relay_servers).with_dcutr(True)
+            logger.info(f"Using relay servers: {self.relay_servers}")
+            self.lattica.with_relay_servers(self.relay_servers).with_dcutr(True).with_protocol("")
 
         if len(self.announce_maddrs) > 0:
-            print(f"Using announce maddrs: {self.announce_maddrs}")
+            logger.info(f"Using announce maddrs: {self.announce_maddrs}")
             self.lattica.with_external_addrs(self.announce_maddrs)
 
         if len(self.initial_peers) > 0:
-            print(f"Using initial peers: {self.initial_peers}")
+            logger.info(f"Using initial peers: {self.initial_peers}")
             self.lattica.with_bootstraps(self.initial_peers)
 
         self.lattica.build()
         logger.debug("Lattica node built")
 
-        if self.lattica.store(
-            "scheduler_peer_id",
-            self.lattica.peer_id(),
-            expiration_time=time.time() + 365 * 24 * 60 * 60,
-        ):
-            logger.info(f"Stored scheduler peer id: {self.lattica.peer_id()}")
-        else:
-            logger.error("Failed to store scheduler peer id")
+        store_success = False
+        for _ in range(10):
+            try:
+                if self.lattica.store(
+                    "scheduler_peer_id",
+                    self.lattica.peer_id(),
+                    expiration_time=time.time() + 365 * 24 * 60 * 60,
+                ):
+                    logger.info(f"Stored scheduler peer id: {self.lattica.peer_id()}")
+                    store_success = True
+                    break
+                logger.warning("Failed to store scheduler peer id, waiting for 10 seconds")
+                time.sleep(10)
+            except Exception as e:
+                logger.error(f"Failed to store scheduler peer id: {e}, waiting for 10 seconds")
+                time.sleep(10)
+
+        if not store_success:
+            logger.error("Failed to store scheduler peer id, after 10 times")
             exit(1)
 
         self.connection_handler = RPCConnectionHandler(

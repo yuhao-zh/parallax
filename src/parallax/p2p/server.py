@@ -180,9 +180,6 @@ class GradientServer:
         max_batch_size: Optional[int] = None,
         max_sequence_length: Optional[int] = None,
     ):
-        assert not (
-            scheduler_addr is not None and len(initial_peers) > 0
-        ), "scheduler_addr and initial_peers are not allowed at the same time"
         self.recv_from_peer_addr = recv_from_peer_addr
         self.send_to_peer_addr = send_to_peer_addr
         self.initial_peers = initial_peers
@@ -220,9 +217,18 @@ class GradientServer:
     def build_lattica(self):
         self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
 
+        if self.scheduler_addr is not None and self.scheduler_addr != "auto":
+            if self.scheduler_addr.startswith("/"):
+                logger.info(f"Using scheduler addr: {self.scheduler_addr}")
+                self.lattica.with_bootstraps([self.scheduler_addr])
+            self.scheduler_peer_id = self.scheduler_addr.split("/")[-1]
+
         if len(self.relay_servers) > 0:
             logger.info(f"Using relay servers: {self.relay_servers}")
             self.lattica.with_relay_servers(self.relay_servers).with_dcutr(True)
+            if self.scheduler_peer_id is not None:
+                logger.info(f"Using protocol: /{self.scheduler_peer_id}")
+                self.lattica.with_protocol("/" + self.scheduler_peer_id)
 
         if len(self.announce_maddrs) > 0:
             logger.info(f"Using announce maddrs: {self.announce_maddrs}")
@@ -231,11 +237,6 @@ class GradientServer:
         if len(self.initial_peers) > 0:
             logger.info(f"Using initial peers: {self.initial_peers}")
             self.lattica.with_bootstraps(self.initial_peers)
-
-        if self.scheduler_addr is not None and self.scheduler_addr != "auto":
-            logger.info(f"Using scheduler addr: {self.scheduler_addr}")
-            self.lattica.with_bootstraps([self.scheduler_addr])
-            self.scheduler_peer_id = self.scheduler_addr.split("/")[-1]
 
         self.lattica.build()
 
@@ -272,7 +273,14 @@ class GradientServer:
                 self.scheduler_stub = RPCConnectionHandler(self.lattica, None).get_stub(
                     self.scheduler_peer_id
                 )
-                response = self.scheduler_stub.node_join(self.get_node_info())
+                node_info = self.get_node_info()
+                if node_info == {}:
+                    logger.error("Failed to get node info, try again after 10 seconds")
+                    del self.lattica
+                    self.lattica = None
+                    time.sleep(10)
+                    return self.run()
+                response = self.scheduler_stub.node_join(node_info)
                 response = response.result(timeout=300)
                 if response == {}:
                     logger.error("Failed to join scheduler")
@@ -508,7 +516,7 @@ class GradientServer:
                 while not self.stop_event.is_set():
                     # Announce the range ID
                     try:
-                        if self.scheduler_addr is not None:
+                        if self.scheduler_peer_id is not None:
                             self.scheduler_stub.node_update(self.get_node_info(is_update=True))
                         else:
                             self.lattica.store(
@@ -540,13 +548,18 @@ class GradientServer:
             all_peers = []
             for _ in range(1 if is_update else 30):
                 all_peers = self.lattica.get_all_peers()
-                if len(all_peers) > 0:
+                if len(all_peers) > 0 and self.scheduler_peer_id in all_peers:
                     break
-                logger.warning("No peers found, waiting for 1 second.")
+                logger.warning(
+                    "No peers found or scheduler peer id not found, waiting for 1 second."
+                )
                 time.sleep(1)
 
-            if len(all_peers) == 0:
-                logger.warning("No peers found, send empty rtt_to_nodes.")
+            if len(all_peers) == 0 or self.scheduler_peer_id not in all_peers:
+                logger.warning(
+                    "No peers found or scheduler peer id not found, return empty node info."
+                )
+                return {}
 
             for peer_id in all_peers:
                 rtt = None
