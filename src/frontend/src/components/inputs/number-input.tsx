@@ -27,7 +27,7 @@ export const NumberInput: FC<NumberInputProps> = ({
 
   const onChange = useRefCallback<ChangeEventHandler<HTMLTextAreaElement | HTMLInputElement>>(
     (event) => {
-      event.target.value = `${Math.max(0, parseInt(event.target.value) || 0)}`;
+      event.target.value = `${Math.max(1, parseInt(event.target.value) || 1)}`;
       onChangeProp?.(event);
     },
   );
@@ -55,7 +55,7 @@ export const NumberInput: FC<NumberInputProps> = ({
       return;
     }
     const prev = Number(input.value);
-    const next = Math.max(0, prev - 1);
+    const next = Math.max(1, prev - 1);
     input.value = next.toString();
     triggerChange(next);
   });
@@ -66,7 +66,7 @@ export const NumberInput: FC<NumberInputProps> = ({
       return;
     }
     const prev = Number(input.value);
-    const next = Math.max(0, prev + 1);
+    const next = Math.max(1, prev + 1);
     input.value = next.toString();
     triggerChange(next);
   });
@@ -75,6 +75,12 @@ export const NumberInput: FC<NumberInputProps> = ({
     <OutlinedInput
       {...rest}
       type='number'
+      sx={{
+        '& input': {
+          textAlign: 'center',
+          width: '2.5rem',
+        },
+      }}
       // startAdornment={
       //   <InputAdornment position='start'>
       //     <IconButton>
@@ -109,7 +115,7 @@ export const NumberInput: FC<NumberInputProps> = ({
         input: {
           step: 1,
           sx: { textAlign: 'center', ...slotProps?.input?.sx },
-          min: 0,
+          min: 1,
           ...slotProps?.input,
         },
         ...slotProps,

@@ -26,8 +26,12 @@ export const Router = () => {
   ] = useCluster();
 
   useEffect(() => {
+    if (pathname === '/') {
+      navigate(PATH_SETUP);
+      return;
+    }
     debugLog('pathname', pathname, 'cluster status', status);
-    if (status === 'idle' && !pathname.startsWith(PATH_SETUP)) {
+    if (status === 'idle' && pathname.startsWith(PATH_CHAT)) {
       debugLog('navigate to /setup');
       navigate(PATH_SETUP);
       return;
