@@ -1,8 +1,8 @@
-<!-- <div align="center">
+<div align="center">
   <p align="center">
-    <img src="https://raw.githubusercontent.com/LMCache/LMCache/dev/asset/logo.png" width="720" alt="lmcache logo">
+    <img src="docs/images/parallax.jpg" width="720">
   </p>
-</div> -->
+</div>
 
 # Parallax
 A fully decentralized inference engine developed by [Gradient](https://gradient.network). Parallax lets you build your own AI cluster for model inference onto a set of distributed nodes despite their varying configuration and physical location.
@@ -117,17 +117,17 @@ parallax run
 parallax run
 ```
 
-#### Step 2: Select model config
+#### Step 2: Set cluster and model config
 
 Open http://localhost:3001 and you should see the setup interface.
 
-![Model select](docs/images/model-selection.png)
+![Model select](docs/images/node_join.png)
 
 Select your desired node and model config and click continue.
 
-#### Step 3: Join each distributed nodes
+#### Step 3: Connect your nodes
 
-Copy the generated join command line to your node and run.
+Copy the generated join command line to your node and run. For remote connection, you can find your scheduler-address in the scheduler logs.
 
 ```sh
 # local area network env
@@ -138,7 +138,7 @@ parallax join -s {scheduler-address}
 parallax join -s 12D3KooWLX7MWuzi1Txa5LyZS4eTQ2tPaJijheH8faHggB9SxnBu
 ```
 
-![Node join](docs/images/node-join.png)
+![Node join](docs/images/node_config.png)
 
 You should see your nodes start to show up with their status. Wait until all nodes are successfully connected, and you will automatically be directed to the chat interface.
 
@@ -146,7 +146,7 @@ You should see your nodes start to show up with their status. Wait until all nod
 
 Done! You have your own AI cluster now.
 
-![Chat](docs/images/chat.png)
+![Chat](docs/images/chat_interface.png)
 
 ### Without frontend
 #### Step 1: Launch scheduler
@@ -160,7 +160,7 @@ parallax run -m Qwen/Qwen3-0.6B -n 2
 ```
 Please notice and record the scheduler ip4 address generated in the terminal.
 
-#### Step 2: Join each distributed nodes
+#### Step 2: Connect your nodes
 For each distributed nodes including the main node, open a terminal and join the server with the scheduler address.
 ```sh
 # local area network env
