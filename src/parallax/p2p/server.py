@@ -9,6 +9,7 @@ It is used to handle the communication between the peers, and communicate with t
 
 import dataclasses
 import enum
+import json
 import logging
 import threading
 import time
@@ -17,7 +18,7 @@ from typing import List, Optional
 import dijkstar
 import httpx
 import zmq
-from lattica import ConnectionHandler, Lattica, rpc_method, rpc_stream
+from lattica import ConnectionHandler, Lattica, rpc_method, rpc_stream, rpc_stream_iter
 
 from backend.server.rpc_connection_handler import RPCConnectionHandler
 from parallax.p2p.proto import forward_pb2
@@ -105,6 +106,7 @@ class TransformerConnectionHandler(ConnectionHandler):
         send_to_peer_addr: str,
         block_start_index: int,
         block_end_index: int,
+        http_port: Optional[int] = None,
         notify_url: Optional[str] = None,
     ):
         # Initialize the base class
@@ -113,6 +115,7 @@ class TransformerConnectionHandler(ConnectionHandler):
         self.send_to_peer_addr = send_to_peer_addr
         self.block_start_index = block_start_index
         self.block_end_index = block_end_index
+        self.http_port = http_port
         self.notify_url = notify_url
         self._recv_from_peer = None
         self._recv_from_peer_lock = threading.Lock()
@@ -152,6 +155,33 @@ class TransformerConnectionHandler(ConnectionHandler):
         except Exception as e:
             logger.exception(f"Error in rpc_abort: {e}")
         return forward_pb2.AbortResponse()
+
+    @rpc_stream_iter
+    def chat_completion(
+        self,
+        request,
+    ):
+        """Handle chat completion request"""
+        logger.debug(f"Chat completion request: {request}, type: {type(request)}")
+        try:
+            if request.get("stream", False):
+                with httpx.Client(timeout=20 * 60 * 60) as client:
+                    with client.stream(
+                        "POST",
+                        f"http://localhost:{self.http_port}/v1/chat/completions",
+                        json=request,
+                    ) as response:
+                        for chunk in response.iter_bytes():
+                            if chunk:
+                                yield chunk
+            else:
+                with httpx.Client(timeout=20 * 60 * 60) as client:
+                    response = client.post(
+                        f"http://localhost:{self.http_port}/v1/chat/completions", json=request
+                    ).json()
+                    yield json.dumps(response).encode()
+        except Exception as e:
+            logger.exception(f"Error in chat completion: {e}")
 
 
 class GradientServer:
@@ -313,6 +343,7 @@ class GradientServer:
             send_to_peer_addr=self.send_to_peer_addr,
             block_start_index=self.block_start_index,
             block_end_index=self.block_end_index,
+            http_port=self.http_port,
             notify_url=self.notify_url,
         )  # thread
 
@@ -546,7 +577,7 @@ class GradientServer:
         if time.time() - self.rtt_last_update > self.rtt_update_interval:
             self.rtts = {}
             all_peers = []
-            for _ in range(1 if is_update else 30):
+            for _ in range(1 if is_update else 10):
                 all_peers = self.lattica.get_all_peers()
                 if len(all_peers) > 0 and self.scheduler_peer_id in all_peers:
                     break
@@ -577,7 +608,6 @@ class GradientServer:
             self.rtt_last_update = time.time()
 
         info = {
-            "http_port": f"{self.http_port}",
             "node_id": self.lattica.peer_id(),
             "hardware": detect_node_hardware(self.lattica.peer_id()),
             "kv_cache_ratio": 0.25,

@@ -41,6 +41,17 @@ def get_project_root():
     return Path.cwd()
 
 
+def get_relay_params():
+    return [
+        "--relay-servers",
+        "/dns4/relay-lattica.gradient.network/udp/18080/quic-v1/p2p/12D3KooWDaqDAsFupYvffBDxjHHuWmEAJE4sMDCXiuZiB8aG8rjf",
+        "/dns4/relay-lattica.gradient.network/tcp/18080/p2p/12D3KooWDaqDAsFupYvffBDxjHHuWmEAJE4sMDCXiuZiB8aG8rjf",
+        "--initial-peers",
+        "/dns4/bootstrap-lattica.gradient.network/udp/18080/quic-v1/p2p/12D3KooWJHXvu8TWkFn6hmSwaxdCLy4ZzFwr4u5mvF9Fe2rMmFXb",
+        "/dns4/bootstrap-lattica.gradient.network/tcp/18080/p2p/12D3KooWJHXvu8TWkFn6hmSwaxdCLy4ZzFwr4u5mvF9Fe2rMmFXb",
+    ]
+
+
 def run_command(args):
     """Run the scheduler (equivalent to scripts/start.sh)."""
     check_python_version()
@@ -68,12 +79,7 @@ def run_command(args):
     if args.init_nodes_num:
         cmd.extend(["--init-nodes-num", str(args.init_nodes_num)])
     if args.use_relay:
-        cmd.extend(
-            [
-                "--relay-servers",
-                "/dns4/relay-lattica.gradient.network/udp/18080/quic-v1/p2p/12D3KooWDaqDAsFupYvffBDxjHHuWmEAJE4sMDCXiuZiB8aG8rjf /dns4/relay-lattica.gradient.network/tcp/18080/p2p/12D3KooWDaqDAsFupYvffBDxjHHuWmEAJE4sMDCXiuZiB8aG8rjf",
-            ]
-        )
+        cmd.extend(get_relay_params())
 
     logger.info(f"Running command: {' '.join(cmd)}")
 
@@ -146,18 +152,8 @@ def join_command(args):
     if args.use_relay or (
         args.scheduler_addr != "auto" and not str(args.scheduler_addr).startswith("/")
     ):
-        cmd.extend(
-            [
-                "--relay-servers",
-                "/dns4/relay-lattica.gradient.network/udp/18080/quic-v1/p2p/12D3KooWDaqDAsFupYvffBDxjHHuWmEAJE4sMDCXiuZiB8aG8rjf /dns4/relay-lattica.gradient.network/tcp/18080/p2p/12D3KooWDaqDAsFupYvffBDxjHHuWmEAJE4sMDCXiuZiB8aG8rjf",
-            ]
-        )
-        cmd.extend(
-            [
-                "--initial-peers",
-                "/dns4/bootstrap-lattica.gradient.network/udp/18080/quic-v1/p2p/12D3KooWJHXvu8TWkFn6hmSwaxdCLy4ZzFwr4u5mvF9Fe2rMmFXb /dns4/bootstrap-lattica.gradient.network/tcp/18080/p2p/12D3KooWJHXvu8TWkFn6hmSwaxdCLy4ZzFwr4u5mvF9Fe2rMmFXb",
-            ]
-        )
+        logger.info("Using public relay servers")
+        cmd.extend(get_relay_params())
 
     logger.info(f"Running command: {' '.join(cmd)}")
     logger.info(f"Scheduler address: {args.scheduler_addr}")
