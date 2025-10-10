@@ -10,6 +10,10 @@ and performance estimation decisions.
 from dataclasses import dataclass
 from typing import Optional
 
+from parallax_utils.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 @dataclass
 class ModelInfo:
@@ -29,6 +33,7 @@ class ModelInfo:
     ffn_num_projections: int = 3
     num_local_experts: Optional[int] = None
     num_experts_per_tok: Optional[int] = None
+    moe_intermediate_dim: Optional[int] = None
     tie_embedding: bool = False
     # Default int8
     param_bytes_per_element: float = 1
@@ -49,6 +54,11 @@ class ModelInfo:
         else:
             self.head_size_k = self.head_size
         self.head_size_v = self.head_size
+
+    @property
+    def q_dim(self) -> int:
+        """Return query head dim."""
+        return self.num_attention_heads * self.head_size
 
     @property
     def v_dim(self) -> int:
@@ -143,17 +153,17 @@ class ModelInfo:
             source_seq_len: Source sequence length (prompt tokens)
         """
         # Attention params
-        qo_params = self.param_bytes_per_element * self.hidden_dim * self.hidden_dim
-        kv_params = self.param_bytes_per_element * self.hidden_dim * (self.k_dim + self.v_dim) // 2
+        qo_params = self.param_bytes_per_element * self.hidden_dim * self.q_dim * 2
+        kv_params = self.param_bytes_per_element * self.hidden_dim * (self.k_dim + self.v_dim)
         attention_params = qo_params + kv_params
 
         # FFN params
-        ffn_params = (
-            self.param_bytes_per_element
-            * self.ffn_num_projections
-            * self.hidden_dim
-            * self.intermediate_dim
-        )
+        ffn_params = self.param_bytes_per_element * self.ffn_num_projections * self.hidden_dim
+        if self.moe_intermediate_dim is not None:
+            ffn_params *= self.moe_intermediate_dim
+        else:
+            ffn_params *= self.intermediate_dim
+
         if roofline:
             expected_experts = self.expected_num_activated_experts(
                 batch_size=batch_size, target_seq_len=target_seq_len
@@ -168,6 +178,12 @@ class ModelInfo:
                 ffn_params *= self.num_local_experts
             kv_cache_size = 0
 
+        logger.debug(
+            "Model Info ffn_params=%d, kv_cache_size=%d, attention_params=%d",
+            ffn_params,
+            kv_cache_size,
+            attention_params,
+        )
         return round(ffn_params + kv_cache_size + attention_params)
 
     def lm_head_flops(self, target_seq_len: int = 1) -> int:
