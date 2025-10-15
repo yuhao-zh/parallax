@@ -14,7 +14,7 @@ import {
   List as MuiList,
   ListItem as MuiListItem,
   ListItemIcon as MuiListItemIcon,
-  ListItemText,
+  ListItemText as MuiListItemText,
   MenuList,
   Paper,
   Skeleton,
@@ -24,8 +24,10 @@ import {
   Stack,
   Box,
   Divider,
+  type ListProps,
+  type StackProps,
 } from '@mui/material';
-import { useCluster, type NodeInfo, type NodeStatus } from '../../services';
+import { useChat, useCluster, type NodeInfo, type NodeStatus } from '../../services';
 
 const NodeListRoot = styled(Stack)(({ theme }) => {
   const { spacing } = theme;
@@ -33,15 +35,16 @@ const NodeListRoot = styled(Stack)(({ theme }) => {
     position: 'relative',
     flex: 1,
     gap: spacing(1.5),
-    overflow: 'hidden',
+    overflowX: 'hidden',
+    overflowY: 'auto',
   };
 });
 
 const List = styled(MuiList)<{ variant: NodeListVariant }>(({ theme, variant }) => {
   const { spacing } = theme;
   return {
-    gap: spacing(variant === 'list' ? 1.5 : 3.5),
-    overflowY: 'auto',
+    // menu no need gap, use dash line to separate nodes
+    gap: spacing(variant === 'list' ? 1.5 : 0),
   };
 });
 
@@ -49,22 +52,32 @@ const ListItem = styled(MuiListItem)(({ theme }) => {
   const { spacing } = theme;
   return {
     flex: 'none',
+    gap: spacing(1),
+    backgroundColor: 'transparent',
     padding: spacing(2),
-    overflow: 'hidden',
+    overflow: 'visible',
   };
 }) as typeof MuiListItem;
 
 const ListItemIcon = styled(MuiListItemIcon)(({ theme }) => {
   return {
+    color: 'inherit',
     fontSize: '1.5rem',
-    width: '2.75rem',
-    height: '2.75rem',
-    borderRadius: '50%',
+    width: '1em',
+    height: '1em',
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
   };
 }) as typeof MuiListItemIcon;
+
+const ListItemText = styled(MuiListItemText)(({ theme }) => {
+  return {
+    position: 'relative',
+    display: 'block',
+    height: '100%',
+  };
+}) as typeof MuiListItemText;
 
 const ListItemStatus = styled(motion.div)<{ variant: NodeListVariant }>(({ theme, variant }) => {
   return {
@@ -93,6 +106,44 @@ const STATUS_ICON_MAP: Record<
   failed: IconX,
 };
 
+const DashRoot = styled(Box)(({ theme }) => {
+  const { spacing } = theme;
+  return {
+    position: 'relative',
+    width: '1.5rem',
+    height: '3.25rem', // For dash array last position, must to be minus 0.25rem(4px)
+    overflow: 'hidden',
+  };
+});
+
+const Dash: FC<{ animate?: boolean }> = ({ animate }) => {
+  const width = 2;
+  const height = 256;
+  return (
+    <DashRoot>
+      <svg
+        style={{ position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)' }}
+        width={width}
+        height={height}
+        viewBox={`0 0 2 ${height}`}
+        fill='none'
+      >
+        <line x1='1' y1='0' x2='1' y2={height} stroke='#9B9B9B' strokeWidth='2' strokeDasharray='4'>
+          {animate && (
+            <animate
+              attributeName='stroke-dashoffset'
+              from={height}
+              to='0'
+              dur={`${height / 32}s`}
+              repeatCount='indefinite'
+            ></animate>
+          )}
+        </line>
+      </svg>
+    </DashRoot>
+  );
+};
+
 const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node }) => {
   const { id, status, gpuName, gpuMemory } = node || { status: 'waiting' };
   const { palette } = useTheme();
@@ -111,17 +162,35 @@ const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node
       sx={{
         opacity,
         padding: variant === 'menu' ? 0 : undefined,
-        backgroundColor: 'transparent',
-        gap: 1,
+        height: variant === 'menu' ? '2.5rem' : undefined,
       }}
     >
-      <IconDevices2 size={'1.5rem'}/>
+      <ListItemIcon>
+        <IconDevices2 />
+      </ListItemIcon>
 
       <ListItemText>
         {(node && (
-          <Typography variant='body1' sx={{ fontWeight: 500 }}>
-            {gpuName} {gpuMemory}GB
-          </Typography>
+          <Stack
+            sx={
+              variant === 'menu' ?
+                {
+                  position: 'absolute',
+                  top: '50%',
+                  left: 0,
+                  right: 0,
+                  transform: 'translateY(-50%)',
+                }
+              : undefined
+            }
+          >
+            <Typography variant='body1' sx={{ fontWeight: 500 }}>
+              {gpuName} {gpuMemory}GB
+            </Typography>
+            {/* <Typography variant='caption' color='text.disabled'>
+              Rancho Cordova, United States
+            </Typography> */}
+          </Stack>
         )) || <Skeleton width='8rem' height='1.25rem' />}
         {/* {(node && (
           <Typography
@@ -150,7 +219,7 @@ const Node: FC<{ variant: NodeListVariant; node?: NodeInfo }> = ({ variant, node
           variant={variant}
         >
           {variant === 'list' && <IconStatus size={18} />}
-          {variant === 'menu' && <IconCircleFilled size={10}/>}
+          {variant === 'menu' && <IconCircleFilled size={10} />}
         </ListItemStatus>
       )}
     </ListItem>
@@ -163,35 +232,36 @@ export interface NodeListProps {
   variant?: NodeListVariant;
 }
 
-export const NodeList: FC<NodeListProps> = ({ variant = 'list' }) => {
+export const NodeList: FC<NodeListProps & StackProps> = ({ variant = 'list', ...rest }) => {
   const [
     {
       clusterInfo: { initNodesNumber },
       nodeInfoList,
     },
   ] = useCluster();
+  const [{ status: chatStatus }] = useChat();
 
   const { length: nodesNumber } = nodeInfoList;
   // const nodesNumber = 0;
 
   return (
-    <NodeListRoot>
-      {variant === 'menu' && (
-        <Box
-          sx={{
-            position: 'absolute',
-            top: '1.375rem',
-            bottom: '1.375rem',
-            left: '0.75rem',
-            borderLeft: '1px dashed',
-            borderColor: '#9B9B9BFF',
-          }}
-        />
-      )}
+    <NodeListRoot {...rest}>
       <List variant={variant}>
-        {nodeInfoList.map((node) => (
-          <Node key={node.id} variant={variant} node={node} />
-        ))}
+        {nodeInfoList.map((node, index) => [
+          variant === 'menu' && index > 0 && (
+            <Dash key={`${node.id}-dash`} animate={chatStatus === 'generating'} />
+          ),
+          <Node key={node.id} variant={variant} node={node} />,
+
+          // <Dash key={`${node.id}-dash-mock-0`} animate={chatStatus === 'generating'} />,
+          // <Node key={`${node.id}-mock-0`} variant={variant} node={node} />,
+
+          // <Dash key={`${node.id}-dash-mock-1`} animate={chatStatus === 'generating'} />,
+          // <Node key={`${node.id}-mock-1`} variant={variant} node={node} />,
+
+          // <Dash key={`${node.id}-dash-mock-2`} animate={chatStatus === 'generating'} />,
+          // <Node key={`${node.id}-mock-2`} variant={variant} node={node} />,
+        ])}
         {initNodesNumber > nodesNumber
           && Array.from({ length: initNodesNumber - nodesNumber }).map((_, index) => (
             <Node key={index} variant={variant} />
