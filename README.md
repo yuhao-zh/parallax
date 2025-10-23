@@ -1,12 +1,8 @@
 <div align="center">
   <p align="center">
-    <img src="docs/images/parallax.jpg" width="720">
+    <img src="docs/images/parallax.png" width="720">
   </p>
 </div>
-
-# Parallax
-A fully decentralized inference engine developed by [Gradient](https://gradient.network). Parallax lets you build your own AI cluster for model inference onto a set of distributed nodes despite their varying configuration and physical location.
-<!-- <h3> -->
 
 | [**Gradient**](https://gradient.network)
 | [**Blog**](https://gradient.network/blog/parallax-world-inference-engine)
@@ -14,18 +10,20 @@ A fully decentralized inference engine developed by [Gradient](https://gradient.
 | [**Discord**](https://discord.gg/gradientnetwork)
 | [**Arxiv**](https://arxiv.org/pdf/2509.26182v1)
 
-🔥 **NEW: Parallax version 0.0.1 has been released!**
+## News
+- [2025/10] 🔥 Parallax version 0.0.01 has been released!
 
-<!-- </h3> -->
+## About
+A fully decentralized inference engine developed by [Gradient](https://gradient.network). Parallax lets you build your own AI cluster for model inference onto a set of distributed nodes despite their varying configuration and physical location. Its core features include:
 
-## Features
-* Run LLM at home with personal devices.
-* Cross-platform support.
-* Pipeline parallel model sharding.
-* Dynamic KV cache management + continuous batching for MAC.
-* Dynamic request scheduling and routing for high performance.
+- **Host local LLM on personal devices**
+- **Cross-platform support**
+- **Pipeline parallel model sharding**
+- **Dynamic KV cache management & continuous batching for Mac**
+- **Dynamic request scheduling and routing for high performance**
 
-## Backend Architecture
+The backend architecture:
+
 * P2P communication powered by [Lattica](https://github.com/GradientHQ/lattica)
 * GPU backend powered by [SGLang](https://github.com/sgl-project/sglang)
 * MAC backend powered by [MLX LM](https://github.com/ml-explore/mlx-lm)
@@ -116,7 +114,7 @@ docker run -it --gpus all --network host gradientservice/parallax:latest-hopper 
 ```
 The container starts under parallax workspace and you should be able to run parallax directly.
 
-## Getting started
+## Getting Started
 
 We will walk through you the easiest way to quickly set up your own AI cluster
 
