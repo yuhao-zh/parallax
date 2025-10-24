@@ -79,7 +79,6 @@ if __name__ == "__main__":
             if args.start_layer == 0:
                 http_server_process = launch_http_server(args)
             executor = Executor.create_from_args(args)
-            node_chat_http_server_process = launch_node_chat_http_server(args)
             launch_p2p_server(
                 initial_peers=args.initial_peers,
                 scheduler_addr=args.scheduler_addr,
