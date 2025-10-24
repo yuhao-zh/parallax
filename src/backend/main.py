@@ -14,6 +14,7 @@ from backend.server.scheduler_manage import SchedulerManage
 from backend.server.server_args import parse_args
 from backend.server.static_config import get_model_list, get_node_join_command
 from common.file_util import get_project_root
+from common.version_check import check_latest_release
 from parallax_utils.ascii_anime import display_parallax_run
 from parallax_utils.logging_config import get_logger, set_log_level
 
@@ -127,6 +128,7 @@ if __name__ == "__main__":
     logger.info(f"args: {args}")
     if args.log_level != "DEBUG":
         display_parallax_run()
+    check_latest_release()
 
     scheduler_manage = SchedulerManage(
         initial_peers=args.initial_peers,
