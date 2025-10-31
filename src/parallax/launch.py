@@ -23,26 +23,11 @@ from parallax.p2p.server import ServerState, launch_p2p_server
 from parallax.server.executor import Executor
 from parallax.server.http_server import launch_http_server
 from parallax.server.server_args import parse_args
-from parallax.utils.utils import get_current_device
 from parallax_utils.ascii_anime import display_parallax_join
 from parallax_utils.logging_config import get_logger, set_log_level
 
 logger = get_logger("parallax.launch")
 
-"""Currently hard code model name for MAC"""
-MLX_MODEL_NAME_MAP = {
-    "openai/gpt-oss-20b": "mlx-community/gpt-oss-20b-MXFP4-Q8",
-    "openai/gpt-oss-120b": "mlx-community/gpt-oss-120b-4bit",
-    "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8": "mlx-community/Qwen3-Next-80B-A3B-Instruct-8bit",
-    "Qwen/Qwen3-Next-80B-A3B-Thinking-FP8": "mlx-community/Qwen3-Next-80B-A3B-Thinking-8bit",
-    "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8": "mlx-community/Qwen3-235B-A22B-Instruct-2507-4bit",
-    "Qwen/Qwen3-235B-A22B-Thinking-2507-FP8": "mlx-community/Qwen3-235B-A22B-Thinking-2507-4bit",
-    "Qwen/Qwen3-235B-A22B-GPTQ-Int4": "mlx-community/Qwen3-235B-A22B-4bit",
-    "moonshotai/Kimi-K2-Instruct": "mlx-community/Kimi-K2-Instruct-4bit",
-    "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct": "mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx",
-    "MiniMaxAI/MiniMax-M2": "mlx-community/MiniMax-M2-4bit",
-    "zai-org/GLM-4.6": "mlx-community/GLM-4.6-4bit",
-}
 
 if __name__ == "__main__":
     multiprocessing.set_start_method("spawn", force=True)
@@ -64,12 +49,6 @@ if __name__ == "__main__":
 
         logger.debug(f"executor_input_addr: {args.executor_input_ipc}")
         logger.debug(f"executor_output_addr: {args.executor_output_ipc}")
-        # Hard code for mlx-community models
-        if get_current_device() == "mlx":
-            mlx_model_repo = MLX_MODEL_NAME_MAP.get(args.model_path, None)
-            if mlx_model_repo is not None:
-                args.model_path = mlx_model_repo
-                logger.debug(f"Replace mlx model path: {mlx_model_repo}")
         if args.scheduler_addr is None:
             if args.log_level != "DEBUG":
                 display_parallax_join(args.model_path)
@@ -122,11 +101,6 @@ if __name__ == "__main__":
             args.end_layer = gradient_server.block_end_index
             args.model_path = gradient_server.model_name
             # Hard code for mlx-community models
-            if get_current_device() == "mlx":
-                mlx_model_repo = MLX_MODEL_NAME_MAP.get(args.model_path, None)
-                if mlx_model_repo is not None:
-                    args.model_path = mlx_model_repo
-                    logger.debug(f"Replace mlx model path: {mlx_model_repo}")
             logger.debug(
                 f"Start Executor with start_layer: {args.start_layer}, end_layer: {args.end_layer}"
             )
