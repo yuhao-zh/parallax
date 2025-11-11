@@ -283,6 +283,10 @@ class Executor:
                 self.zmq_context, zmq.PUSH, executor_output_ipc_addr, bind=False
             )
 
+        # --- Warmup for JIT Compilation ---
+        if self.device == "mlx":
+            self._warmup_model()
+
     @classmethod
     def create_from_args(cls, args: argparse.Namespace, gradient_server=None):
         """Create executor from command line arguments."""
@@ -573,6 +577,7 @@ class Executor:
         self, batched_requests: List[Request]
     ) -> Optional[Dict[str, Any]]:
         """Prepares inputs for ShardedModel from a batch of decode requests."""
+        prep_start_time = time.time()
         batch_size = len(batched_requests)
         if batch_size == 0:
             return None
@@ -635,6 +640,12 @@ class Executor:
             "requests": batched_requests,
             "state_cache": (states0, states1),
         }
+        # Force evaluation of all prepared tensors to get accurate timing
+        mx.eval(ret)
+        prep_end_time = time.time()
+        logger.debug(
+            f"Accurate batch preparation took {(prep_end_time - prep_start_time) * 1000:.2f} ms for {batch_size} requests."
+        )
         logger.debug(f"Prepared MLX decode batch (size={batch_size})")
         return ret
 
@@ -657,6 +668,11 @@ class Executor:
 
         prefill_reqs: List[Request] = []
         decode_reqs: List[Request] = []
+        prefill_batch: Optional[Dict[str, Any]] = None
+        decode_batch: Optional[Dict[str, Any]] = None
+        mx.eval(decode_batch)
+        start_time = time.time()
+        logger.debug("Preparing batch inputs start...")
         for req in batched_requests:
             if req.is_prefill:
                 prefill_reqs.append(req)
@@ -674,6 +690,11 @@ class Executor:
             logger.debug(f"Prepared prefill batch with {len(prefill_batch['requests'])} requests.")
         if decode_batch is not None:
             logger.debug(f"Prepared decode batch with {len(decode_batch['requests'])} requests.")
+        mx.eval(decode_batch)
+        end_time = time.time()
+        logger.debug(
+            f"Batch preparation took {(end_time - start_time) * 1000:.2f} ms for {len(batched_requests)} requests."
+        )
         return {
             "prefill_batch": prefill_batch,
             "decode_batch": decode_batch,
@@ -1208,30 +1229,29 @@ class Executor:
                     if prepared_inputs_dict and prepared_inputs_dict.get(batch_type):
                         prepared_inputs = prepared_inputs_dict[batch_type]
 
-                        start_time = time.time()
+                        # --- Accurate timing for process_batch ---
+                        process_start_time = time.time()
                         output = self.process_batch(
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
                         )
-                        # Update metrics with per-layer latency sample (throttled by decode steps)
-                        if batch_type == "decode_batch":
-                            try:
-                                self._decode_steps_since_metric += len(prepared_inputs["requests"])
-                                if (
-                                    self._decode_steps_since_metric
-                                    >= self.layer_latency_update_every
-                                ):
-                                    elapsed_ms = (time.time() - start_time) * 1000.0
-                                    assert self.num_shard_layers > 0
-                                    per_layer_ms = elapsed_ms / float(self.num_shard_layers)
-                                    update_metrics(layer_latency_ms_sample=per_layer_ms)
-                                    self._decode_steps_since_metric = 0
-                            except Exception:
-                                pass
-                        # 7. Prepare requests for the next stage in the pipeline
+                        mx.eval(output)  # Force GPU to finish computation
+                        process_end_time = time.time()
+                        logger.debug(
+                            f"Accurate process_batch took {(process_end_time - process_start_time) * 1000:.2f} ms"
+                        )
+
+                        # --- Accurate timing for _prepare_next_batch_requests ---
+                        prepare_next_start_time = time.time()
                         next_batch = self._prepare_next_batch_requests(
                             requests=prepared_inputs["requests"],
                             hidden_states=output,
                             lengths=prepared_inputs["lengths"],
+                        )
+                        # Force evaluation of tensors within next_batch (e.g., hidden_states after slicing)
+                        mx.eval(next_batch)
+                        prepare_next_end_time = time.time()
+                        logger.debug(
+                            f"Accurate _prepare_next_batch_requests took {(prepare_next_end_time - prepare_next_start_time) * 1000:.2f} ms"
                         )
 
                         # 8. Dispatch to the appropriate destination
@@ -1248,7 +1268,7 @@ class Executor:
                             )
                             logger.debug(
                                 f"Processed batch of type {batch_type} with {len(next_batch)} requests "
-                                f"in {(time.time() - start_time) * 1000:.3f} ms"
+                                f"in {(time.time() - process_start_time) * 1000:.3f} ms"
                             )
 
             except Exception as e:
@@ -1290,6 +1310,74 @@ class Executor:
             logger.debug(f"Error closing sockets (may already be closed): {e}")
 
         logger.debug("Executor shutdown complete.")
+
+    def _warmup_model(self):
+        """
+        Performs a warmup run to trigger JIT compilation of the model,
+        avoiding latency on the first real request.
+        """
+        logger.debug("Starting model warmup for JIT compilation...")
+        try:
+            # Create a dummy batch for a decode step, which is the most common operation.
+            batch_size = self.scheduler.max_batch_size
+            # Dummy inputs for a single-token decode step
+            dummy_tokens = mx.zeros((batch_size, 1), dtype=mx.int32)
+
+            # The sequence length of the cache can be arbitrary for warmup, e.g., 128
+            # Shape: (num_layers, B, num_kv_heads, seq_len, head_dim)
+            # Note: MLX cache format is different from the model's forward which expects (B, num_layers, ...)
+            # We create a cache that matches what model_shard expects as input.
+            cache_seq_len = 128
+            dummy_k_cache = mx.zeros(
+                (
+                    batch_size,
+                    self.num_shard_layers,
+                    self.num_key_value_heads,
+                    cache_seq_len,
+                    self.head_dim,
+                ),
+                dtype=self.dtype,
+            )
+            dummy_v_cache = mx.zeros(
+                (
+                    batch_size,
+                    self.num_shard_layers,
+                    self.num_key_value_heads,
+                    cache_seq_len,
+                    self.head_dim,
+                ),
+                dtype=self.dtype,
+            )
+            dummy_cache_tuple = (dummy_k_cache, dummy_v_cache)
+
+            # Mask for attention with current token
+            dummy_mask = mx.zeros((batch_size, 1, 1, cache_seq_len + 1), dtype=self.dtype)
+            dummy_lengths = mx.array([cache_seq_len] * batch_size)
+
+            # Perform a forward pass
+            if self.using_state_cache:
+                _, _ = self.model_shard(
+                    h_or_tokens=dummy_tokens,
+                    cache=dummy_cache_tuple,
+                    lengths=dummy_lengths,
+                    mask=dummy_mask,
+                    state_cache=(None, None),
+                    using_state_cache=True,
+                )
+            else:
+                hidden_states, (k_caches, v_caches) = self.model_shard(
+                    h_or_tokens=dummy_tokens,
+                    cache=dummy_cache_tuple,
+                    lengths=dummy_lengths,
+                    mask=dummy_mask,
+                    using_state_cache=False,
+                )
+                # Force compilation and execution
+                mx.eval(hidden_states, k_caches, v_caches)
+
+            logger.debug("Model warmup completed.")
+        except Exception as e:
+            logger.warning(f"Model warmup failed: {e}. First request may be slow.")
 
 
 def create_executor_config(args: argparse.Namespace, gradient_server=None):
