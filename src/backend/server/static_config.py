@@ -168,6 +168,8 @@ def get_model_list():
 def estimate_vram_gb_required(model_info):
     if model_info is None:
         return 0
+
+    param_hosting_ratio = 0.65
     return (
         (
             model_info.embedding_io_bytes
@@ -177,6 +179,7 @@ def estimate_vram_gb_required(model_info):
         / 1024
         / 1024
         / 1024
+        / param_hosting_ratio
     )
 
 
