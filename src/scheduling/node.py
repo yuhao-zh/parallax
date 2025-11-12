@@ -31,6 +31,7 @@ class NodeHardwareInfo:
     """
 
     node_id: str
+    num_gpus: int
     tflops_fp16: float
     gpu_name: str
     memory_gb: float
@@ -272,7 +273,12 @@ class Node:
         Capacity is measured using the parameter memory budget on the device.
         """
         available_memory_bytes = floor(
-            self.hardware.memory_gb * 1024 * 1024 * 1024 * self.param_hosting_ratio
+            self.hardware.num_gpus
+            * self.hardware.memory_gb
+            * 1024
+            * 1024
+            * 1024
+            * self.param_hosting_ratio
         )
         if include_input_embed:
             available_memory_bytes -= self.model_info.embedding_io_bytes
@@ -300,7 +306,14 @@ class Node:
         if self.num_current_layers == 0:
             return None
         return floor(
-            (self.hardware.memory_gb * 1024 * 1024 * 1024 * self.kv_cache_ratio)
+            (
+                self.hardware.num_gpus
+                * self.hardware.memory_gb
+                * 1024
+                * 1024
+                * 1024
+                * self.kv_cache_ratio
+            )
             / self.num_current_layers
         )
 
