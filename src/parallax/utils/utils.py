@@ -11,6 +11,8 @@ import torch
 import zmq
 from mlx_lm.utils import get_model_path, load_config
 
+from parallax.utils.selective_download import download_metadata_only
+
 
 def is_cuda_available():
     """Check backend supports cuda"""
@@ -271,9 +273,13 @@ def combine_padding_and_causal_masks(
     return causal_mask + padding_mask_float
 
 
-def fetch_model_from_hf(name: str):
+def fetch_model_from_hf(name: str, local_files_only: bool = False):
     """Fetch model from huggingface and returns model config"""
-    model_path = get_model_path(name)[0]
+
+    if local_files_only:
+        model_path = download_metadata_only(name, local_files_only=local_files_only)
+    else:
+        model_path = get_model_path(name)[0]
     config = load_config(model_path)
     return config
 
