@@ -6,6 +6,13 @@ from typing import Optional
 
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
+try:
+    from modelscope import snapshot_download as ms_snapshot_download
+    from modelscope.hub.file_download import model_file_download as ms_file_download
+except ImportError:
+    ms_snapshot_download = None
+    ms_file_download = None
+
 logger = logging.getLogger(__name__)
 from parallax.utils.weight_filter_utils import (
     determine_needed_weight_files_for_download,
@@ -54,19 +61,33 @@ def download_metadata_only(
     cache_dir: Optional[str] = None,
     force_download: bool = False,
     local_files_only: bool = False,
+    source: str = "huggingface",
 ) -> Path:
     # If a local path is provided, return it directly without contacting HF Hub
     local_path = Path(repo_id)
     if local_path.exists():
         return local_path
 
-    path = snapshot_download(
-        repo_id=repo_id,
-        cache_dir=cache_dir,
-        ignore_patterns=EXCLUDE_WEIGHT_PATTERNS,
-        force_download=force_download,
-        local_files_only=local_files_only,
-    )
+    if source == "modelscope":
+        if ms_snapshot_download is None:
+            raise ImportError(
+                "modelscope is not installed. Please install it to use source='modelscope'."
+            )
+        # ModelScope uses ignore_file_pattern instead of ignore_patterns
+        path = ms_snapshot_download(
+            model_id=repo_id,
+            cache_dir=cache_dir,
+            ignore_file_pattern=EXCLUDE_WEIGHT_PATTERNS,
+            local_files_only=local_files_only,
+        )
+    else:
+        path = snapshot_download(
+            repo_id=repo_id,
+            cache_dir=cache_dir,
+            ignore_patterns=EXCLUDE_WEIGHT_PATTERNS,
+            force_download=force_download,
+            local_files_only=local_files_only,
+        )
     return Path(path)
 
 
@@ -77,6 +98,7 @@ def selective_model_download(
     cache_dir: Optional[str] = None,
     force_download: bool = False,
     local_files_only: bool = False,
+    source: str = "huggingface",
 ) -> Path:
     # Handle local model directory
     local_path = Path(repo_id)
@@ -85,12 +107,13 @@ def selective_model_download(
         logger.debug(f"Using local model path: {model_path}")
         is_remote = False
     else:
-        logger.debug(f"Downloading model metadata for {repo_id}")
+        logger.debug(f"Downloading model metadata for {repo_id} from {source}")
         model_path = download_metadata_only(
             repo_id=repo_id,
             cache_dir=cache_dir,
             force_download=force_download,
             local_files_only=local_files_only,
+            source=source,
         )
         logger.debug(f"Downloaded model metadata to {model_path}")
         is_remote = True
@@ -107,12 +130,21 @@ def selective_model_download(
         if is_remote:
             if not needed_weight_files:
                 logger.debug("Could not determine specific weight files, downloading all")
-                snapshot_download(
-                    repo_id=repo_id,
-                    cache_dir=cache_dir,
-                    force_download=force_download,
-                    local_files_only=local_files_only,
-                )
+                if source == "modelscope":
+                    if ms_snapshot_download is None:
+                        raise ImportError("modelscope is not installed.")
+                    ms_snapshot_download(
+                        model_id=repo_id,
+                        cache_dir=cache_dir,
+                        local_files_only=local_files_only,
+                    )
+                else:
+                    snapshot_download(
+                        repo_id=repo_id,
+                        cache_dir=cache_dir,
+                        force_download=force_download,
+                        local_files_only=local_files_only,
+                    )
             else:
                 # Step 3: Download only the needed weight files
                 logger.info(f"Downloading {len(needed_weight_files)} weight files")
@@ -128,17 +160,27 @@ def selective_model_download(
 
                     logger.debug(f"Downloading {weight_file}")
                     try:
-                        hf_hub_download(
-                            repo_id=repo_id,
-                            filename=weight_file,
-                            cache_dir=cache_dir,
-                            force_download=force_download,
-                            local_files_only=local_files_only,
-                        )
+                        if source == "modelscope":
+                            if ms_file_download is None:
+                                raise ImportError("modelscope is not installed.")
+                            ms_file_download(
+                                model_id=repo_id,
+                                file_path=weight_file,
+                                cache_dir=cache_dir,
+                                local_files_only=local_files_only,
+                            )
+                        else:
+                            hf_hub_download(
+                                repo_id=repo_id,
+                                filename=weight_file,
+                                cache_dir=cache_dir,
+                                force_download=force_download,
+                                local_files_only=local_files_only,
+                            )
                     except Exception as e:
                         logger.error(f"Failed to download {weight_file} for {repo_id}: {e}")
                         logger.error(
-                            "This node cannot reach Hugging Face Hub to download weight files. "
+                            f"This node cannot reach {source} Hub to download weight files. "
                             "Please check network connectivity or pre-download the model."
                         )
                         raise
@@ -151,12 +193,21 @@ def selective_model_download(
         # No layer range specified
         if is_remote:
             logger.debug("No layer range specified, downloading all model files")
-            snapshot_download(
-                repo_id=repo_id,
-                cache_dir=cache_dir,
-                force_download=force_download,
-                local_files_only=local_files_only,
-            )
+            if source == "modelscope":
+                if ms_snapshot_download is None:
+                    raise ImportError("modelscope is not installed.")
+                ms_snapshot_download(
+                    model_id=repo_id,
+                    cache_dir=cache_dir,
+                    local_files_only=local_files_only,
+                )
+            else:
+                snapshot_download(
+                    repo_id=repo_id,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    local_files_only=local_files_only,
+                )
         else:
             logger.debug("No layer range specified and using local path; nothing to download")
 
@@ -168,10 +219,12 @@ def get_model_path_with_selective_download(
     start_layer: Optional[int] = None,
     end_layer: Optional[int] = None,
     local_files_only: bool = False,
+    source: str = "huggingface",
 ) -> Path:
     return selective_model_download(
         repo_id=model_path_or_repo,
         start_layer=start_layer,
         end_layer=end_layer,
         local_files_only=local_files_only,
+        source=source,
     )

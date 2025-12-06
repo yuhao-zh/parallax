@@ -7,6 +7,7 @@ MODEL_REPO=${1:-"Qwen/Qwen2.5-7B-Instruct"}
 START_LAYER=${2:-0}
 END_LAYER=${3:-10}
 OUTPUT_DIR=${4}  # Optional, defaults to empty/unset
+SOURCE=${5:-"huggingface"}  # Optional, defaults to huggingface
 
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -15,8 +16,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 echo "========================================================"
 echo "Downloading shard for model: $MODEL_REPO"
 echo "Layers: [$START_LAYER, $END_LAYER)"
+echo "Source: $SOURCE"
 if [ -z "$OUTPUT_DIR" ]; then
-    echo "Output Directory: Default Hugging Face Cache"
+    echo "Output Directory: Default Cache"
     OUTPUT_ARG=""
 else
     echo "Output Directory: $OUTPUT_DIR"
@@ -31,6 +33,7 @@ python "${SCRIPT_DIR}/download_shard.py" \
     --model-repo "$MODEL_REPO" \
     --start-layer "$START_LAYER" \
     --end-layer "$END_LAYER" \
+    --source "$SOURCE" \
     $OUTPUT_ARG
 
 if [ $? -eq 0 ]; then

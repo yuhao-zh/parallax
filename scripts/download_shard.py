@@ -39,6 +39,13 @@ def main():
         default=None,
         help="Local directory to save the model. If not provided, uses default Hugging Face cache.",
     )
+    parser.add_argument(
+        "--source",
+        type=str,
+        default="huggingface",
+        choices=["huggingface", "modelscope"],
+        help="Model source: 'huggingface' or 'modelscope'",
+    )
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level")
 
     args = parser.parse_args()
@@ -48,12 +55,12 @@ def main():
     if args.output_dir:
         output_dir = os.path.abspath(args.output_dir)
         logger.info(
-            f"Downloading model {args.model_repo} layers [{args.start_layer}, {args.end_layer}) to {output_dir}"
+            f"Downloading model {args.model_repo} layers [{args.start_layer}, {args.end_layer}) from {args.source} to {output_dir}"
         )
     else:
         output_dir = None
         logger.info(
-            f"Downloading model {args.model_repo} layers [{args.start_layer}, {args.end_layer}) to default Hugging Face cache"
+            f"Downloading model {args.model_repo} layers [{args.start_layer}, {args.end_layer}) from {args.source} to default cache"
         )
 
     try:
@@ -70,6 +77,7 @@ def main():
             start_layer=args.start_layer,
             end_layer=args.end_layer,
             cache_dir=output_dir,
+            source=args.source,
         )
         logger.info(f"Successfully downloaded/verified model shard. Cache location: {model_path}")
     except Exception as e:
