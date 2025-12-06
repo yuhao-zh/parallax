@@ -17,6 +17,25 @@ echo "========================================================"
 echo "Downloading shard for model: $MODEL_REPO"
 echo "Layers: [$START_LAYER, $END_LAYER)"
 echo "Source: $SOURCE"
+
+# If SOURCE is modelscope and OUTPUT_DIR is not set, try to use Hugging Face default cache
+if [ -z "$OUTPUT_DIR" ] && [ "$SOURCE" == "modelscope" ]; then
+    echo "Detecting Hugging Face cache directory for ModelScope download..."
+    if command -v python >/dev/null 2>&1; then
+        HF_CACHE=$(python -c "from huggingface_hub import constants; print(str(constants.HF_HUB_CACHE))" 2>/dev/null)
+        if [ ! -z "$HF_CACHE" ]; then
+            OUTPUT_DIR="$HF_CACHE"
+            echo "Using detected HF cache: $OUTPUT_DIR"
+        fi
+    fi
+    
+    # Fallback if python detection failed
+    if [ -z "$OUTPUT_DIR" ]; then
+        OUTPUT_DIR="${HOME}/.cache/huggingface/hub"
+        echo "Using default HF cache path: $OUTPUT_DIR"
+    fi
+fi
+
 if [ -z "$OUTPUT_DIR" ]; then
     echo "Output Directory: Default Cache"
     OUTPUT_ARG=""
