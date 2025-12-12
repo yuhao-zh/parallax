@@ -231,7 +231,10 @@ class Scheduler:
                         logger.warning(
                             f"Request {rid} can't be admit to running batch due to KV cache size."
                         )
-                        continue
+                        # Put back to wait queue if allocation fails
+                        self._wait_queue.appendleft(req)
+                        # Stop admitting since we are out of memory
+                        break
 
             # Add request to running requests
             self._running_requests[rid] = req

@@ -466,9 +466,28 @@ class MLXExecutor(BaseExecutor):
         h_or_tokens_list = []
         block_tables_list = []
         context_lengths_list = []
+        valid_requests = []
 
         for req in batched_requests:
             assert req.is_decoding, f"Request {req.request_id} is not a decode request."
+
+            # Allocate slot for new token
+            success = self.cache_manager.append_slot(req.request_id)
+            if not success:
+                logger.error(
+                    f"OOM during decode for {req.request_id}. Aborting request and notifying other nodes."
+                )
+                req.abort = True
+                self.cache_manager.free_request(req.request_id)
+                self.scheduler.evict_request(req.request_id)
+                # Add to finished_batch to trigger abort notification
+                # - For First/Middle Peer: send to downstream
+                # - For Last Peer: send back to First Peer
+                self.finished_batch.append(req)
+                continue
+
+            # Allocation successful, proceed with batch preparation
+            valid_requests.append(req)
 
             if self.is_first_peer:
                 # First peer input is the last generated token
@@ -476,16 +495,15 @@ class MLXExecutor(BaseExecutor):
             else:
                 h_or_tokens_list.append(req.hidden_states)
 
-            # TODO: Prefix cache update
-
-            # Allocate slot for new token
-            success = self.cache_manager.append_slot(req.request_id)
-            if not success:
-                raise RuntimeError(f"OOM during decode for {req.request_id}")
-
             block_table = self.cache_manager.get_block_table(req.request_id)
             block_tables_list.append(block_table)
             context_lengths_list.append(self.cache_manager.get_context_length(req.request_id))
+
+        # Check if we have any valid requests left
+        if not valid_requests:
+            return None
+
+        batch_size = len(valid_requests)
 
         if isinstance(h_or_tokens_list[0], list):
             # First peer case: h_or_tokens_list is list of list of ints [[token_id], ...]
@@ -507,7 +525,7 @@ class MLXExecutor(BaseExecutor):
         # Prepare state slot mapping if needed
         state_slot_mapping = None
         if self.cache_manager.needs_slots:
-            req_ids = [r.request_id for r in batched_requests]
+            req_ids = [r.request_id for r in valid_requests]
             slots = [self.cache_manager.get_slot(rid) for rid in req_ids]
             state_slot_mapping = mx.array(slots, dtype=mx.int32)
 
@@ -515,7 +533,7 @@ class MLXExecutor(BaseExecutor):
             "h_or_tokens": padded_inputs,
             "cache": self.cache_manager.get_caches(),
             "mask": None,
-            "requests": batched_requests,
+            "requests": valid_requests,
             "block_tables": block_tables_tensor,
             "context_lengths": context_lengths_tensor,
             "slot_mapping": None,
