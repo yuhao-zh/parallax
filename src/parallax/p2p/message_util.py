@@ -138,7 +138,7 @@ def proto_to_abort_request(proto_request: forward_pb2.AbortRequest) -> List[Inte
     Converts a AbortRequest a list of IntermediateRequest objects.
     Only request_id and routing table are useful information.
     """
-    status = RequestStatus.FINISHED_EOS
+    status = RequestStatus.FINISHED_ABORT
     requests = []
     for proto_req in proto_request.reqs:
         request = IntermediateRequest(
@@ -147,6 +147,7 @@ def proto_to_abort_request(proto_request: forward_pb2.AbortRequest) -> List[Inte
             status=status,
             routing_table=proto_req.routing_table,
         )
+        request.abort = True
 
         requests.append(request)
 
