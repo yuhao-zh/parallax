@@ -5,6 +5,14 @@ Hopefully, when sglang support pipeline parallelism natively, we can remove thes
 
 
 def apply_parallax_sglang_monkey_patch():
+    # Apply SM120 (RTX 50 series) support patch first
+    # This needs to be applied before other patches that may use mxfp4
+    from parallax.sglang.monkey_patch_utils.sm120_support import (
+        apply_sm120_mxfp4_support_monkey_patch,
+    )
+
+    apply_sm120_mxfp4_support_monkey_patch()
+
     from parallax.sglang.monkey_patch_utils.model_parallel import (
         apply_model_parallel_monkey_patch,
     )
