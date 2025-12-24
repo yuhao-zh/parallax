@@ -202,6 +202,92 @@ class TransformerConnectionHandler(ConnectionHandler):
             yield b"internal server error"
 
 
+def check_and_run_weight_refit(gradient_server, message):
+    """
+    Check and trigger weight refit process.
+    Received message is a Dict which at least contains:
+        time_stamp: float,      indicating weight refit trigger time.
+        cid:        List[str],  cid list.
+        index_map:  Dict[str],  key(weight_name): value(cid)
+    """
+
+    def _download_weight_thread(weight_dir, cid):
+        raw_data = None
+        time_begin_get_block = time.time()
+        time_end_get_block = None
+        peer_id = None
+        while True:
+            try:
+                peer_id, raw_data = gradient_server.lattica.get_block(cid, timeout_secs=30)
+                cid_manual = calculate_cid_manual(raw_data)
+                if cid_manual != cid:
+                    logger.warning(f"Checksum failed. Retry get_block for cid={cid}")
+                    continue
+                else:
+                    time_end_get_block = time.time()
+                    break
+            except Exception:
+                logger.warning(f"Failed to get block: {cid}. Retry in 1 second.")
+                time.sleep(1)
+        if raw_data is None:
+            raise RuntimeError(f"Failed to get block cid={cid}")
+        file_name = cid + ".safetensors"
+        file_name = os.path.join(weight_dir, file_name)
+        with open(file_name, "wb") as f:
+            f.write(raw_data)
+        file_size_bytes = os.path.getsize(file_name)
+        file_size_kb = file_size_bytes / 1024
+        file_size_mb = file_size_kb / 1024
+        time_end_write_file = time.time()
+        interval_get_block = time_end_get_block - time_begin_get_block
+        interval_write_file = time_end_write_file - time_end_get_block
+        logger.info(
+            f"Finish download cid={cid}, file_size={file_size_mb}MB, get_block={interval_get_block}s, write_file={interval_write_file}s, peer_id={peer_id}"
+        )
+
+    # add sleep 60s for direct connection first
+    logger.info(f"Start dealing weight refit message: {message}.")
+    logger.info(f"Wait for lattica direct connection.")
+    time.sleep(60)
+    # step1. Check weight refit trigger message
+    time_stamp = message.get("time_stamp", None)
+    cid_list = message.get("cid", None)
+    weight_version = message.get("version", 0)
+    if time_stamp is None or cid_list is None:
+        return
+    if gradient_server.last_refit_time >= float(time_stamp):
+        # Weight already updated
+        return
+
+    random.seed(time.time())
+    random.shuffle(cid_list)
+    # max_concurrency = 1
+    # count = len(cid_list)
+
+    # step2. save weight to disk
+    # concurrency_loop = (count - 1) // max_concurrency + 1
+    weight_dir = os.path.join("/tmp", str(time_stamp))
+    folder = os.path.exists(weight_dir)
+    if not folder:
+        os.makedirs(weight_dir)
+        while True:
+            if len(cid_list) == 0:
+                break
+            else:
+                cid = cid_list.pop()
+                logger.info(f"Start downloading refit weight {cid}")
+                _download_weight_thread(weight_dir, cid)
+        # step3. send ipc message to update weight
+        gradient_server.connection_handler.ipc_weight_refit(weight_dir, weight_version)
+        gradient_server.last_refit_time = float(time_stamp)
+        logger.info(
+            f"Finish download weight_version={weight_version}, last_refit_time={gradient_server.last_refit_time}"
+        )
+    else:
+        logger.warning(f"Already satisfies weight_version={weight_version}")
+    gradient_server.refit_finish = True
+
+
 class GradientServer:
     """
     Main server class for Parallax.
@@ -254,6 +340,7 @@ class GradientServer:
         self.kvcache_mem_ratio = kvcache_mem_ratio
         self.enable_weight_refit = False
         self.last_refit_time = 0.0
+        self.refit_finish = True
         self.prefix_id = f"{dht_prefix}_announce"
         self.lattica = None
         self.routing_table = None
@@ -348,97 +435,6 @@ class GradientServer:
                 return False
 
         return True
-
-    def check_and_run_weight_refit(self, message):
-        """
-        Check and trigger weight refit process.
-        Received message is a Dict which at least contains:
-            time_stamp: float,      indicating weight refit trigger time.
-            cid:        List[str],  cid list.
-            index_map:  Dict[str],  key(weight_name): value(cid)
-        """
-
-        def _download_weight_thread(weight_dir, cid):
-            raw_data = None
-            time_begin_get_block = time.time()
-            time_end_get_block = None
-            peer_id = None
-            while True:
-                try:
-                    peer_id, raw_data = self.lattica.get_block(cid, timeout_secs=30)
-                    cid_manual = calculate_cid_manual(raw_data)
-                    if cid_manual != cid:
-                        logger.warning(f"Checksum failed. Retry get_block for cid={cid}")
-                        continue
-                    else:
-                        time_end_get_block = time.time()
-                        break
-                except Exception:
-                    logger.warning(f"Failed to get block: {cid}. Retry in 1 second.")
-                    time.sleep(1)
-            if raw_data is None:
-                raise RuntimeError(f"Failed to get block cid={cid}")
-            file_name = cid + ".safetensors"
-            file_name = os.path.join(weight_dir, file_name)
-            with open(file_name, "wb") as f:
-                f.write(raw_data)
-            file_size_bytes = os.path.getsize(file_name)
-            file_size_kb = file_size_bytes / 1024
-            file_size_mb = file_size_kb / 1024
-            time_end_write_file = time.time()
-            interval_get_block = time_end_get_block - time_begin_get_block
-            interval_write_file = time_end_write_file - time_end_get_block
-            logger.info(
-                f"Finish download cid={cid}, file_size={file_size_mb}MB, get_block={interval_get_block}s, write_file={interval_write_file}s, peer_id={peer_id}"
-            )
-
-        # add sleep 60s for direct connection first
-        logger.info(f"Start dealing weight refit message: {message}.")
-        logger.info(f"Wait for lattica direct connection.")
-        time.sleep(60)
-        # step1. Check weight refit trigger message
-        time_stamp = message.get("time_stamp", None)
-        cid_list = message.get("cid", None)
-        weight_version = message.get("version", 0)
-        if time_stamp is None or cid_list is None:
-            return
-        if self.last_refit_time >= float(time_stamp):
-            # Weight already updated
-            return
-
-        random.seed(time.time())
-        random.shuffle(cid_list)
-        max_concurrency = 1
-        count = len(cid_list)
-
-        # step2. save weight to disk
-        concurrency_loop = (count - 1) // max_concurrency + 1
-        weight_dir = os.path.join("/tmp", str(time_stamp))
-        folder = os.path.exists(weight_dir)
-        if not folder:
-            os.makedirs(weight_dir)
-            for i in range(concurrency_loop):
-                thread_pool = []
-                for j in range(max_concurrency):
-                    if len(cid_list) == 0:
-                        continue
-                    else:
-                        cid = cid_list.pop()
-                    logger.info(f"Start downloading refit weight {cid}")
-                    download_thread = threading.Thread(
-                        target=_download_weight_thread, args=(weight_dir, cid), daemon=True
-                    )
-                    download_thread.start()
-                    thread_pool.append(download_thread)
-                for t in thread_pool:
-                    t.join()
-
-        # step3. send ipc message to update weight
-        self.connection_handler.ipc_weight_refit(weight_dir, weight_version)
-        self.last_refit_time = float(time_stamp)
-        logger.info(
-            f"Finish download weight_version={weight_version}, last_refit_time={self.last_refit_time}"
-        )
 
     def run(self):
         if self.build_lattica():
@@ -768,7 +764,14 @@ class GradientServer:
                             if refit_message and isinstance(refit_message, dict):
                                 if self.enable_weight_refit:
                                     logger.info(f"Server begin weight refit process.")
-                                    self.check_and_run_weight_refit(refit_message)
+                                    if self.refit_finish:
+                                        self.refit_finish = False
+                                        t = threading.Thread(
+                                            target=check_and_run_weight_refit,
+                                            args=(self, refit_message),
+                                            daemon=True,
+                                        )
+                                        t.start()
                                 else:
                                     logger.warning(
                                         f"Received weight refit request but enable_weight_refit is set to {self.enable_weight_refit}."
