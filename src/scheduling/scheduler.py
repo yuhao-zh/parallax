@@ -103,6 +103,7 @@ class Scheduler:
         # Concurrency controls
         self._stop_event: threading.Event = threading.Event()
         self._wake_event: threading.Event = threading.Event()
+        self._bootstrapped_event: threading.Event = threading.Event()
         self._node_count_cv: threading.Condition = threading.Condition()
         self._event_thread: Optional[threading.Thread] = None
         self._dispatch_thread: Optional[threading.Thread] = None
@@ -112,25 +113,15 @@ class Scheduler:
         self.alloc_log_snapshot: str = ""
         # Avoid spamming: only emit the "all nodes active" INFO log on transitions.
         self._all_nodes_active_logged: bool = False
-        # Thread-safe bootstrap state
-        self._bootstrapped: bool = False
-        self._bootstrapped_event: threading.Event = threading.Event()
-        logger.debug(
+        logger.info(
             f"Scheduler initialized, min_nodes_bootstrapping {self.min_nodes_bootstrapping}, "
-            f"strategy {strategy}, rebalance threshold {rebalance_threshold}"
+            f"Layer allocations trategy {strategy}, Request routing strategy {routing_strategy}."
         )
 
         # Weight refit
         self.refit_request = {}
         self.refit_set = set()
         self.last_refit_time = 0.0
-
-        # Eager bootstrap for initial allocation if enough nodes are present
-        try:
-            self.bootstrap()
-
-        except Exception:  # best-effort eager allocation
-            pass
 
     def list_node_allocations(
         self, total_layers: Optional[int] = None
@@ -201,24 +192,27 @@ class Scheduler:
 
     def bootstrap(self, reboot: bool = False) -> bool:
         """Initial Node Allocation Assignment."""
+        logger.info("[Scheduler] Starting Bootstrap")
         overide_min_node_check = False
         if reboot:
             # Clear any fixed pipeline registrations; they are no longer valid.
             # This also detaches member nodes and clears their layer allocations.
+            logger.info("[Scheduler] Rebooting, moving every node to standby")
             self.node_manager.clear_registered_pipelines()
-            self._bootstrapped = False
             self._bootstrapped_event.clear()
             overide_min_node_check = True
-
-        if self._bootstrapped_event.is_set() and not reboot:
-            return True
+        else:
+            # If we already bootstrapped, return True
+            if self._bootstrapped_event.is_set():
+                logger.info("[Scheduler] Already bootstrapped, returning Success")
+                return True
         # Check if we have enough nodes for bootstraping
         if (
             self.node_manager.num_nodes < self.min_nodes_bootstrapping
             and not overide_min_node_check
         ):
             logger.info(
-                f"Bootstrap deferred: have {self.node_manager.num_nodes} nodes; need >= {self.min_nodes_bootstrapping}"
+                f"[Scheduler] Bootstrap deferred: have {self.node_manager.num_nodes} nodes; need >= {self.min_nodes_bootstrapping}"
             )
             return False
 
@@ -227,12 +221,11 @@ class Scheduler:
         if not success:
             logger.warning("Global allocation failed to produce a full pipeline")
             # Stay un-bootstrapped so future joins can retry bootstrap.
-            self._bootstrapped = False
             self._bootstrapped_event.clear()
             return False
 
         assignments = self.node_manager.list_node_allocations(self.num_layers)
-        logger.info(f"Layer allocator assignments: {assignments}")
+        logger.info(f"[Scheduler] Post Bootstrap Layer Assignments: {assignments}")
 
         # For fixed (RR) routing: register a pipeline set immediately after bootstrap.
         if self.routing_strategy == "rr" and isinstance(
@@ -243,18 +236,17 @@ class Scheduler:
                     self.node_manager.active_nodes, self.num_layers
                 )
                 logger.info(
-                    f"[RR] register_pipelines with bootstrap success, number of pipelines: {len(self.request_router.get_registered_pipelines())}"
+                    f"[FixedRouter] register_pipelines with bootstrap success, number of pipelines: {len(self.request_router.get_registered_pipelines())}"
                 )
 
             except Exception as exc:
                 logger.warning(
-                    f"[RR] register_pipelines after bootstrap failed (best-effort): {exc}"
+                    f"[FixedRouter] register_pipelines after bootstrap failed (best-effort): {exc}"
                 )
 
-        self._bootstrapped = True
         self._bootstrapped_event.set()
         # Snapshot at INFO after bootstrap since allocations/pipelines may have materially changed.
-        self.emit_alloc_log_snapshot(reason="after bootstrap")
+        self.emit_alloc_log_snapshot(reason="Post Bootstrap")
         return True
 
     def update_last_refit_time(self):
@@ -330,7 +322,8 @@ class Scheduler:
         for node in self.node_manager.active_nodes:
             if time.time() - node.last_heartbeat > self.heartbeat_timeout:
                 logger.debug(f"Node {node.node_id} heartbeat timeout")
-                self.leave(node.node_id)
+                # Route leave through the event loop so global rebalance/reboot is serialized.
+                self.enqueue_leave(node.node_id)
 
     # Dynamic node management
     def join(self, node: Node) -> None:
@@ -371,12 +364,11 @@ class Scheduler:
 
             # Check if manual allocations now cover the full pipeline
             if self.has_full_pipeline():
-                if not self._bootstrapped:
+                if not self._bootstrapped_event.is_set():
                     logger.info(
-                        "Manual layer assignments have established a full pipeline; "
+                        "[Scheduler] Manual layer assignments have established a full pipeline; "
                         "marking scheduler as bootstrapped"
                     )
-                    self._bootstrapped = True
                     self._bootstrapped_event.set()
         elif bootstrapped:
             self.node_manager.upsert(node)
@@ -394,40 +386,14 @@ class Scheduler:
         - Nullify the pipeline the node is in;
         - Move all remaining nodes in the pipeline to STANDBY;
 
-        Trigger global rebalance if needed.
+        Note: Global rebalance/reboot is handled by the event loop (`_process_leaves`) to
+        ensure we don't concurrently reboot when multiple leave events arrive.
         """
         node = self.node_manager.get(node_id)
         if node is None:
             raise ValueError(f"Node {node_id} not found in nodes")
         logger.info("Leaving node %s (start=%s, end=%s)", node_id, node.start_layer, node.end_layer)
         self.node_manager.remove(node_id)
-
-        if self.layer_allocator.should_global_rebalance():
-            nodes = self.node_manager.nodes
-            logger.warning("Global rebalance triggered due to node leave")
-
-            # Count manual vs automatic nodes
-            manual_count = sum(1 for n in nodes if n.manual_layer_assignment)
-            total_count = len(nodes)
-            logger.debug(
-                f"Node count: {manual_count} manual, {total_count - manual_count} automatic"
-            )
-            if manual_count == total_count:
-                logger.debug("All nodes are manual assignment, skipping global rebalance")
-            elif manual_count > 0:
-                logger.error(
-                    f"Mixed assignment detected ({manual_count} manual, {total_count - manual_count} automatic); skipping rebalance"
-                )
-            else:
-                self.node_manager.standby([n.node_id for n in self.node_manager.active_nodes])
-                assert (
-                    self.node_manager.num_standby_nodes == self.node_manager.num_nodes
-                ), "All active nodes should be moved to standby"
-                assert (
-                    self.node_manager.num_active_nodes == 0
-                ), "No active nodes before re-bootstrap"
-                logger.warning("Re-bootstrapping for global rebalance")
-                self.bootstrap(reboot=True)
 
         # Snapshot at INFO after leave since allocations/pipelines may have changed.
         self.emit_alloc_log_snapshot(reason=f"after leave {node_id}")
@@ -693,14 +659,7 @@ class Scheduler:
         logger.debug("Waiting for bootstrap")
         while not self._stop_event.is_set() and not self._bootstrapped_event.is_set():
             with self._node_count_cv:
-                if self.node_manager.num_nodes < self.min_nodes_bootstrapping:
-                    self._node_count_cv.wait(timeout=max(0.5, poll_interval))
-                    continue
-            boot_ok = self.bootstrap()
-            if boot_ok:
-                break
-            with self._node_count_cv:
-                self._node_count_cv.wait(timeout=max(1.0, poll_interval))
+                self._node_count_cv.wait(timeout=max(0.5, poll_interval))
         return not self._stop_event.is_set()
 
     def _process_node_updates(self) -> None:
@@ -767,7 +726,12 @@ class Scheduler:
                 )
 
     def _process_leaves(self) -> None:
-        """Handle pending leave events safely."""
+        """Handle pending leave events safely.
+
+        Important: This is the only place we trigger global rebalance/reboot so leave events
+        are serialized by the single event-loop thread.
+        """
+        removed_any = False
         while True:
             try:
                 node_id = self._pending_leaves.get_nowait()
@@ -775,8 +739,48 @@ class Scheduler:
                 break
             try:
                 self.leave(node_id)
+                removed_any = True
             except Exception as exc:
                 logger.warning(f"Leave failed for {node_id}: {exc}")
+
+        # After draining all leaves, decide whether to do a single global rebalance.
+        if not removed_any:
+            return
+
+        if not self.layer_allocator.should_global_rebalance():
+            return
+
+        nodes = self.node_manager.nodes
+        logger.warning("Global rebalance triggered due to node leave")
+
+        # Count manual vs automatic nodes
+        manual_count = sum(1 for n in nodes if n.manual_layer_assignment)
+        total_count = len(nodes)
+        logger.debug(f"Node count: {manual_count} manual, {total_count - manual_count} automatic")
+        if total_count == 0:
+            logger.debug("No nodes left after leave(s); skipping global rebalance")
+            return
+        if manual_count == total_count:
+            logger.debug("All nodes are manual assignment, skipping global rebalance")
+            return
+        if manual_count > 0:
+            logger.error(
+                f"Mixed assignment detected ({manual_count} manual, {total_count - manual_count} automatic); skipping rebalance"
+            )
+            return
+
+        # Move active nodes to standby and re-bootstrap (reboot) once.
+        self.node_manager.standby([n.node_id for n in self.node_manager.active_nodes])
+        assert (
+            self.node_manager.num_standby_nodes == self.node_manager.num_nodes
+        ), "All active nodes should be moved to standby"
+        assert self.node_manager.num_active_nodes == 0, "No active nodes before re-bootstrap"
+        logger.warning("Re-bootstrapping for global rebalance")
+        try:
+            self.bootstrap(reboot=True)
+        finally:
+            # Ensure snapshot reflects post-rebalance state even if bootstrap fails.
+            self.emit_alloc_log_snapshot(reason="after global rebalance")
 
     def stop(self) -> None:
         """Signal background threads to stop and wake any waiters."""
@@ -787,6 +791,6 @@ class Scheduler:
 
     def need_more_nodes(self):
         return (
-            not self._bootstrapped
+            not self._bootstrapped_event.is_set()
             and self.node_manager.num_standby_nodes >= self.min_nodes_bootstrapping
         )
