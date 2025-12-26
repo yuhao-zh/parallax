@@ -9,7 +9,6 @@ It is used to handle the communication between the peers, and communicate with t
 
 import dataclasses
 import enum
-import glob
 import json
 import multiprocessing
 import os
@@ -281,11 +280,14 @@ def check_and_run_weight_refit(gradient_server, message):
                 _download_weight_thread(weight_dir, cid)
 
         # step3. concat weight
-        # TODO: Need import torch in concat_weight_partition. Maybe we should justify which backend here.
-        weight_files = glob.glob(weight_dir + "/*.safetensors")
-        assert weight_files, f"Weight safetensors files not found in path: {weight_dir}"
-        logger.info(f"Begin concat weight from path: {weight_dir}")
-        concat_weight_partition(weight_files, weight_dir)
+        # workaround: create sub-process to avoid GIL issues for lattica
+        logger.info(f"Start sub-process to concat weight partitions in {weight_dir}")
+        process = multiprocessing.Process(
+            target=concat_weight_partition,
+            args=(weight_dir,),
+        )
+        process.start()
+        process.join()
 
         # step4. send ipc message to update weight
         gradient_server.connection_handler.ipc_weight_refit(weight_dir, weight_version)
