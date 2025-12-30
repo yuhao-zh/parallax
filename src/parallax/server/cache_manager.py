@@ -6,7 +6,7 @@ from parallax.server.block_radix_cache import BlockRadixCache
 from parallax.server.cache.allocator import BlockAllocator, SlotAllocator
 from parallax.server.cache.base import BaseCache
 from parallax.server.cache.dsa_cache import DeepSeekSparseCache
-from parallax.server.cache.kv_cache import KVCache
+from parallax.server.cache.kv_cache import KVCache, KVCachePacked
 from parallax.server.cache.linear_cache import LinearCache
 from parallax_utils.logging_config import get_logger
 
@@ -44,6 +44,7 @@ class CacheManager:
         # Prefix Cache Config
         enable_prefix_cache: bool = False,
         max_cached_blocks: int = 1000,
+        sliding_window: Optional[int] = None,
     ):
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
@@ -54,6 +55,7 @@ class CacheManager:
         self.dtype = dtype
         self.block_size = block_size
         self.max_num_seqs = max_num_seqs
+        self.sliding_window = sliding_window
 
         # Linear cache params (store for memory calculation)
         self.conv_dim = conv_dim
@@ -148,8 +150,19 @@ class CacheManager:
                     index_head_dim=self.index_head_dim,
                     index_n_heads=self.index_n_heads,
                 )
-            else:
+            elif self.sliding_window is not None:
+                # KVCache for gpt-oss
                 return KVCache(
+                    num_blocks=self.num_gpu_blocks,
+                    block_size=self.block_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_dim=self.head_dim,
+                    head_dim_v=self.head_dim_v,
+                    dtype=self.dtype,
+                )
+            else:
+                # KVCachePacked for models with parallax_extensions ops
+                return KVCachePacked(
                     num_blocks=self.num_gpu_blocks,
                     block_size=self.block_size,
                     num_kv_heads=self.num_kv_heads,
