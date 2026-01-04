@@ -28,10 +28,11 @@ from parallax.p2p.proto import forward_pb2
 from parallax.p2p.utils import AsyncWorker
 from parallax.server.server_info import detect_node_hardware
 from parallax.utils.shared_state import SharedState
-from parallax.utils.utils import (
+from parallax.utils.utils import get_zmq_socket
+from parallax.utils.weight_refit_utils import (
     calculate_cid_manual,
     concat_weight_partition,
-    get_zmq_socket,
+    release_disk_storage,
 )
 from parallax_utils.logging_config import get_logger, set_log_level
 
@@ -256,10 +257,9 @@ def check_and_run_weight_refit(gradient_server, message):
         )
         return True
 
-    # add sleep 60s for direct connection first
-    logger.info(f"Start dealing weight refit message: {message}.")
-    logger.info(f"Wait for lattica direct connection.")
-    time.sleep(60)
+    # step0. Release lattica disk storage
+    release_disk_storage()
+
     # step1. Check weight refit trigger message
     time_stamp = message.get("time_stamp", None)
     cid_list = message.get("cid", None)
@@ -272,6 +272,11 @@ def check_and_run_weight_refit(gradient_server, message):
 
     random.seed(time.time())
     random.shuffle(cid_list)
+
+    # add sleep 30s for direct connection first
+    logger.info(f"Start dealing weight refit message: {message}.")
+    logger.info(f"Wait for lattica direct connection.")
+    time.sleep(30)
 
     # step2. save weight to disk
     weight_dir = os.path.join("/tmp", str(time_stamp))
@@ -408,7 +413,7 @@ class GradientServer:
             )
 
     def check_and_release_disk_weight(self):
-        # only save 2 history versions of weight
+        """Only save 2 history versions of weight"""
         while len(self.refit_timestamp_history) > 2:
             time_stamp = self.refit_timestamp_history.pop(0)
             weight_dir = os.path.join("/tmp", str(int(time_stamp)))
