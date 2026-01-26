@@ -556,3 +556,24 @@ def initialize_vllm_model_runner(
             logger.warning(f"Failed to capture CUDA graph during initialization: {e}")
 
     return model_runner, config, tokenizer
+
+
+def refit_vllm_model(
+    model_runner: ParallaxVLLMModelRunner,
+    tensors: dict = None,
+    refit_weight_path: str = None,
+):
+    """Runtime weight refit from disk"""
+    if tensors is not None:
+        logger.info(f"Executor begins weight refit from host memory")
+        for x in tensors.keys():
+            refit_tensors = [(x, tensors.get(x))]
+            model_runner.model.load_weights(weights=refit_tensors)
+    elif refit_weight_path is not None:
+        logger.info(f"Executor begins weight refit from disk files")
+        config_overrides = {"load_config": {"download_dir": refit_weight_path}}
+        model_runner.update_config(overrides=config_overrides)
+        model_runner.reload_weights()
+    else:
+        assert False, "Weight refit needs host tensors or weight path"
+    logger.info(f"Finish weight refit")
