@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+import torch.distributed
+import vllm.distributed.parallel_state as parallel_state
 from mlx_lm.utils import load_config
 from vllm.config import (
     CacheConfig,
-    CompilationConfig,
     DeviceConfig,
     LoadConfig,
     ModelConfig,
@@ -20,12 +22,15 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
-    get_request_block_hasher,
-    init_none_hash,
-    sha256_cbor,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+)
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from parallax.sglang.monkey_patch_utils.weight_loader_filter import (
     apply_weight_loader_filter_patch,
@@ -84,8 +89,6 @@ def _create_kv_cache_config_from_specs(
     attn_layers: List[str],
     kv_cache_memory_fraction: float,
 ) -> KVCacheConfig:
-    import torch
-
     free_memory, total_memory = torch.cuda.mem_get_info(0)
     available_memory = int(free_memory * kv_cache_memory_fraction)
 
@@ -142,7 +145,7 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
         self.pp_size = 1
 
         self.request_block_hasher: Optional[Callable[[Any], List[Any]]] = None
-        self.enable_prefix_caching: bool = True
+        self.enable_prefix_caching: bool = False
 
         super().__init__(vllm_config=vllm_config, device=torch.device(device))
         self.kv_cache_config = kv_cache_config
@@ -162,8 +165,6 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
                 "Cannot access get_kv_cache_spec due to cudagraph wrapper, using fallback method"
             )
             kv_cache_specs = None
-
-        import torch
 
         free_memory, total_memory = torch.cuda.mem_get_info(self.device.index or 0)
 
@@ -195,8 +196,6 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
             num_attention_heads = getattr(hf_config, "num_attention_heads", 8)
             hidden_size = getattr(hf_config, "hidden_size", 1024)
             head_size = hidden_size // num_attention_heads
-
-            from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
             model_dtype = self.vllm_config.model_config.dtype
             if isinstance(model_dtype, str):
@@ -236,7 +235,7 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
 
         return kv_cache_config
 
-    def initialize_kv_cache_manager(self, max_model_len: int) -> KVCacheManager:
+    def initialize_kv_cache_manager(self, max_model_len: int, block_size: int) -> KVCacheManager:
         logger.debug("Initializing vLLM KVCacheManager...")
 
         if self.kv_cache_config is None:
@@ -245,40 +244,15 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
         kv_cache_manager = KVCacheManager(
             kv_cache_config=self.kv_cache_config,
             max_model_len=max_model_len,
-            enable_caching=True,
+            enable_caching=self.enable_prefix_caching,
             use_eagle=False,
             log_stats=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
+            hash_block_size=block_size,
         )
 
         self.kv_cache_manager = kv_cache_manager
-        cache_config = self.vllm_config.cache_config
-        enable_prefix = cache_config.enable_prefix_caching
-        if enable_prefix is None:
-            enable_prefix = True
-
-        self.enable_prefix_caching = False
-
-        self.request_block_hasher = None
-        if enable_prefix and kv_cache_manager.block_size is not None:
-            # Use sha256_cbor from vllm.v1.core.kv_cache_utils for hashing
-            # This is the standard hash function in vLLM 0.11+
-            hash_fn = sha256_cbor
-            init_none_hash(hash_fn)
-            logger.debug("Initialized prefix cache hashing with sha256_cbor")
-
-            block_size = kv_cache_manager.block_size
-            if block_size is None and self.kv_cache_config.kv_cache_groups:
-                block_size = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
-            if block_size is not None:
-                self.request_block_hasher = get_request_block_hasher(block_size, hash_fn)
-                logger.info("Initialized prefix cache block hasher with block_size=%d", block_size)
-
-        logger.debug(
-            f"KVCacheManager initialized: block_size={kv_cache_manager.block_size}, "
-            f"usage={kv_cache_manager.usage:.2%}"
-        )
 
         return kv_cache_manager
 
@@ -310,7 +284,9 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
         finally:
             vllm.distributed.utils.get_pp_indices = original_get_pp_indices
 
-    def execute_model(self, scheduler_output, intermediate_tensors=None):
+    def execute_model(
+        self, scheduler_output, intermediate_tensors=None, return_decoded_tokens=False
+    ):
         """
         Execute the model with the given scheduler output and intermediate tensors.
         If this is not the first peer, and the intermediate_tensors buffer is not initialized,
@@ -324,7 +300,13 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
             )
             logger.debug("Successfully initialized intermediate_tensors buffer")
 
-        return super().execute_model(scheduler_output, intermediate_tensors)
+        super().execute_model(scheduler_output, intermediate_tensors)
+
+        sampled_token_ids = None
+        if return_decoded_tokens:
+            sampled_token_ids = super().sample_tokens(grammar_output=None).sampled_token_ids_cpu
+
+        return self.execute_model_state, sampled_token_ids
 
 
 def initialize_vllm_model_runner(
@@ -334,8 +316,13 @@ def initialize_vllm_model_runner(
     kv_cache_memory_fraction: float,
     attention_backend: str,
     kv_block_size: int,
+    max_sequence_length: int,
     max_num_tokens_per_batch: int = 16384,
     dtype: str = "float16",
+    moe_runner_backend: str = "auto",
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    nccl_port: int = None,
     **kwargs,
 ) -> Tuple[ParallaxVLLMModelRunner, Dict, Any]:
     from parallax.utils.selective_download import get_model_path_with_selective_download
@@ -382,10 +369,6 @@ def initialize_vllm_model_runner(
     # For single process, always use pp_size=1
     virtual_pp_size = 1
 
-    import os
-
-    import vllm.distributed.parallel_state as parallel_state
-
     if not parallel_state.model_parallel_is_initialized():
         logger.debug(f"Initializing vLLM distributed environment...")
 
@@ -415,7 +398,6 @@ def initialize_vllm_model_runner(
             original_pp_group = parallel_state._PP
             if original_pp_group is not None:
                 # Get backend from device_group (torch is already imported at module level)
-                import torch.distributed
 
                 backend = torch.distributed.get_backend(original_pp_group.device_group)
 
@@ -471,7 +453,9 @@ def initialize_vllm_model_runner(
 
     parallel_config = ParallelConfig(
         pipeline_parallel_size=virtual_pp_size,
-        tensor_parallel_size=1,
+        tensor_parallel_size=tp_size,
+        node_rank=tp_rank,
+        rank=tp_rank,
         distributed_executor_backend=None,
     )
 
@@ -483,6 +467,8 @@ def initialize_vllm_model_runner(
         max_num_batched_tokens=max_batched_tokens,
         max_num_seqs=256,
         max_model_len=model_config.max_model_len,
+        is_encoder_decoder=False,
+        enable_chunked_prefill=False,
     )
 
     vllm_config = VllmConfig(
@@ -494,19 +480,12 @@ def initialize_vllm_model_runner(
         load_config=load_config_for_config,
         lora_config=None,
         speculative_config=None,
-        observability_config=None,
-        prompt_adapter_config=None,
         quant_config=None,
-        compilation_config=CompilationConfig(),
         kv_transfer_config=None,
         kv_events_config=None,
         additional_config={},
         instance_id="",
     )
-
-    # Set the global vLLM config to avoid "Current vLLM config is not set" warning
-    set_current_vllm_config(vllm_config)
-    logger.debug("Set current vLLM config globally")
 
     model_runner = ParallaxVLLMModelRunner(
         vllm_config=vllm_config,
@@ -528,8 +507,6 @@ def initialize_vllm_model_runner(
     if not kv_cache_specs:
         raise RuntimeError("No KV cache specs found in the loaded model")
 
-    import torch
-
     free_memory, total_memory = torch.cuda.mem_get_info(0)
     available_memory = int(free_memory * kv_cache_memory_fraction)
 
@@ -537,11 +514,6 @@ def initialize_vllm_model_runner(
         f"Available GPU memory for KV cache: "
         f"{available_memory / (1024**3):.2f} GB "
         f"({kv_cache_memory_fraction:.1%} of {free_memory / (1024**3):.2f} GB)"
-    )
-
-    from vllm.v1.core.kv_cache_utils import (
-        generate_scheduler_kv_cache_config,
-        get_kv_cache_configs,
     )
 
     kv_cache_configs = get_kv_cache_configs(
@@ -554,21 +526,28 @@ def initialize_vllm_model_runner(
 
     model_runner.kv_cache_config = kv_cache_config
 
-    logger.info("Initializing GPUModelRunner KV cache...")
-    model_runner.initialize_kv_cache(kv_cache_config)
-    logger.info("GPUModelRunner KV cache initialized successfully")
+    # Init workspace manager for capturing graph
+    device = torch.cuda.current_device()
+    init_workspace_manager(device)
 
-    logger.info("Initializing KV Cache Manager...")
-    model_runner.initialize_kv_cache_manager(max_model_len=model_config.max_model_len)
-    logger.info("KV Cache Manager initialized successfully")
+    with set_current_vllm_config(vllm_config):
+        logger.info("Initializing GPUModelRunner KV cache...")
+        model_runner.initialize_kv_cache(kv_cache_config)
+        logger.info("GPUModelRunner KV cache initialized successfully")
 
-    # Warm up the model and capture CUDA graphs if enabled
-    # This prevents the first request from triggering compilation/graph capture
-    logger.info("Warming up model and capturing CUDA graphs...")
-    try:
-        model_runner.capture_model()
-        logger.info("Model warmup and CUDA graph capture completed successfully")
-    except Exception as e:
-        logger.warning(f"Failed to capture CUDA graph during initialization: {e}")
+        logger.info("Initializing KV Cache Manager...")
+        model_runner.initialize_kv_cache_manager(
+            max_model_len=model_config.max_model_len, block_size=kv_block_size
+        )
+        logger.info("KV Cache Manager initialized successfully")
+
+        # Warm up the model and capture CUDA graphs if enabled
+        # This prevents the first request from triggering compilation/graph capture
+        logger.info("Warming up model and capturing CUDA graphs...")
+        try:
+            model_runner.capture_model()
+            logger.info("Model warmup and CUDA graph capture completed successfully")
+        except Exception as e:
+            logger.warning(f"Failed to capture CUDA graph during initialization: {e}")
 
     return model_runner, config, tokenizer
