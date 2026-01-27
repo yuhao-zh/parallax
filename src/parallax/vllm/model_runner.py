@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -19,6 +20,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed.parallel_state import GroupCoordinator as VLLMGroupCoordinator
+from vllm.lora.request import LoRARequest
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
@@ -40,6 +42,7 @@ from parallax.sglang.monkey_patch_utils.weight_loader_filter import (
 from parallax.utils.tokenizer_utils import load_tokenizer
 from parallax.vllm.monkey_patch import apply_parallax_vllm_monkey_patch
 from parallax_utils.logging_config import get_logger
+from parallax_utils.prepare_adapter import download_adapter_config
 
 logger = get_logger(__name__)
 
@@ -515,10 +518,11 @@ def initialize_vllm_model_runner(
     # LoRA Config construction
     enable_lora = kwargs.get("enable_lora", False)
     lora_config = None
+    lora_req = None
     if enable_lora:
         max_lora_rank = kwargs.get("max_lora_rank")
         if max_lora_rank is None:
-            max_lora_rank = 16
+            max_lora_rank = 64
             logger.warning(f"max_lora_rank not specified, using default: {max_lora_rank}")
 
         max_loras = kwargs.get("max_loras_per_batch", 1)
@@ -528,6 +532,8 @@ def initialize_vllm_model_runner(
         max_cpu_loras = kwargs.get("max_loaded_loras")
         fully_sharded_loras = kwargs.get("fully_sharded_loras", False)
 
+        lora_path = kwargs.get("lora_path")
+
         lora_config = LoRAConfig(
             max_lora_rank=max_lora_rank,
             max_loras=max_loras,
@@ -536,6 +542,17 @@ def initialize_vllm_model_runner(
             lora_dtype=dtype,
         )
         logger.info(f"LoRA config: {lora_config}")
+
+        # Create a simple hash or ID for the LoRA based on path
+        # In a real scenario, we might want a more robust ID mapping mechanism
+        lora_name = f"lora_{hash(lora_path) % 10000}"
+        lora_int_id = abs(hash(lora_path)) % 10000 + 1
+
+        lora_req = LoRARequest(lora_name=lora_name, lora_int_id=lora_int_id, lora_path=lora_path)
+        logger.debug(f"Created LoRA request: {lora_name} (id={lora_int_id}) path={lora_path}")
+
+        # Workaround: save adapter_config.json locally for lora update
+        download_adapter_config(lora_path)
 
     vllm_config = VllmConfig(
         model_config=model_config,
@@ -619,6 +636,10 @@ def initialize_vllm_model_runner(
         except Exception as e:
             logger.warning(f"Failed to capture CUDA graph during initialization: {e}")
 
+        if enable_lora:
+            logger.info(f"Initializing lora adapters...")
+            model_runner.add_lora(lora_req)
+
     return model_runner, config, tokenizer
 
 
@@ -635,9 +656,32 @@ def refit_vllm_model(
             model_runner.model.load_weights(weights=refit_tensors)
     elif refit_weight_path is not None:
         logger.info(f"Executor begins weight refit from disk files")
-        config_overrides = {"load_config": {"download_dir": refit_weight_path}}
-        model_runner.update_config(overrides=config_overrides)
-        model_runner.reload_weights()
+        # config_overrides = {"load_config": {"download_dir": refit_weight_path}}
+        # model_runner.update_config(overrides=config_overrides)
+        # model_runner.reload_weights()
+        adapter_path = os.path.join(os.getcwd(), "adapter_config.json")
+        if os.path.isfile(adapter_path):
+            shutil.copy(adapter_path, refit_weight_path)
+        else:
+            logger.warning(f"Cannot find adapter_config.json locally. Exit lora weight refit.")
+            return
+
+        lora_name = f"lora_{hash(refit_weight_path) % 10000}"
+        lora_int_id = abs(hash(refit_weight_path)) % 10000 + 1
+        lora_req = LoRARequest(
+            lora_name=lora_name, lora_int_id=lora_int_id, lora_path=refit_weight_path
+        )
+        logger.info(
+            f"Created LoRA request: {lora_name} (id={lora_int_id}) path={refit_weight_path}"
+        )
+
+        before_loras = model_runner.list_loras()
+        logger.info(f"Before lora refit number of lora adapters: {len(before_loras)}")
+        for lora_id in before_loras:
+            model_runner.remove_lora(lora_id)
+        model_runner.add_lora(lora_req)
+        after_loras = model_runner.list_loras()
+        logger.info(f"After lora refit number of lora adapters: {len(after_loras)}")
     else:
         assert False, "Weight refit needs host tensors or weight path"
     logger.info(f"Finish weight refit")
