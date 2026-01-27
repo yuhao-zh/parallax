@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
 )
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.workspace import init_workspace_manager
+from vllm.v1.worker.workspace import current_workspace_manager, init_workspace_manager
 
 from parallax.sglang.monkey_patch_utils.weight_loader_filter import (
     apply_weight_loader_filter_patch,
@@ -312,6 +312,32 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
         return self.execute_model_state, sampled_token_ids
 
 
+def _init_and_reserve_workspace(device: torch.device, max_num_tokens: int) -> None:
+
+    init_workspace_manager(device)
+
+    try:
+        _MB = 1024**2
+        per_token_workspace = 24 * 1024
+        estimated_workspace = max_num_tokens * per_token_workspace
+        reserve_size = max(512 * _MB, min(estimated_workspace, 8192 * _MB))
+        free_mem, _ = torch.cuda.mem_get_info(device.index)
+        if reserve_size > free_mem * 0.5:
+            logger.warning(
+                f"Estimated workspace ({reserve_size / _MB:.0f}MB) is >50% of free memory "
+                f"({free_mem / _MB:.0f}MB). Clamping to 4GB to preserve memory for KV cache."
+            )
+            reserve_size = min(reserve_size, 4096 * _MB)
+
+        current_workspace_manager()._ensure_workspace_size(reserve_size)
+        logger.info(
+            f"Initialized WorkspaceManager and reserved {reserve_size / _MB:.2f} MB buffer "
+            f"(max_num_tokens={max_num_tokens})"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to reserve workspace buffer: {e}")
+
+
 def initialize_vllm_model_runner(
     model_repo: str,
     start_layer: int,
@@ -441,6 +467,11 @@ def initialize_vllm_model_runner(
             f"num_hidden_layers ({num_hidden_layers})"
         )
 
+    if max_sequence_length is not None:
+        max_len = max_sequence_length
+    else:
+        max_len = getattr(config, "max_position_embeddings", 4096)
+
     model_config = ModelConfig(
         model=str(model_path),
         tokenizer=str(model_path),
@@ -448,7 +479,7 @@ def initialize_vllm_model_runner(
         trust_remote_code=True,
         dtype=dtype,
         seed=0,
-        max_model_len=getattr(config, "max_position_embeddings", 4096),
+        max_model_len=max_len,
     )
 
     cache_config = CacheConfig(
@@ -535,6 +566,10 @@ def initialize_vllm_model_runner(
 
         logger.debug("Letting vLLM automatically generate KV cache configuration...")
 
+        # Init workspace manager for capturing graph and reserve memory
+        # We do this BEFORE calculating available memory for KV cache to avoid OOM
+        _init_and_reserve_workspace(device, max_num_tokens_per_batch)
+
         kv_cache_specs = model_runner.get_kv_cache_spec()
 
         if not kv_cache_specs:
@@ -558,9 +593,6 @@ def initialize_vllm_model_runner(
         kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
 
         model_runner.kv_cache_config = kv_cache_config
-
-        # Init workspace manager for capturing graph
-        init_workspace_manager(device)
 
         logger.info("Initializing GPUModelRunner KV cache...")
         model_runner.initialize_kv_cache(kv_cache_config)
