@@ -309,10 +309,17 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
         super().execute_model(scheduler_output, intermediate_tensors)
 
         sampled_token_ids = None
-        if return_decoded_tokens:
-            sampled_token_ids = super().sample_tokens(grammar_output=None).sampled_token_ids_cpu
+        sampler_output = None
+        logits = None
 
-        return self.execute_model_state, sampled_token_ids
+        if return_decoded_tokens:
+            if hasattr(self.execute_model_state, "logits"):
+                logits = self.execute_model_state.logits
+
+            sampler_output = super().sample_tokens(grammar_output=None)
+            sampled_token_ids = sampler_output.sampled_token_ids_cpu
+
+        return self.execute_model_state, sampled_token_ids, sampler_output, logits
 
 
 def _init_and_reserve_workspace(device: torch.device, max_num_tokens: int) -> None:
