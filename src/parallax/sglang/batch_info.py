@@ -7,9 +7,18 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 
 from types import SimpleNamespace
 from typing import List, Optional, Any
+import requests
+from io import BytesIO
+from PIL import Image
 
 import torch
-from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
+from sglang.srt.managers.schedule_batch import (
+    Req,
+    ScheduleBatch,
+    MultimodalInputs,
+    MultimodalDataItem,
+    Modality,
+)
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.sampling.sampling_batch_info import (
@@ -26,6 +35,48 @@ from parallax.server.sampling.sampling_params import (
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _process_images(image_urls: List[str], processor: Any) -> List[MultimodalDataItem]:
+    mm_items = []
+    for url in image_urls:
+        try:
+            if url.startswith("http"):
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                image_data = BytesIO(response.content)
+                image = Image.open(image_data).convert("RGB")
+            elif url.startswith("data:image"):
+                # TODO: Handle base64
+                continue
+            else:
+                image = Image.open(url).convert("RGB")
+
+            # Process image
+            inputs = processor(images=image, return_tensors="pt")
+            
+            # Extract features (adapt based on processor output)
+            pixel_values = inputs.get("pixel_values")
+            if pixel_values is None:
+                logger.error(f"Processor output missing pixel_values for {url}")
+                continue
+
+            # Extract extra fields if available
+            model_specific_data = {}
+            if "image_grid_thw" in inputs:
+                model_specific_data["image_grid_thw"] = inputs["image_grid_thw"]
+            if "image_sizes" in inputs:
+                model_specific_data["image_sizes"] = inputs["image_sizes"]
+
+            item = MultimodalDataItem(
+                modality=Modality.IMAGE,
+                feature=pixel_values,
+                model_specific_data=model_specific_data,
+            )
+            mm_items.append(item)
+        except Exception as e:
+            logger.error(f"Failed to process image {url}: {e}")
+    return mm_items
 
 
 def transform_sampling_params_to_sglang(old_params: ParallaxSamplingParams) -> SGLSamplingParams:
@@ -53,7 +104,6 @@ def transform_requests_to_sglang(
     processor: Optional[Any] = None,
 ) -> List[Req]:
     """Transforms Parallax Request to SGLang.Req format"""
-    from sglang.srt.managers.schedule_batch import MultimodalInputs
 
     reqs = []
     for old_req in old_requests:
@@ -73,45 +123,8 @@ def transform_requests_to_sglang(
                     req.multimodal_inputs = MultimodalInputs.from_dict(old_req.multimodal_params)
                 elif "images" in old_req.multimodal_params and processor is not None:
                     # Case 2: List of image URLs, need processing
-                    # Import necessary modules here to avoid top-level dependency
-                    from PIL import Image
-                    import requests
-                    from io import BytesIO
-                    from sglang.srt.managers.schedule_batch import MultimodalDataItem, Modality
-
                     image_urls = old_req.multimodal_params["images"]
-                    mm_items = []
-                    
-                    for url in image_urls:
-                        try:
-                            # Basic image downloading logic
-                            if url.startswith("http"):
-                                response = requests.get(url, timeout=10)
-                                response.raise_for_status()
-                                image_data = BytesIO(response.content)
-                                image = Image.open(image_data).convert("RGB")
-                            elif url.startswith("data:image"):
-                                # Handle base64 encoded images if needed, or skip
-                                continue
-                            else:
-                                # Assume local path
-                                image = Image.open(url).convert("RGB")
-                            
-                            # Process image using the provided processor
-                            # Note: Different processors have different call signatures.
-                            # Standard HF processor usage:
-                            inputs = processor(images=image, return_tensors="pt")
-                            pixel_values = inputs.pixel_values
-                            
-                            # Construct MultimodalDataItem
-                            # NOTE: SGLang expects features to be stored in specific fields depending on modality
-                            item = MultimodalDataItem(
-                                modality=Modality.IMAGE,
-                                feature=pixel_values,
-                            )
-                            mm_items.append(item)
-                        except Exception as img_err:
-                            logger.error(f"Failed to process image {url}: {img_err}")
+                    mm_items = _process_images(image_urls, processor)
                     
                     if mm_items:
                         req.multimodal_inputs = MultimodalInputs(mm_items=mm_items)
