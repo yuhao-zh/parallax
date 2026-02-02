@@ -43,6 +43,7 @@ parallax = "parallax.cli:main"
 [project.optional-dependencies]
 
 mac = [
+  "nanobind==2.10.2",
   "torch==2.8.0",
   "mlx-lm==0.30.5",
   "mlx==0.30.4",
