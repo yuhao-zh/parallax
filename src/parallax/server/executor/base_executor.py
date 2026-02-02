@@ -660,6 +660,18 @@ class BaseExecutor:
         lora_path = raw_request.get("lora_path")
         return_probs = raw_request.get("return_probs", False)  # Get return_probs parameter
 
+        # Extract multimodal params if present
+        multimodal_params = None
+        if "messages" in raw_request:
+            for message in raw_request["messages"]:
+                content = message.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "image_url":
+                            if multimodal_params is None:
+                                multimodal_params = {"images": []}
+                            multimodal_params["images"].append(part["image_url"])
+
         raw_sampling_params = raw_request.get("sampling_params")
         if raw_sampling_params is None:
             sampling_params = SamplingParams()
@@ -684,6 +696,7 @@ class BaseExecutor:
             max_total_length=max_total_length,
             lora_path=lora_path,
             return_probs=return_probs,
+            multimodal_params=multimodal_params,
         )
         if "routing_table" in raw_request:
             req.routing_table = raw_request["routing_table"]

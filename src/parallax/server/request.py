@@ -96,6 +96,7 @@ class Request:
         routing_table: Optional[List[str]] = [],
         sampling_params: Optional[SamplingParams] = None,
         lora_path: Optional[str] = None,
+        multimodal_params: Optional[Dict] = None,
     ):
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
@@ -109,6 +110,7 @@ class Request:
         self.last_updated_time: Optional[float] = None
         self.lora_id: Optional[str] = None
         self.lora_path = lora_path
+        self.multimodal_params = multimodal_params
 
     @property
     def is_finished(self) -> bool:
@@ -161,6 +163,7 @@ class InitialRequest(Request):
         status: RequestStatus = RequestStatus.PREFILLING,
         lora_path: Optional[str] = None,
         return_probs: bool = False,
+        multimodal_params: Optional[Dict] = None,
     ):
         if not prompt and not input_ids:
             raise ValueError("prompt or input_ids cannot be empty.")
@@ -171,6 +174,7 @@ class InitialRequest(Request):
             input_ids=input_ids,
             sampling_params=sampling_params,
             lora_path=lora_path,
+            multimodal_params=multimodal_params,
         )
         self.prompt = prompt
         self.return_probs = return_probs

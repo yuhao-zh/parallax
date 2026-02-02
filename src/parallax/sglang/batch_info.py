@@ -60,6 +60,7 @@ def transform_requests_to_sglang(
             origin_input_ids=old_req.input_ids,
             sampling_params=sampling_params,
             lora_id=old_req.lora_id,
+            multimodal_inputs=old_req.multimodal_params,
         )
 
         # Debug: Log before cache lookup
