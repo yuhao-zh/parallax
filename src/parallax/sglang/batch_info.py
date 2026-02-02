@@ -6,7 +6,7 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 """
 
 from types import SimpleNamespace
-from typing import List, Optional
+from typing import List, Optional, Any
 
 import torch
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
