@@ -120,23 +120,31 @@ if __name__ == "__main__":
             check_latest_release()
 
             config = fetch_model_from_hf(args.model_path, local_files_only=args.use_hfcache)
+            num_layers = config.get("num_hidden_layers") or config.get("n_layer") or config.get("num_layers")
+            
+            # If not found in top level, check text_config (common in multimodal models)
+            if num_layers is None and "text_config" in config:
+                text_config = config["text_config"]
+                if isinstance(text_config, dict):
+                    num_layers = text_config.get("num_hidden_layers") or text_config.get("n_layer") or text_config.get("num_layers")
+
             if args.start_layer is None:
                 args.start_layer = 0
             if args.end_layer is None:
-                args.end_layer = config.get("num_hidden_layers")
+                args.end_layer = num_layers
 
             # only launch http server on head node
             if args.start_layer == 0:
                 http_server_process = launch_http_server(args)
             # Launch P2P server as subprocess
-            if not (args.start_layer == 0 and args.end_layer == config.get("num_hidden_layers")):
+            if not (args.start_layer == 0 and args.end_layer == num_layers):
                 p2p_server_process = launch_p2p_server_process(
                     initial_peers=args.initial_peers,
                     scheduler_addr=args.scheduler_addr,
                     relay_servers=args.relay_servers,
                     pp_start_layer=args.start_layer,
                     pp_end_layer=args.end_layer,
-                    hidden_layers=config.get("num_hidden_layers"),
+                    hidden_layers=num_layers,
                     tp_size=args.tp_size,
                     dp_size=args.dp_size,
                     tcp_port=args.tcp_port,

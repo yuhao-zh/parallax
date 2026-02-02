@@ -60,7 +60,7 @@ TODO:
 
 import uuid
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from parallax.server.sampling.sampling_params import SamplingParams
 from parallax_utils.logging_config import get_logger
