@@ -48,9 +48,13 @@ def transform_sampling_params_to_sglang(old_params: ParallaxSamplingParams) -> S
 
 
 def transform_requests_to_sglang(
-    old_requests: List[Request], page_tree_cache: Optional[PageRadixCache] = None
+    old_requests: List[Request],
+    page_tree_cache: Optional[PageRadixCache] = None,
+    processor: Optional[Any] = None,
 ) -> List[Req]:
     """Transforms Parallax Request to SGLang.Req format"""
+    from sglang.srt.managers.schedule_batch import MultimodalInputs
+
     reqs = []
     for old_req in old_requests:
         sampling_params = transform_sampling_params_to_sglang(old_req.sampling_params)
@@ -60,8 +64,71 @@ def transform_requests_to_sglang(
             origin_input_ids=old_req.input_ids,
             sampling_params=sampling_params,
             lora_id=old_req.lora_id,
-            multimodal_inputs=old_req.multimodal_params,
         )
+        if old_req.multimodal_params is not None:
+            # Construct MultimodalInputs from dict
+            try:
+                if "mm_items" in old_req.multimodal_params:
+                    # Case 1: Already structured data
+                    req.multimodal_inputs = MultimodalInputs.from_dict(old_req.multimodal_params)
+                elif "images" in old_req.multimodal_params and processor is not None:
+                    # Case 2: List of image URLs, need processing
+                    # Import necessary modules here to avoid top-level dependency
+                    from PIL import Image
+                    import requests
+                    from io import BytesIO
+                    from sglang.srt.managers.schedule_batch import MultimodalDataItem, Modality
+
+                    image_urls = old_req.multimodal_params["images"]
+                    mm_items = []
+                    
+                    for url in image_urls:
+                        try:
+                            # Basic image downloading logic
+                            if url.startswith("http"):
+                                response = requests.get(url, timeout=10)
+                                response.raise_for_status()
+                                image_data = BytesIO(response.content)
+                                image = Image.open(image_data).convert("RGB")
+                            elif url.startswith("data:image"):
+                                # Handle base64 encoded images if needed, or skip
+                                continue
+                            else:
+                                # Assume local path
+                                image = Image.open(url).convert("RGB")
+                            
+                            # Process image using the provided processor
+                            # Note: Different processors have different call signatures.
+                            # Standard HF processor usage:
+                            inputs = processor(images=image, return_tensors="pt")
+                            pixel_values = inputs.pixel_values
+                            
+                            # Construct MultimodalDataItem
+                            # NOTE: SGLang expects features to be stored in specific fields depending on modality
+                            item = MultimodalDataItem(
+                                modality=Modality.IMAGE,
+                                feature=pixel_values,
+                            )
+                            mm_items.append(item)
+                        except Exception as img_err:
+                            logger.error(f"Failed to process image {url}: {img_err}")
+                    
+                    if mm_items:
+                        req.multimodal_inputs = MultimodalInputs(mm_items=mm_items)
+                        logger.debug(f"Successfully processed {len(mm_items)} images for request {req.rid}")
+                
+                else:
+                    # Fallback
+                    logger.warning(
+                        f"Assigning raw multimodal_params to req.multimodal_inputs. "
+                        f"SGLang might expect MultimodalInputs object with Tensors. "
+                        f"Params keys: {old_req.multimodal_params.keys()}, Processor: {processor is not None}"
+                    )
+                    req.multimodal_inputs = old_req.multimodal_params
+
+            except Exception as e:
+                logger.warning(f"Failed to construct MultimodalInputs: {e}")
+                req.multimodal_inputs = old_req.multimodal_params
 
         # Debug: Log before cache lookup
         if page_tree_cache is not None:
@@ -93,10 +160,11 @@ def form_sgl_batch_prefill(
     requests: List[Request],
     model_runner: ModelRunner,
     page_tree_cache: Optional[PageRadixCache] = None,
+    processor: Optional[Any] = None,
 ) -> ForwardBatch:
     """Initialize a prefill ScheduleBatch -> ModelWorkerBatch -> ForwardBatch workflow"""
 
-    sgl_reqs = transform_requests_to_sglang(requests, page_tree_cache)
+    sgl_reqs = transform_requests_to_sglang(requests, page_tree_cache, processor)
 
     def dummy_evict(*args):
         pass

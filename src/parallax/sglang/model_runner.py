@@ -278,6 +278,7 @@ def initialize_sgl_model_runner(
       - model_runner: SGL model runner
       - config: model config driven by mlx-lm
       - tokenizer: tokenizer driven by mlx-lm
+      - processor: optional processor for multimodal models
     """
     apply_parallax_sglang_monkey_patch()
 
@@ -301,6 +302,15 @@ def initialize_sgl_model_runner(
     config = load_config(model_path)
     tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
     dtype = config.get("torch_dtype", "bfloat16")
+
+    # Load processor if available (for multimodal models)
+    processor = None
+    try:
+        from transformers import AutoProcessor
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        logger.info(f"Loaded processor for model {model_path}")
+    except Exception as e:
+        logger.debug(f"No processor loaded (normal for text-only models): {e}")
 
     if nccl_port is None:
         nccl_port = random.randint(4000, 5000)
@@ -374,7 +384,7 @@ def initialize_sgl_model_runner(
         dp_rank=dp_rank,
         dp_size=dp_size,
     )
-    return model_runner, config, tokenizer
+    return model_runner, config, tokenizer, processor
 
 
 def refit_sgl_model(

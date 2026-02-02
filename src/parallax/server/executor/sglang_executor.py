@@ -140,7 +140,7 @@ class SGLExecutor(BaseExecutor):
         logger.debug(
             f"Initializing SGLang model runner for repo={model_repo}, layers=[{start_layer}, {end_layer})"
         )
-        self.model_runner, self.config, self.tokenizer = initialize_sgl_model_runner(
+        self.model_runner, self.config, self.tokenizer, self.processor = initialize_sgl_model_runner(
             **model_runner_params
         )
         logger.debug(
@@ -601,6 +601,7 @@ class SGLExecutor(BaseExecutor):
             batched_requests,
             self.model_runner,
             self.page_tree_cache,
+            self.processor,
         )
         self.cur_batch = schedule_batch
 
