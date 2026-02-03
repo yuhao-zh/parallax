@@ -124,6 +124,20 @@ class MLXExecutor(BaseExecutor):
         logger.debug(
             f"MLX sharded model loaded in {(time.time() - t0) * 1000:.1f} ms; num_layers={self.config.get('num_hidden_layers')}"
         )
+        
+        # Load VLM processor if this is a VLM model (first peer only)
+        self.vlm_processor = None
+        self.model_type = self.config.get("model_type")
+        if hasattr(self.model_shard, 'is_vlm') and self.model_shard.is_vlm and start_layer == 0:
+            try:
+                from transformers import AutoProcessor
+                self.vlm_processor = AutoProcessor.from_pretrained(
+                    model_repo, 
+                    trust_remote_code=True
+                )
+                logger.info(f"Loaded VLM processor for {self.model_type}")
+            except Exception as e:
+                logger.warning(f"Failed to load VLM processor: {e}. VLM image processing will be disabled.")
 
         # TODO: Duplicate code to BaseExecutor since num_shard_layers and dtype are needed for initializing kv cache
         self.num_shard_layers = end_layer - start_layer
@@ -392,6 +406,9 @@ class MLXExecutor(BaseExecutor):
             slot_mapping=prepared_inputs.get("slot_mapping"),
             state_slot_mapping=prepared_inputs.get("state_slot_mapping"),
             prefix_lens=prepared_inputs.get("prefix_lens"),  # For RoPE offset in prefix cache
+            # VLM inputs (only present for first peer with VLM model)
+            pixel_values=prepared_inputs.get("pixel_values"),
+            image_grid_thw=prepared_inputs.get("image_grid_thw"),
         )
         mx.eval(hidden_states)
 
@@ -658,6 +675,38 @@ class MLXExecutor(BaseExecutor):
             "prefix_lens": prefix_lens_tensor,  # For RoPE offset calculation
             "actual_processed_lengths": actual_processed_lengths_tensor,  # For correct logit selection
         }
+        
+        # VLM support: collect pixel_values and image metadata for first peer
+        if self.is_first_peer and hasattr(self.model_shard, 'is_vlm') and self.model_shard.is_vlm:
+            pixel_values_list = []
+            image_grid_thw_list = []
+            has_vlm_inputs = False
+            
+            for req in batched_requests:
+                if req.vlm_inputs is not None and req.vlm_inputs.has_images():
+                    has_vlm_inputs = True
+                    pixel_values_list.append(req.vlm_inputs.pixel_values)
+                    if req.vlm_inputs.image_grid_thw is not None:
+                        image_grid_thw_list.append(req.vlm_inputs.image_grid_thw)
+                else:
+                    pixel_values_list.append(None)
+            
+            if has_vlm_inputs:
+                # For now, we only support single-image batching where all requests
+                # in the batch either have images or don't have images
+                # TODO: Support mixed batches with proper padding
+                non_none_pixels = [p for p in pixel_values_list if p is not None]
+                if len(non_none_pixels) > 0:
+                    # Concatenate all pixel values along batch dimension
+                    ret["pixel_values"] = mx.concatenate(
+                        [mx.array(p) for p in non_none_pixels], axis=0
+                    )
+                    if image_grid_thw_list:
+                        ret["image_grid_thw"] = mx.concatenate(
+                            [mx.array(g) for g in image_grid_thw_list], axis=0
+                        )
+                    logger.debug(f"VLM batch: pixel_values shape={ret['pixel_values'].shape}")
+        
         logger.debug(f"Prepared MLX prefill batch (size={batch_size})")
         return ret
 

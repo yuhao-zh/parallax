@@ -39,11 +39,13 @@ from parallax.server.request import (
     IntermediateRequest,
     Request,
     RequestStatus,
+    VLMInputs,
 )
 from parallax.server.sampling.sampling_params import SamplingParams
 from parallax.server.scheduler import Scheduler
 from parallax.utils.shared_state import SharedState
 from parallax.utils.utils import get_current_device, get_device_dtype, get_zmq_socket
+from parallax.utils.vlm_utils import create_vlm_inputs_from_request
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -642,12 +644,9 @@ class BaseExecutor:
 
         logger.debug("Executor shutdown complete.")
 
-    def _handle_raw_request(self, raw_request: Dict):
-        assert "messages" in raw_request, "Request did not contain messages"
-
-        rid = raw_request["rid"]
+    def _process_text_request(self, rid: str, messages: list, raw_request: Dict) -> list:
+        """Process a text-only request using the tokenizer."""
         if self.tokenizer.chat_template:
-            messages = raw_request["messages"]
             has_non_text_content = any(
                 isinstance(msg.get("content"), list)
                 and any(
@@ -659,7 +658,6 @@ class BaseExecutor:
             if not has_non_text_content:
                 process_message_content(messages)
             chat_template_kwargs = raw_request.get("chat_template_kwargs", {})
-            # check extra_body for backward compatibility
             if "extra_body" in raw_request and "chat_template_kwargs" in raw_request["extra_body"]:
                 chat_template_kwargs.update(raw_request["extra_body"]["chat_template_kwargs"])
 
@@ -671,8 +669,186 @@ class BaseExecutor:
                 **chat_template_kwargs,
             )
         else:
-            prompt = convert_chat(raw_request["messages"], raw_request.get("role_mapping"))
+            prompt = convert_chat(messages, raw_request.get("role_mapping"))
             prompt = self.tokenizer.encode(prompt)
+        
+        return prompt
+    
+    def _process_vlm_request(self, rid: str, messages: list, image_urls: list):
+        """
+        Process a VLM (multimodal) request using the VLM processor.
+        
+        The processor handles both text formatting and image preprocessing together,
+        ensuring proper image token insertion and expansion.
+        
+        Returns:
+            Tuple of (input_ids, VLMInputs)
+        """
+        from parallax.utils.vlm_utils import load_image
+        
+        try:
+            # Load images
+            images = []
+            for url in image_urls:
+                try:
+                    img = load_image(url)
+                    images.append(img)
+                except Exception as e:
+                    logger.warning(f"Failed to load image {url}: {e}")
+            
+            if not images:
+                logger.warning(f"No images loaded for VLM request {rid}, falling back to text processing")
+                return self._process_text_request(rid, messages, {}), None
+            
+            # Format messages for processor
+            # Most VLM processors expect a specific format with image placeholders
+            formatted_messages = self._format_messages_for_vlm(messages)
+            
+            # Apply chat template to get the text prompt
+            if hasattr(self.vlm_processor, 'apply_chat_template'):
+                # Some processors have their own chat template
+                text_prompt = self.vlm_processor.apply_chat_template(
+                    formatted_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            elif self.tokenizer.chat_template:
+                # Fall back to tokenizer's chat template
+                text_prompt = self.tokenizer.apply_chat_template(
+                    formatted_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            else:
+                # Simple fallback
+                text_prompt = "\n".join(
+                    f"{msg.get('role', 'user')}: {self._extract_text_from_content(msg.get('content', ''))}"
+                    for msg in formatted_messages
+                )
+            
+            # Use processor to handle text + images together
+            processor_inputs = self.vlm_processor(
+                text=text_prompt,
+                images=images,
+                return_tensors="np",
+            )
+            
+            # Extract input_ids
+            input_ids = processor_inputs.get("input_ids")
+            if input_ids is None:
+                raise ValueError("Processor did not return input_ids")
+            
+            if hasattr(input_ids, "numpy"):
+                input_ids = input_ids.numpy()
+            prompt = input_ids.flatten().tolist()
+            
+            # Extract pixel_values and other vision inputs
+            pixel_values = processor_inputs.get("pixel_values")
+            if pixel_values is not None and hasattr(pixel_values, "numpy"):
+                pixel_values = pixel_values.numpy()
+            
+            image_grid_thw = processor_inputs.get("image_grid_thw")
+            if image_grid_thw is not None and hasattr(image_grid_thw, "numpy"):
+                image_grid_thw = image_grid_thw.numpy()
+            
+            # Create VLMInputs
+            vlm_inputs = VLMInputs(
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                image_sizes=[(img.height, img.width) for img in images],
+                images_processed=False,
+            )
+            
+            logger.debug(
+                f"VLM request {rid}: {len(images)} images, "
+                f"input_ids length={len(prompt)}, "
+                f"pixel_values shape={pixel_values.shape if pixel_values is not None else None}"
+            )
+            
+            return prompt, vlm_inputs
+            
+        except Exception as e:
+            logger.error(f"Failed to process VLM request {rid}: {e}")
+            # Fall back to text-only processing
+            return self._process_text_request(rid, messages, {}), None
+    
+    def _format_messages_for_vlm(self, messages: list) -> list:
+        """
+        Format messages for VLM processing.
+        Converts image_url content parts to a format the processor understands.
+        """
+        formatted = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                # Convert content list to text with image placeholders
+                text_parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        if part.get("type") == "text":
+                            text_parts.append(part.get("text", ""))
+                        elif part.get("type") == "image_url":
+                            # Add image placeholder - processor will handle the actual insertion
+                            # Different models use different placeholders
+                            text_parts.append("<image>")
+                    elif isinstance(part, str):
+                        text_parts.append(part)
+                formatted.append({
+                    "role": msg.get("role", "user"),
+                    "content": "".join(text_parts),
+                })
+            else:
+                formatted.append(msg)
+        return formatted
+    
+    def _extract_text_from_content(self, content) -> str:
+        """Extract text from message content (handles both string and list formats)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            texts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    texts.append(part.get("text", ""))
+                elif isinstance(part, str):
+                    texts.append(part)
+            return " ".join(texts)
+        return str(content)
+
+    def _handle_raw_request(self, raw_request: Dict):
+        assert "messages" in raw_request, "Request did not contain messages"
+
+        rid = raw_request["rid"]
+        messages = raw_request["messages"]
+        
+        # Extract image URLs first to determine if this is a multimodal request
+        multimodal_params = None
+        image_urls = []
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        if multimodal_params is None:
+                            multimodal_params = {"images": []}
+                        image_url = part["image_url"]
+                        multimodal_params["images"].append(image_url)
+                        # Extract URL string for processing
+                        if isinstance(image_url, dict):
+                            image_urls.append(image_url.get("url", image_url))
+                        else:
+                            image_urls.append(image_url)
+        
+        # Process multimodal request with VLM processor
+        vlm_inputs = None
+        has_vlm_processor = hasattr(self, 'vlm_processor') and self.vlm_processor is not None
+        
+        if image_urls and has_vlm_processor:
+            # Use VLM processor to handle both text and images together
+            prompt, vlm_inputs = self._process_vlm_request(rid, messages, image_urls)
+        else:
+            # Standard text-only processing
+            prompt = self._process_text_request(rid, messages, raw_request)
 
         max_seq_len = self.max_sequence_length if self.max_sequence_length is not None else 4096
         max_seq_len = max(max_seq_len, 4096)
@@ -700,18 +876,6 @@ class BaseExecutor:
         lora_path = raw_request.get("lora_path")
         return_probs = raw_request.get("return_probs", False)  # Get return_probs parameter
 
-        # Extract multimodal params if present
-        multimodal_params = None
-        if "messages" in raw_request:
-            for message in raw_request["messages"]:
-                content = message.get("content")
-                if isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "image_url":
-                            if multimodal_params is None:
-                                multimodal_params = {"images": []}
-                            multimodal_params["images"].append(part["image_url"])
-
         raw_sampling_params = raw_request.get("sampling_params")
         if raw_sampling_params is None:
             sampling_params = SamplingParams()
@@ -737,6 +901,7 @@ class BaseExecutor:
             lora_path=lora_path,
             return_probs=return_probs,
             multimodal_params=multimodal_params,
+            vlm_inputs=vlm_inputs,
         )
         if "routing_table" in raw_request:
             req.routing_table = raw_request["routing_table"]

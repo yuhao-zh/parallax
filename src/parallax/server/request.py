@@ -59,13 +59,73 @@ TODO:
 """
 
 import uuid
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
+
+import numpy as np
 
 from parallax.server.sampling.sampling_params import SamplingParams
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class VLMInputs:
+    """Container for Vision Language Model inputs.
+    
+    This is used to pass image/video data through the pipeline.
+    Only the first peer needs to process pixel_values; subsequent peers
+    receive pre-computed image embeddings merged into hidden_states.
+    """
+    # Preprocessed image tensor, shape varies by model:
+    #   - LLaVA: (num_images, C, H, W) or (num_patches, C, patch_H, patch_W)
+    #   - Qwen-VL: (num_patches, C, patch_H, patch_W) with temporal dim for video
+    pixel_values: Optional[np.ndarray] = None
+    
+    # For models with dynamic resolution (e.g., Qwen2-VL):
+    # Tuple of (temporal, height, width) grid sizes for each image
+    # Shape: (num_images, 3) where each row is (t, h, w)
+    image_grid_thw: Optional[np.ndarray] = None
+    
+    # Number of image tokens per image (for variable-length image tokens)
+    image_token_counts: Optional[List[int]] = None
+    
+    # Original image sizes before preprocessing (height, width)
+    # Useful for models that need aspect ratio information
+    image_sizes: Optional[List[tuple]] = None
+    
+    # Whether images have been processed into embeddings
+    # (set to True after first peer processes images)
+    images_processed: bool = False
+    
+    def has_images(self) -> bool:
+        """Check if this request contains image inputs."""
+        return self.pixel_values is not None and len(self.pixel_values) > 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "pixel_values": self.pixel_values,
+            "image_grid_thw": self.image_grid_thw,
+            "image_token_counts": self.image_token_counts,
+            "image_sizes": self.image_sizes,
+            "images_processed": self.images_processed,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional["VLMInputs"]:
+        """Create from dictionary."""
+        if data is None:
+            return None
+        return cls(
+            pixel_values=data.get("pixel_values"),
+            image_grid_thw=data.get("image_grid_thw"),
+            image_token_counts=data.get("image_token_counts"),
+            image_sizes=data.get("image_sizes"),
+            images_processed=data.get("images_processed", False),
+        )
 
 
 class RequestStatus(Enum):
@@ -97,6 +157,7 @@ class Request:
         sampling_params: Optional[SamplingParams] = None,
         lora_path: Optional[str] = None,
         multimodal_params: Optional[Dict] = None,
+        vlm_inputs: Optional[VLMInputs] = None,
     ):
         self.request_id = request_id or str(uuid.uuid4())
         self.status = status
@@ -111,6 +172,14 @@ class Request:
         self.lora_id: Optional[str] = None
         self.lora_path = lora_path
         self.multimodal_params = multimodal_params
+        
+        # VLM support: structured container for vision inputs
+        self.vlm_inputs = vlm_inputs
+    
+    @property
+    def has_images(self) -> bool:
+        """Check if this request contains image inputs."""
+        return self.vlm_inputs is not None and self.vlm_inputs.has_images()
 
     @property
     def is_finished(self) -> bool:
@@ -164,6 +233,7 @@ class InitialRequest(Request):
         lora_path: Optional[str] = None,
         return_probs: bool = False,
         multimodal_params: Optional[Dict] = None,
+        vlm_inputs: Optional[VLMInputs] = None,
     ):
         if not prompt and not input_ids:
             raise ValueError("prompt or input_ids cannot be empty.")
@@ -175,6 +245,7 @@ class InitialRequest(Request):
             sampling_params=sampling_params,
             lora_path=lora_path,
             multimodal_params=multimodal_params,
+            vlm_inputs=vlm_inputs,
         )
         self.prompt = prompt
         self.return_probs = return_probs
@@ -272,6 +343,7 @@ class IntermediateRequest(Request):
         lora_path: Optional[str] = None,
         token_prob: Optional[float] = None,
         return_probs: bool = False,
+        vlm_inputs: Optional[VLMInputs] = None,
     ):
         super().__init__(
             request_id=request_id,
@@ -280,6 +352,7 @@ class IntermediateRequest(Request):
             input_ids=input_ids,
             sampling_params=sampling_params,
             lora_path=lora_path,
+            vlm_inputs=vlm_inputs,
         )
         # Hidden states from the previous peer's computation.
         # Shape:
@@ -336,6 +409,18 @@ class IntermediateRequest(Request):
         else:
             next_token_id = initial_request.output_ids[-1]
 
+        # For VLM: after first peer processes images, mark as processed
+        # and don't pass pixel_values to subsequent peers (only metadata)
+        vlm_inputs = None
+        if initial_request.vlm_inputs is not None:
+            vlm_inputs = VLMInputs(
+                pixel_values=None,  # Don't pass raw pixels to next peers
+                image_grid_thw=initial_request.vlm_inputs.image_grid_thw,
+                image_token_counts=initial_request.vlm_inputs.image_token_counts,
+                image_sizes=initial_request.vlm_inputs.image_sizes,
+                images_processed=True,  # Mark as processed by first peer
+            )
+
         return IntermediateRequest(
             request_id=initial_request.request_id,
             status=initial_request.status,
@@ -348,6 +433,7 @@ class IntermediateRequest(Request):
             lora_path=lora_path,
             token_prob=token_prob,
             return_probs=initial_request.return_probs,
+            vlm_inputs=vlm_inputs,
         )
 
     @classmethod
@@ -374,6 +460,7 @@ class IntermediateRequest(Request):
             lora_path=lora_path,
             token_prob=token_prob,
             return_probs=old_request.return_probs,
+            vlm_inputs=old_request.vlm_inputs,  # Pass through VLM metadata
         )
 
     def __repr__(self):
