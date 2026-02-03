@@ -19,6 +19,7 @@ from sglang.srt.managers.schedule_batch import (
     MultimodalDataItem,
     Modality,
 )
+from sglang.srt.managers.mm_utils import MultiModalityDataPaddingPatternMultimodalTokens
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.sampling.sampling_batch_info import (
@@ -32,51 +33,128 @@ from parallax.server.request import Request
 from parallax.server.sampling.sampling_params import (
     SamplingParams as ParallaxSamplingParams,
 )
+from parallax.sglang.multimodal_utils import prepare_sglang_multimodal_inputs
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
-def _process_images(image_urls: List[str], processor: Any) -> List[MultimodalDataItem]:
+def _load_image(url: Any) -> Image.Image:
+    """Load a single image from URL, file path, or base64."""
+    import base64
+    
+    if isinstance(url, dict):
+        url = url.get("url")
+    if not isinstance(url, str):
+        raise ValueError(f"Unsupported image url type: {type(url)}")
+    
+    if url.startswith("http"):
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        image_data = BytesIO(response.content)
+        return Image.open(image_data).convert("RGB")
+    elif url.startswith("data:image"):
+        # Handle base64 encoded images
+        # Format: data:image/png;base64,<base64_data>
+        header, encoded = url.split(",", 1)
+        image_data = BytesIO(base64.b64decode(encoded))
+        return Image.open(image_data).convert("RGB")
+    else:
+        return Image.open(url).convert("RGB")
+
+
+def _process_images(
+    image_urls: List[Any], 
+    processor: Any, 
+    input_text: str = "",
+    mm_config: Optional[dict] = None,
+) -> tuple[List[MultimodalDataItem], Optional[torch.Tensor], List[int]]:
+    if not image_urls:
+        return [], None, []
+    
     mm_items = []
+    images = []
+    
     for url in image_urls:
         try:
-            if url.startswith("http"):
-                response = requests.get(url, timeout=10)
-                response.raise_for_status()
-                image_data = BytesIO(response.content)
-                image = Image.open(image_data).convert("RGB")
-            elif url.startswith("data:image"):
-                # TODO: Handle base64
-                continue
-            else:
-                image = Image.open(url).convert("RGB")
-
-            # Process image
-            inputs = processor(images=image, return_tensors="pt")
+            image = _load_image(url)
+            images.append(image)
+        except Exception as e:
+            logger.exception(f"Failed to load image {url}: {e}")
+            continue
+    
+    if not images:
+        return [], None, []
+    
+    try:
+        inputs = processor(text=input_text, images=images, return_tensors="pt")
+        
+        if inputs is None:
+            logger.error("Processor returned None")
+            return [], None, []
+        
+        pixel_values = inputs.get("pixel_values")
+        if pixel_values is None:
+            logger.error("Processor output missing pixel_values")
+            return [], None, []
+        
+        expanded_input_ids = inputs.get("input_ids")
+        if expanded_input_ids is not None:
+            expanded_input_ids = expanded_input_ids.flatten().tolist()
+        else:
+            expanded_input_ids = []
+        
+        logger.debug(f"Processor expanded input_ids length: {len(expanded_input_ids)}")
+        
+        image_grid_thw = inputs.get("image_grid_thw")
+        image_sizes = inputs.get("image_sizes")
+        
+        model_specific_data = {}
+        if image_grid_thw is not None:
+            model_specific_data["image_grid_thw"] = image_grid_thw
+        if image_sizes is not None:
+            model_specific_data["image_sizes"] = image_sizes
+        
+        if image_grid_thw is not None and len(image_grid_thw) == len(images):
+            num_images = len(images)
             
-            # Extract features (adapt based on processor output)
-            pixel_values = inputs.get("pixel_values")
-            if pixel_values is None:
-                logger.error(f"Processor output missing pixel_values for {url}")
-                continue
-
-            # Extract extra fields if available
-            model_specific_data = {}
-            if "image_grid_thw" in inputs:
-                model_specific_data["image_grid_thw"] = inputs["image_grid_thw"]
-            if "image_sizes" in inputs:
-                model_specific_data["image_sizes"] = inputs["image_sizes"]
-
+            patches_per_image = []
+            for i in range(num_images):
+                grid = image_grid_thw[i]
+                if isinstance(grid, torch.Tensor):
+                    num_patches = int(torch.prod(grid).item())
+                else:
+                    num_patches = int(torch.prod(torch.tensor(grid)).item())
+                patches_per_image.append(num_patches)
+            
+            patch_start = 0
+            for i in range(num_images):
+                num_patches = patches_per_image[i]
+                item_pixel_values = pixel_values[patch_start:patch_start + num_patches]
+                item_grid_thw = image_grid_thw[i:i+1]
+                
+                item = MultimodalDataItem(
+                    modality=Modality.IMAGE,
+                    feature=item_pixel_values,
+                    model_specific_data={
+                        "image_grid_thw": item_grid_thw,
+                    },
+                )
+                mm_items.append(item)
+                patch_start += num_patches
+        else:
             item = MultimodalDataItem(
                 modality=Modality.IMAGE,
                 feature=pixel_values,
                 model_specific_data=model_specific_data,
             )
             mm_items.append(item)
-        except Exception as e:
-            logger.error(f"Failed to process image {url}: {e}")
-    return mm_items
+        
+        return mm_items, image_grid_thw, expanded_input_ids
+        
+    except Exception as e:
+        logger.exception(f"Failed to process images: {e}")
+        return [], None, []
 
 
 def transform_sampling_params_to_sglang(old_params: ParallaxSamplingParams) -> SGLSamplingParams:
@@ -98,40 +176,142 @@ def transform_sampling_params_to_sglang(old_params: ParallaxSamplingParams) -> S
     return params
 
 
+def _get_image_token_offsets(
+    input_ids: List[int], 
+    image_token_id: Optional[int],
+    vision_start_id: Optional[int] = None,
+    vision_end_id: Optional[int] = None,
+) -> List[tuple[int, int]]:
+    offsets = []
+    
+    if vision_start_id is not None and vision_end_id is not None:
+        start_indices = [i for i, tok in enumerate(input_ids) if tok == vision_start_id]
+        end_indices = [i for i, tok in enumerate(input_ids) if tok == vision_end_id]
+        
+        for start, end in zip(start_indices, end_indices):
+            if start < end:
+                offsets.append((start + 1, end - 1))
+    elif image_token_id is not None:
+        start = None
+        for i, tok in enumerate(input_ids):
+            if tok == image_token_id:
+                if start is None:
+                    start = i
+            elif start is not None:
+                offsets.append((start, i - 1))
+                start = None
+        if start is not None:
+            offsets.append((start, len(input_ids) - 1))
+    
+    return offsets
+
+
 def transform_requests_to_sglang(
     old_requests: List[Request],
     page_tree_cache: Optional[PageRadixCache] = None,
     processor: Optional[Any] = None,
+    hf_config: Optional[dict] = None,
+    tokenizer: Optional[Any] = None,
 ) -> List[Req]:
-    """Transforms Parallax Request to SGLang.Req format"""
-
     reqs = []
+    mm_config = hf_config or {}
+    
     for old_req in old_requests:
         sampling_params = transform_sampling_params_to_sglang(old_req.sampling_params)
         req = Req(
             rid=old_req.request_id,
             origin_input_text="",
-            origin_input_ids=old_req.input_ids,
+            origin_input_ids=list(old_req.input_ids),
             sampling_params=sampling_params,
             lora_id=old_req.lora_id,
         )
+        
         if old_req.multimodal_params is not None:
-            # Construct MultimodalInputs from dict
             try:
                 if "mm_items" in old_req.multimodal_params:
-                    # Case 1: Already structured data
                     req.multimodal_inputs = MultimodalInputs.from_dict(old_req.multimodal_params)
+                    
                 elif "images" in old_req.multimodal_params and processor is not None:
-                    # Case 2: List of image URLs, need processing
                     image_urls = old_req.multimodal_params["images"]
-                    mm_items = _process_images(image_urls, processor)
+                    
+                    input_text = ""
+                    if tokenizer is not None:
+                        try:
+                            input_text = tokenizer.decode(old_req.input_ids, skip_special_tokens=False)
+                            logger.debug(f"Decoded input text (length={len(input_text)}): {input_text[:100]}...")
+                        except Exception as e:
+                            logger.warning(f"Failed to decode input_ids: {e}")
+                    
+                    mm_items, image_grid_thw, expanded_input_ids = _process_images(
+                        image_urls, 
+                        processor, 
+                        input_text=input_text,
+                        mm_config=mm_config,
+                    )
                     
                     if mm_items:
-                        req.multimodal_inputs = MultimodalInputs(mm_items=mm_items)
-                        logger.debug(f"Successfully processed {len(mm_items)} images for request {req.rid}")
+                        if expanded_input_ids and len(expanded_input_ids) > len(old_req.input_ids):
+                            logger.debug(
+                                f"Using expanded input_ids: {len(old_req.input_ids)} -> {len(expanded_input_ids)}"
+                            )
+                            req.origin_input_ids = expanded_input_ids
+                            input_ids_for_offsets = expanded_input_ids
+                        else:
+                            input_ids_for_offsets = list(old_req.input_ids)
+                        
+                        image_token_id = mm_config.get("image_token_id")
+                        vision_start_id = mm_config.get("vision_start_token_id")
+                        vision_end_id = mm_config.get("vision_end_token_id")
+                        
+                        offsets = _get_image_token_offsets(
+                            input_ids_for_offsets,
+                            image_token_id,
+                            vision_start_id,
+                            vision_end_id,
+                        )
+                        
+                        if len(offsets) == len(mm_items):
+                            for item, offset in zip(mm_items, offsets):
+                                item.offsets = [offset]
+                        elif len(offsets) > 0:
+                            for item in mm_items:
+                                item.offsets = offsets
+                        
+                        for item in mm_items:
+                            item.set_pad_value()
+                        
+                        combined_grid_thw = None
+                        if image_grid_thw is not None:
+                            combined_grid_thw = image_grid_thw
+                        else:
+                            grids = []
+                            for item in mm_items:
+                                grid = item.model_specific_data.get("image_grid_thw")
+                                if grid is not None:
+                                    grids.append(grid)
+                            if grids:
+                                combined_grid_thw = torch.cat(grids, dim=0)
+                        
+                        req.multimodal_inputs = prepare_sglang_multimodal_inputs(
+                            mm_items=mm_items,
+                            image_grid_thw=combined_grid_thw,
+                            mm_config=mm_config,
+                            input_ids=input_ids_for_offsets,
+                        )
+                        
+                        padding_pattern = MultiModalityDataPaddingPatternMultimodalTokens()
+                        padded_input_ids = padding_pattern.pad_input_tokens(
+                            input_ids_for_offsets, 
+                            req.multimodal_inputs
+                        )
+                        req.origin_input_ids = padded_input_ids
+                        
+                        logger.debug(
+                            f"Successfully processed {len(mm_items)} images for request {req.rid}, "
+                            f"offsets={offsets}, padded_input_ids_len={len(padded_input_ids)}"
+                        )
                 
                 else:
-                    # Fallback
                     logger.warning(
                         f"Assigning raw multimodal_params to req.multimodal_inputs. "
                         f"SGLang might expect MultimodalInputs object with Tensors. "
@@ -140,7 +320,7 @@ def transform_requests_to_sglang(
                     req.multimodal_inputs = old_req.multimodal_params
 
             except Exception as e:
-                logger.warning(f"Failed to construct MultimodalInputs: {e}")
+                logger.exception(f"Failed to construct MultimodalInputs: {e}")
                 req.multimodal_inputs = old_req.multimodal_params
 
         # Debug: Log before cache lookup
@@ -174,10 +354,13 @@ def form_sgl_batch_prefill(
     model_runner: ModelRunner,
     page_tree_cache: Optional[PageRadixCache] = None,
     processor: Optional[Any] = None,
+    hf_config: Optional[dict] = None,
+    tokenizer: Optional[Any] = None,
 ) -> ForwardBatch:
-    """Initialize a prefill ScheduleBatch -> ModelWorkerBatch -> ForwardBatch workflow"""
 
-    sgl_reqs = transform_requests_to_sglang(requests, page_tree_cache, processor)
+    sgl_reqs = transform_requests_to_sglang(
+        requests, page_tree_cache, processor, hf_config, tokenizer
+    )
 
     def dummy_evict(*args):
         pass

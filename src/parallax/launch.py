@@ -120,13 +120,13 @@ if __name__ == "__main__":
             check_latest_release()
 
             config = fetch_model_from_hf(args.model_path, local_files_only=args.use_hfcache)
-            num_layers = config.get("num_hidden_layers") or config.get("n_layer") or config.get("num_layers")
+            num_layers = config.get("num_hidden_layers")
             
             # If not found in top level, check text_config (common in multimodal models)
             if num_layers is None and "text_config" in config:
                 text_config = config["text_config"]
                 if isinstance(text_config, dict):
-                    num_layers = text_config.get("num_hidden_layers") or text_config.get("n_layer") or text_config.get("num_layers")
+                    num_layers = text_config.get("num_hidden_layers")
 
             if args.start_layer is None:
                 args.start_layer = 0

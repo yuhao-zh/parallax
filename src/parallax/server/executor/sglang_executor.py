@@ -6,6 +6,8 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+from sglang.srt.environ import envs
+from sglang.srt.managers.mm_utils import init_mm_embedding_cache
 from sglang.srt.lora.lora_registry import LoRARef
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
@@ -146,6 +148,8 @@ class SGLExecutor(BaseExecutor):
         logger.debug(
             f"SGLang model runner initialized. num_layers={self.config.get('num_hidden_layers')}"
         )
+        embedding_cache_size = envs.SGLANG_VLM_CACHE_SIZE_MB.get()
+        init_mm_embedding_cache(embedding_cache_size * 1024 * 1024)
 
         # Set device to specific CUDA device based on tp_rank
         # This ensures tensors are moved to the correct GPU
@@ -602,6 +606,8 @@ class SGLExecutor(BaseExecutor):
             self.model_runner,
             self.page_tree_cache,
             self.processor,
+            self.mm_config,
+            self.tokenizer,
         )
         self.cur_batch = schedule_batch
 

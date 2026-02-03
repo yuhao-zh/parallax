@@ -51,7 +51,6 @@ logger = get_logger(__name__)
 
 class BaseExecutor:
     """High-level executor for managing model shards, scheduler, and cache pool on each Peer."""
-
     def __init__(
         self,
         # Model Configs
@@ -112,8 +111,22 @@ class BaseExecutor:
         # Pipe communication
         self.conn = conn
 
+        def _config_get(key, default=None):
+            if isinstance(self.config, dict):
+                return self.config.get(key, default)
+            return getattr(self.config, key, default)
+
+        num_hidden_layers = _config_get("num_hidden_layers")
+        text_config = _config_get("text_config")
+        if num_hidden_layers is None and isinstance(text_config, dict):
+            num_hidden_layers = text_config.get("num_hidden_layers")
+        if num_hidden_layers is None:
+            num_hidden_layers = _config_get("n_layer") or _config_get("num_layers")
+            if isinstance(text_config, dict):
+                num_hidden_layers = text_config.get("num_hidden_layers")
+        
         self.is_first_peer = start_layer == 0
-        self.is_last_peer = end_layer == self.config.get("num_hidden_layers")
+        self.is_last_peer = end_layer == num_hidden_layers
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         self.dp_size = dp_size
@@ -143,7 +156,25 @@ class BaseExecutor:
         else:
             self.pad_token_id = self.tokenizer.pad_token_id
 
-        self.eos_token_id = self.config.get("eos_token_id", None)
+        self.eos_token_id = _config_get("eos_token_id")
+        if self.eos_token_id is None and isinstance(text_config, dict):
+            self.eos_token_id = text_config.get("eos_token_id")
+
+        vision_config = _config_get("vision_config", {})
+        if not isinstance(vision_config, dict):
+            vision_config = {
+                "spatial_merge_size": getattr(vision_config, "spatial_merge_size", None),
+                "tokens_per_second": getattr(vision_config, "tokens_per_second", None),
+            }
+        self.mm_config = {
+            "model_type": _config_get("model_type"),
+            "image_token_id": _config_get("image_token_id"),
+            "vision_start_token_id": _config_get("vision_start_token_id"),
+            "vision_end_token_id": _config_get("vision_end_token_id"),
+            "video_token_id": _config_get("video_token_id"),
+            "audio_token_id": _config_get("audio_token_id"),
+            "vision_config": vision_config,
+        }
 
         # Scheduler: derive final max_batch_size with KV constraints
         # Remove this for now as it's not working on gpu devices
@@ -617,7 +648,16 @@ class BaseExecutor:
         rid = raw_request["rid"]
         if self.tokenizer.chat_template:
             messages = raw_request["messages"]
-            process_message_content(messages)
+            has_non_text_content = any(
+                isinstance(msg.get("content"), list)
+                and any(
+                    isinstance(part, dict) and part.get("type") != "text"
+                    for part in msg.get("content")
+                )
+                for msg in messages
+            )
+            if not has_non_text_content:
+                process_message_content(messages)
             chat_template_kwargs = raw_request.get("chat_template_kwargs", {})
             # check extra_body for backward compatibility
             if "extra_body" in raw_request and "chat_template_kwargs" in raw_request["extra_body"]:
