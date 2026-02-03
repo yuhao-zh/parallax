@@ -200,12 +200,14 @@ class ShardedModel(nn.Module):
     def _encode_images(
         self,
         pixel_values: mx.array,
+        image_grid_thw: Optional[mx.array] = None,
         **kwargs,
     ) -> mx.array:
         """Encode images through vision tower and projector.
         
         Args:
             pixel_values: Image tensor, typically (batch, C, H, W) or (num_patches, C, H, W)
+            image_grid_thw: Grid size (T, H, W) for Qwen-VL models
             **kwargs: Additional model-specific arguments
         
         Returns:
@@ -214,11 +216,9 @@ class ShardedModel(nn.Module):
         if self.vision_tower is None:
             raise ValueError("Vision tower not initialized for this model")
         
-        # Convert to vision tower expected format (typically NHWC for MLX)
-        # pixel_values is usually in NCHW format from processor
-        if pixel_values.ndim == 4 and pixel_values.shape[1] in [1, 3, 4]:
-            # NCHW -> NHWC
-            pixel_values = pixel_values.transpose(0, 2, 3, 1)
+        # Check if this is a Qwen-VL style model (needs grid_thw)
+        model_type = getattr(self.vision_config, 'model_type', '') if self.vision_config else ''
+        is_qwen_vl = 'qwen' in model_type.lower() and 'vl' in model_type.lower()
         
         # Ensure correct dtype
         if hasattr(self.vision_tower, 'patch_embed') and hasattr(self.vision_tower.patch_embed, 'proj'):
@@ -228,37 +228,51 @@ class ShardedModel(nn.Module):
             pixel_values = pixel_values.astype(self.dtype)
         
         # Get vision features from vision tower
-        # Different vision models have different output formats
-        vision_outputs = self.vision_tower(pixel_values, output_hidden_states=True)
-        
-        # Handle different output formats
-        if isinstance(vision_outputs, tuple):
-            # CLIP/SigLIP style: (pooler_output, last_hidden_state, hidden_states)
-            if len(vision_outputs) >= 3:
-                hidden_states = vision_outputs[2]  # All hidden states
-                if isinstance(self.vision_feature_layer, int):
-                    selected_features = hidden_states[self.vision_feature_layer]
-                    if self.vision_feature_select_strategy == "default":
-                        # Remove CLS token
-                        selected_features = selected_features[:, 1:]
-                else:
-                    # Multiple layers
-                    hs_pool = [hidden_states[idx] for idx in self.vision_feature_layer]
-                    if self.vision_feature_select_strategy == "default":
-                        hs_pool = [hs[:, 1:] for hs in hs_pool]
-                    selected_features = mx.concatenate(hs_pool, axis=-1)
+        if is_qwen_vl and image_grid_thw is not None:
+            # Qwen-VL style: VisionModel(pixel_values, grid_thw) -> (hidden_states, deepstack_features)
+            # No format conversion needed - Qwen-VL expects flat patches
+            vision_outputs = self.vision_tower(pixel_values, image_grid_thw)
+            if isinstance(vision_outputs, tuple):
+                # First element is the merged hidden states (already projected by merger)
+                selected_features = vision_outputs[0]
             else:
-                # Simple (pooler, hidden_state) output
-                selected_features = vision_outputs[1]
-                if self.vision_feature_select_strategy == "default":
-                    selected_features = selected_features[:, 1:]
+                selected_features = vision_outputs
         else:
-            # Direct hidden state output (Qwen-VL style)
-            # These models already output projected features
-            selected_features = vision_outputs
+            # Standard CLIP/SigLIP style
+            # Convert to vision tower expected format (typically NHWC for MLX)
+            if pixel_values.ndim == 4 and pixel_values.shape[1] in [1, 3, 4]:
+                # NCHW -> NHWC
+                pixel_values = pixel_values.transpose(0, 2, 3, 1)
+            
+            vision_outputs = self.vision_tower(pixel_values, output_hidden_states=True)
+            
+            # Handle different output formats
+            if isinstance(vision_outputs, tuple):
+                # CLIP/SigLIP style: (pooler_output, last_hidden_state, hidden_states)
+                if len(vision_outputs) >= 3:
+                    hidden_states = vision_outputs[2]  # All hidden states
+                    if isinstance(self.vision_feature_layer, int):
+                        selected_features = hidden_states[self.vision_feature_layer]
+                        if self.vision_feature_select_strategy == "default":
+                            # Remove CLS token
+                            selected_features = selected_features[:, 1:]
+                    else:
+                        # Multiple layers
+                        hs_pool = [hidden_states[idx] for idx in self.vision_feature_layer]
+                        if self.vision_feature_select_strategy == "default":
+                            hs_pool = [hs[:, 1:] for hs in hs_pool]
+                        selected_features = mx.concatenate(hs_pool, axis=-1)
+                else:
+                    # Simple (pooler, hidden_state) output
+                    selected_features = vision_outputs[1]
+                    if self.vision_feature_select_strategy == "default":
+                        selected_features = selected_features[:, 1:]
+            else:
+                # Direct hidden state output
+                selected_features = vision_outputs
         
         # Project to language model dimension if projector exists
-        # Some VLMs (e.g., Qwen-VL) have projection built into VisionModel
+        # Qwen-VL models have projection built into VisionModel's merger
         if self.multi_modal_projector is not None:
             image_features = self.multi_modal_projector(selected_features)
         else:

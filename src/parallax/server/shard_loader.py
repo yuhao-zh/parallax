@@ -45,6 +45,14 @@ VLM_SPECIAL_PROJECTOR_MAP = {
 }
 
 
+def _get_config_value(config: Dict[str, Any], key: str, default: Any = None) -> Any:
+    """Get config value, falling back to text_config for VLM models."""
+    if key in config:
+        return config[key]
+    text_config = config.get("text_config", {})
+    return text_config.get(key, default)
+
+
 def _get_vlm_classes(
     model_type: str, config: Dict[str, Any]
 ) -> Tuple[Optional[Type[nn.Module]], Optional[Type[nn.Module]], Optional[Dict[str, Any]]]:
@@ -413,6 +421,7 @@ class MLXModelLoader:
             is_first_shard=model_shard.is_first_shard,
             is_last_shard=model_shard.is_last_shard,
             config=config,
+            is_vlm=is_vlm,
         )
 
         if not weight_files and strict:
@@ -421,16 +430,26 @@ class MLXModelLoader:
         # Instead of loading all weights, we iterate through files and keys,
         # loading only what we need.
         shard_weights = {}
-        layer_key_prefix = "model.layers"  # Common prefix
+        
+        # Layer key prefixes to check (in order of priority)
+        # VLM models like Qwen3-VL use model.language_model.layers.X
+        # Standard models use model.layers.X
+        layer_key_prefixes = [
+            ("model.language_model.layers.", 3),  # VLM style: parts[3] is layer index
+            ("model.layers.", 2),                  # Standard style: parts[2] is layer index
+        ]
         
         # VLM weight prefixes to load on first shard
         vlm_weight_prefixes = [
             "vision_tower.",
             "vision_model.",
-            "visual.",  # Some models use this prefix
+            "visual.",      # Qwen-VL style
             "multi_modal_projector.",
-            "mm_projector.",  # Alternative name
+            "mm_projector.",
         ]
+        
+        # Get tie_word_embeddings config (check both root and text_config for VLM)
+        tie_word_embeddings = _get_config_value(config, "tie_word_embeddings", False)
 
         for file_idx, wf in enumerate(weight_files):
             logger.debug(
@@ -443,33 +462,38 @@ class MLXModelLoader:
                 remapped_key = None
 
                 # Check if the key belongs to the shard and remap it
-                if (
-                    model_shard.is_first_shard
-                    and "embed_tokens" in key
-                    and key.startswith("model.")
-                ):
+                # Embeddings: model.embed_tokens or model.language_model.embed_tokens
+                if model_shard.is_first_shard and "embed_tokens" in key:
                     is_needed = True
-                    remapped_key = key.replace("model.", "", 1)
-                    if model_shard.is_last_shard and config.get("tie_word_embeddings", False):
-                        # Also add lm_head mapping for tied embeddings
+                    # Remap to just embed_tokens.weight
+                    if "language_model.embed_tokens" in key:
+                        remapped_key = key.split("language_model.")[-1]
+                    elif key.startswith("model."):
+                        remapped_key = key.replace("model.", "", 1)
+                    else:
+                        remapped_key = key
+                    if model_shard.is_last_shard and tie_word_embeddings:
                         lm_head_key = remapped_key.replace("embed_tokens", "lm_head")
                         shard_weights[lm_head_key] = f[key]
+                        
                 elif model_shard.is_last_shard:
-                    if "model.norm" in key:
-                        is_needed = True
-                        remapped_key = key.replace("model.", "", 1)
+                    # Final norm: model.norm or model.language_model.norm
+                    if ".norm." in key or key.endswith(".norm.weight"):
+                        if "language_model.norm" in key or (key.startswith("model.norm") and "layers" not in key):
+                            is_needed = True
+                            if "language_model.norm" in key:
+                                remapped_key = key.split("language_model.")[-1]
+                            else:
+                                remapped_key = key.replace("model.", "", 1)
                     if "lm_head" in key:
                         is_needed = True
                         remapped_key = key
-                    elif (
-                        config.get("tie_word_embeddings", False)
-                        and "embed_tokens" in key
-                        and key.startswith("model.embed_tokens")
-                    ):
+                    elif tie_word_embeddings and "embed_tokens" in key:
                         is_needed = True
-                        remapped_key = key.replace("model.", "", 1).replace(
-                            "embed_tokens", "lm_head"
-                        )
+                        if "language_model.embed_tokens" in key:
+                            remapped_key = key.split("language_model.")[-1].replace("embed_tokens", "lm_head")
+                        else:
+                            remapped_key = key.replace("model.", "", 1).replace("embed_tokens", "lm_head")
                 
                 # VLM: Load vision tower and projector weights on first shard
                 if model_shard.is_first_shard and is_vlm:
@@ -478,22 +502,29 @@ class MLXModelLoader:
                             is_needed = True
                             remapped_key = key
                             break
-                        # Handle model.vision_tower.* style keys
+                        # Handle model.vision_tower.*, model.visual.* style keys
                         if key.startswith(f"model.{prefix}"):
                             is_needed = True
+                            # Keep as vision_tower.* or visual.* (remove model. prefix)
                             remapped_key = key.replace("model.", "", 1)
                             break
                 
-                if layer_key_prefix in key:
-                    try:
-                        parts = key.split(".")
-                        layer_idx = int(parts[2])
-                        if current_start_layer <= layer_idx < current_end_layer:
-                            is_needed = True
-                            local_layer_idx = layer_idx - current_start_layer
-                            remapped_key = f"layers.{local_layer_idx}.{'.'.join(parts[3:])}"
-                    except (ValueError, IndexError):
-                        continue
+                # Check layer keys with multiple prefix patterns
+                if not is_needed:
+                    for layer_prefix, layer_idx_pos in layer_key_prefixes:
+                        if layer_prefix in key:
+                            try:
+                                parts = key.split(".")
+                                layer_idx = int(parts[layer_idx_pos])
+                                if current_start_layer <= layer_idx < current_end_layer:
+                                    is_needed = True
+                                    local_layer_idx = layer_idx - current_start_layer
+                                    # Remap to layers.{local_idx}.{rest}
+                                    rest_parts = parts[layer_idx_pos + 1:]
+                                    remapped_key = f"layers.{local_layer_idx}.{'.'.join(rest_parts)}"
+                                break
+                            except (ValueError, IndexError):
+                                continue
 
                 # If the key is needed, load only that tensor from the file
                 if is_needed:

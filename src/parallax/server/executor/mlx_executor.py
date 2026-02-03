@@ -32,6 +32,14 @@ from parallax_utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def _get_config_value(config: Dict[str, Any], key: str, default: Any = None) -> Any:
+    """Get config value, falling back to text_config for VLM models."""
+    if key in config and config[key] is not None:
+        return config[key]
+    text_config = config.get("text_config", {})
+    return text_config.get(key, default)
+
+
 class MLXExecutor(BaseExecutor):
     def __init__(
         self,
@@ -122,7 +130,7 @@ class MLXExecutor(BaseExecutor):
             self.model_shard = self.shard_loader.load_lora(self.model_shard, adapters)
 
         logger.debug(
-            f"MLX sharded model loaded in {(time.time() - t0) * 1000:.1f} ms; num_layers={self.config.get('num_hidden_layers')}"
+            f"MLX sharded model loaded in {(time.time() - t0) * 1000:.1f} ms; num_layers={_get_config_value(self.config, 'num_hidden_layers')}"
         )
         
         # Load VLM processor if this is a VLM model (first peer only)
@@ -147,10 +155,16 @@ class MLXExecutor(BaseExecutor):
         )
 
         # Calculate feature dimensions for kv cache
-        num_key_value_heads = self.config.get("num_key_value_heads")
-        head_dim = self.config.get("head_dim") or self.config.get("hidden_size") // self.config.get(
-            "num_attention_heads"
-        )
+        # Use helper to handle VLM models where these are in text_config
+        num_key_value_heads = _get_config_value(self.config, "num_key_value_heads")
+        head_dim = _get_config_value(self.config, "head_dim")
+        if head_dim is None:
+            hidden_size = _get_config_value(self.config, "hidden_size")
+            num_attention_heads = _get_config_value(self.config, "num_attention_heads")
+            if hidden_size and num_attention_heads:
+                head_dim = hidden_size // num_attention_heads
+            else:
+                raise ValueError(f"Cannot determine head_dim: hidden_size={hidden_size}, num_attention_heads={num_attention_heads}")
         qk_nope_head_dim = self.config.get("qk_nope_head_dim", None)
         qk_rope_head_dim = self.config.get("qk_rope_head_dim", None)
         if qk_nope_head_dim is not None and qk_rope_head_dim is not None:
