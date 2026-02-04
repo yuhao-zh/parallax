@@ -655,19 +655,10 @@ class BaseExecutor:
         return prompt
 
     def _process_vlm_request(self, rid: str, messages: list, image_urls: list):
-        """
-        Process a VLM (multimodal) request using the VLM processor.
-
-        The processor handles both text formatting and image preprocessing together,
-        ensuring proper image token insertion and expansion.
-
-        Returns:
-            Tuple of (input_ids, VLMInputs)
-        """
+        """Process a VLM (multimodal) request using the VLM processor."""
         from parallax.utils.vlm_utils import load_image
 
         try:
-            # Load images
             images = []
             for url in image_urls:
                 try:
@@ -681,59 +672,39 @@ class BaseExecutor:
                     f"No images loaded for VLM request {rid}, falling back to text processing"
                 )
                 return self._process_text_request(rid, messages, {}), None
-
-            # Format messages for processor
-            # Most VLM processors expect a specific format with image placeholders
             formatted_messages = self._format_messages_for_vlm(messages)
 
-            # Apply chat template to get the text prompt
             if hasattr(self.vlm_processor, "apply_chat_template"):
-                # Some processors have their own chat template
                 text_prompt = self.vlm_processor.apply_chat_template(
                     formatted_messages,
                     tokenize=False,
                     add_generation_prompt=True,
                 )
             elif self.tokenizer.chat_template:
-                # Fall back to tokenizer's chat template
                 text_prompt = self.tokenizer.apply_chat_template(
                     formatted_messages,
                     tokenize=False,
                     add_generation_prompt=True,
                 )
             else:
-                # Simple fallback
                 text_prompt = "\n".join(
                     f"{msg.get('role', 'user')}: {self._extract_text_from_content(msg.get('content', ''))}"
                     for msg in formatted_messages
                 )
 
-            # Use processor to handle text + images together
-            # Note: Qwen processors only support return_tensors="pt"
-            # We keep PyTorch tensors directly - mx.array() can convert them later
             processor_inputs = self.vlm_processor(
                 text=text_prompt,
                 images=images,
                 return_tensors="pt",
             )
-
-            # Extract input_ids
             input_ids = processor_inputs.get("input_ids")
             if input_ids is None:
                 raise ValueError("Processor did not return input_ids")
+            prompt = input_ids.flatten().tolist()
 
-            # Convert to list for token IDs (need CPU for this)
-            if hasattr(input_ids, "tolist"):
-                prompt = input_ids.flatten().tolist()
-            else:
-                prompt = input_ids.flatten().tolist()
-
-            # Extract pixel_values and image_grid_thw - keep as PyTorch tensors
-            # mx.array() can convert PyTorch tensors directly
             pixel_values = processor_inputs.get("pixel_values")
             image_grid_thw = processor_inputs.get("image_grid_thw")
 
-            # Create VLMInputs
             vlm_inputs = VLMInputs(
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
@@ -751,7 +722,6 @@ class BaseExecutor:
 
         except Exception as e:
             logger.error(f"Failed to process VLM request {rid}: {e}")
-            # Fall back to text-only processing
             return self._process_text_request(rid, messages, {}), None
 
     def _format_messages_for_vlm(self, messages: list) -> list:
@@ -763,16 +733,13 @@ class BaseExecutor:
         for msg in messages:
             content = msg.get("content")
             if isinstance(content, list):
-                # Keep content as list format for chat template to process
-                # Chat templates like Qwen3-VL expect content list with image_url parts
                 new_content = []
                 for part in content:
                     if isinstance(part, dict):
                         if part.get("type") == "text":
                             new_content.append({"type": "text", "text": part.get("text", "")})
                         elif part.get("type") == "image_url":
-                            # Mark as image for chat template
-                            # Qwen3-VL chat template looks for 'image_url' or 'image' in content
+
                             new_content.append({"type": "image"})
                     elif isinstance(part, str):
                         new_content.append({"type": "text", "text": part})
