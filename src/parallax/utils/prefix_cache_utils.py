@@ -21,6 +21,7 @@ def compute_attention_with_prefix_cache(
     mask: Optional[mx.array] = None,
     sinks: Optional[mx.array] = None,
     window_size: Optional[int] = None,
+    unembed_out: Optional[bool] = False,
 ) -> mx.array:
     """
     Compute attention with prefix cache support.
@@ -150,5 +151,6 @@ def compute_attention_with_prefix_cache(
         cache=None,
         **attention_kwargs,
     )
-    output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
+    if not unembed_out:
+        output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
     return output
