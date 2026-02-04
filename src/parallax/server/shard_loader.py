@@ -432,10 +432,13 @@ class MLXModelLoader:
         shard_weights = {}
         
         # Layer key prefixes to check (in order of priority)
-        # VLM models like Qwen3-VL use model.language_model.layers.X
-        # Standard models use model.layers.X
+        # Different model formats use different key prefixes:
+        # - language_model.model.layers.X (mlx-vlm converted format)
+        # - model.language_model.layers.X (HuggingFace VLM format)
+        # - model.layers.X (Standard LLM format)
         layer_key_prefixes = [
-            ("model.language_model.layers.", 3),  # VLM style: parts[3] is layer index
+            ("language_model.model.layers.", 3),  # mlx-vlm style: parts[3] is layer index
+            ("model.language_model.layers.", 3),  # HF VLM style: parts[3] is layer index
             ("model.layers.", 2),                  # Standard style: parts[2] is layer index
         ]
         
@@ -462,11 +465,17 @@ class MLXModelLoader:
                 remapped_key = None
 
                 # Check if the key belongs to the shard and remap it
-                # Embeddings: model.embed_tokens or model.language_model.embed_tokens
+                # Embeddings: Various formats:
+                # - language_model.model.embed_tokens.* (mlx-vlm converted)
+                # - model.language_model.embed_tokens.* (HF VLM)
+                # - model.embed_tokens.* (standard)
                 if model_shard.is_first_shard and "embed_tokens" in key:
                     is_needed = True
-                    # Remap to just embed_tokens.weight
-                    if "language_model.embed_tokens" in key:
+                    # Remap to just embed_tokens.*
+                    if "language_model.model.embed_tokens" in key:
+                        # mlx-vlm format: language_model.model.embed_tokens.weight -> embed_tokens.weight
+                        remapped_key = key.replace("language_model.model.", "")
+                    elif "language_model.embed_tokens" in key:
                         remapped_key = key.split("language_model.")[-1]
                     elif key.startswith("model."):
                         remapped_key = key.replace("model.", "", 1)
@@ -477,20 +486,36 @@ class MLXModelLoader:
                         shard_weights[lm_head_key] = f[key]
                         
                 elif model_shard.is_last_shard:
-                    # Final norm: model.norm or model.language_model.norm
+                    # Final norm: Various formats
+                    # - language_model.model.norm.* (mlx-vlm converted)
+                    # - model.language_model.norm.* (HF VLM)
+                    # - model.norm.* (standard)
                     if ".norm." in key or key.endswith(".norm.weight"):
-                        if "language_model.norm" in key or (key.startswith("model.norm") and "layers" not in key):
+                        is_final_norm = (
+                            "language_model.model.norm" in key or
+                            "language_model.norm" in key or
+                            (key.startswith("model.norm") and "layers" not in key)
+                        )
+                        if is_final_norm:
                             is_needed = True
-                            if "language_model.norm" in key:
+                            if "language_model.model.norm" in key:
+                                remapped_key = key.replace("language_model.model.", "")
+                            elif "language_model.norm" in key:
                                 remapped_key = key.split("language_model.")[-1]
                             else:
                                 remapped_key = key.replace("model.", "", 1)
                     if "lm_head" in key:
                         is_needed = True
-                        remapped_key = key
+                        # Handle language_model.lm_head.* format
+                        if key.startswith("language_model."):
+                            remapped_key = key.replace("language_model.", "")
+                        else:
+                            remapped_key = key
                     elif tie_word_embeddings and "embed_tokens" in key:
                         is_needed = True
-                        if "language_model.embed_tokens" in key:
+                        if "language_model.model.embed_tokens" in key:
+                            remapped_key = key.replace("language_model.model.", "").replace("embed_tokens", "lm_head")
+                        elif "language_model.embed_tokens" in key:
                             remapped_key = key.split("language_model.")[-1].replace("embed_tokens", "lm_head")
                         else:
                             remapped_key = key.replace("model.", "", 1).replace("embed_tokens", "lm_head")
@@ -572,7 +597,15 @@ class MLXModelLoader:
                 class_predicate=class_predicate,
             )
 
-        model_shard.load_weights(list(shard_weights.items()), strict=strict)
+        # Log weight keys before loading
+        logger.info(f"Loading {len(shard_weights)} weights. Sample keys: {list(shard_weights.keys())[:20]}")
+        
+        # Try strict mode first to catch any mismatch, then fall back to non-strict
+        try:
+            model_shard.load_weights(list(shard_weights.items()), strict=True)
+        except Exception as e:
+            logger.warning(f"Strict weight loading failed: {e}. Retrying with strict=False.")
+            model_shard.load_weights(list(shard_weights.items()), strict=False)
         model_shard.shard_layers()
 
         # Log VLM-specific weight loading info
@@ -580,6 +613,8 @@ class MLXModelLoader:
             vlm_weight_count = sum(1 for k in shard_weights.keys() 
                                    if any(k.startswith(p) for p in ["vision_tower", "vision_model", "visual", "multi_modal_projector", "mm_projector"]))
             logger.info(f"Loaded {vlm_weight_count} VLM weights (vision_tower + projector)")
+        
+        logger.info(f"Total weights loaded: {len(shard_weights)}")
 
         shard_weights.clear()
 

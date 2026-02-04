@@ -30,7 +30,7 @@ def should_include_weight_key(
     is_vlm: bool = False,
 ) -> bool:
     # Embeddings on first shard
-    # Handles: model.embed_tokens, model.language_model.embed_tokens
+    # Handles: model.embed_tokens, model.language_model.embed_tokens, language_model.model.embed_tokens
     if is_first_shard and "embed_tokens" in key:
         return True
     
@@ -49,15 +49,19 @@ def should_include_weight_key(
                 return True
 
     # Final norm and lm_head on last shard
-    # Handles: model.norm, model.language_model.norm, lm_head
+    # Handles: model.norm, model.language_model.norm, language_model.model.norm, lm_head
     if is_last_shard:
-        if ".norm." in key or key.endswith(".norm.weight") or "lm_head" in key:
+        # Check for final norm (not layer norms)
+        if ("lm_head" in key) or (
+            (".norm." in key or key.endswith(".norm.weight")) and 
+            "layers" not in key
+        ):
             return True
         if tie_word_embeddings and "embed_tokens" in key:
             return True
 
     # Transformer layers - check layer index
-    # Handles: model.layers.X, model.language_model.layers.X
+    # Handles: model.layers.X, model.language_model.layers.X, language_model.model.layers.X
     if "layers." in key:
         parts = key.split(".")
         for i, part in enumerate(parts):

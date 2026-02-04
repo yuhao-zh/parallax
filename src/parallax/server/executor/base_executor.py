@@ -727,10 +727,12 @@ class BaseExecutor:
                 )
             
             # Use processor to handle text + images together
+            # Note: Qwen processors only support return_tensors="pt"
+            # We keep PyTorch tensors directly - mx.array() can convert them later
             processor_inputs = self.vlm_processor(
                 text=text_prompt,
                 images=images,
-                return_tensors="np",
+                return_tensors="pt",
             )
             
             # Extract input_ids
@@ -738,18 +740,16 @@ class BaseExecutor:
             if input_ids is None:
                 raise ValueError("Processor did not return input_ids")
             
-            if hasattr(input_ids, "numpy"):
-                input_ids = input_ids.numpy()
-            prompt = input_ids.flatten().tolist()
+            # Convert to list for token IDs (need CPU for this)
+            if hasattr(input_ids, "tolist"):
+                prompt = input_ids.flatten().tolist()
+            else:
+                prompt = input_ids.flatten().tolist()
             
-            # Extract pixel_values and other vision inputs
+            # Extract pixel_values and image_grid_thw - keep as PyTorch tensors
+            # mx.array() can convert PyTorch tensors directly
             pixel_values = processor_inputs.get("pixel_values")
-            if pixel_values is not None and hasattr(pixel_values, "numpy"):
-                pixel_values = pixel_values.numpy()
-            
             image_grid_thw = processor_inputs.get("image_grid_thw")
-            if image_grid_thw is not None and hasattr(image_grid_thw, "numpy"):
-                image_grid_thw = image_grid_thw.numpy()
             
             # Create VLMInputs
             vlm_inputs = VLMInputs(
@@ -775,27 +775,28 @@ class BaseExecutor:
     def _format_messages_for_vlm(self, messages: list) -> list:
         """
         Format messages for VLM processing.
-        Converts image_url content parts to a format the processor understands.
+        Keep the original structure so chat template can handle image placeholders correctly.
         """
         formatted = []
         for msg in messages:
             content = msg.get("content")
             if isinstance(content, list):
-                # Convert content list to text with image placeholders
-                text_parts = []
+                # Keep content as list format for chat template to process
+                # Chat templates like Qwen3-VL expect content list with image_url parts
+                new_content = []
                 for part in content:
                     if isinstance(part, dict):
                         if part.get("type") == "text":
-                            text_parts.append(part.get("text", ""))
+                            new_content.append({"type": "text", "text": part.get("text", "")})
                         elif part.get("type") == "image_url":
-                            # Add image placeholder - processor will handle the actual insertion
-                            # Different models use different placeholders
-                            text_parts.append("<image>")
+                            # Mark as image for chat template
+                            # Qwen3-VL chat template looks for 'image_url' or 'image' in content
+                            new_content.append({"type": "image"})
                     elif isinstance(part, str):
-                        text_parts.append(part)
+                        new_content.append({"type": "text", "text": part})
                 formatted.append({
                     "role": msg.get("role", "user"),
-                    "content": "".join(text_parts),
+                    "content": new_content,
                 })
             else:
                 formatted.append(msg)

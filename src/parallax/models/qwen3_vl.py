@@ -78,6 +78,15 @@ class ParallaxQwen3VLAttention(MLXQwen3VLAttention):
         cos, sin = self.rotary_emb(values, pos_ids)
         queries, keys = apply_multimodal_rotary_pos_emb(queries, keys, cos, sin)
         
+        # Ensure dtype consistency with cache (RoPE may output float32)
+        cache_dtype = key_cache_global.dtype
+        if keys.dtype != cache_dtype:
+            keys = keys.astype(cache_dtype)
+        if values.dtype != cache_dtype:
+            values = values.astype(cache_dtype)
+        if queries.dtype != cache_dtype:
+            queries = queries.astype(cache_dtype)
+        
         # Cache update with PagedAttention
         block_size = key_cache_global.shape[3]
         reshape_and_cache(

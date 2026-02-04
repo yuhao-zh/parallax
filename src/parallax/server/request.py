@@ -82,12 +82,14 @@ class VLMInputs:
     # Preprocessed image tensor, shape varies by model:
     #   - LLaVA: (num_images, C, H, W) or (num_patches, C, patch_H, patch_W)
     #   - Qwen-VL: (num_patches, C, patch_H, patch_W) with temporal dim for video
-    pixel_values: Optional[np.ndarray] = None
+    # Can be numpy array or PyTorch tensor - mx.array() can convert both
+    pixel_values: Optional[Any] = None
     
     # For models with dynamic resolution (e.g., Qwen2-VL):
     # Tuple of (temporal, height, width) grid sizes for each image
     # Shape: (num_images, 3) where each row is (t, h, w)
-    image_grid_thw: Optional[np.ndarray] = None
+    # Can be numpy array or PyTorch tensor
+    image_grid_thw: Optional[Any] = None
     
     # Number of image tokens per image (for variable-length image tokens)
     image_token_counts: Optional[List[int]] = None

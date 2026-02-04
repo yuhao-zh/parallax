@@ -137,15 +137,45 @@ class MLXExecutor(BaseExecutor):
         self.vlm_processor = None
         self.model_type = self.config.get("model_type")
         if hasattr(self.model_shard, 'is_vlm') and self.model_shard.is_vlm and start_layer == 0:
+            processor_path = self.shard_loader.model_path_str
+            logger.debug(f"Trying to load VLM processor from: {processor_path}")
+            
+            processor_loaded = False
+            
+
             try:
                 from transformers import AutoProcessor
                 self.vlm_processor = AutoProcessor.from_pretrained(
-                    model_repo, 
-                    trust_remote_code=True
+                    processor_path, 
+                    trust_remote_code=True,
                 )
-                logger.info(f"Loaded VLM processor for {self.model_type}")
+                processor_type = type(self.vlm_processor).__name__
+                # Verify it has image processing capability
+                if hasattr(self.vlm_processor, 'image_processor') and self.vlm_processor.image_processor is not None:
+                    logger.info(f"Loaded VLM processor (AutoProcessor -> {processor_type}) for {self.model_type}")
+                    processor_loaded = True
+                else:
+                    logger.warning(f"AutoProcessor loaded {processor_type} but it doesn't have image_processor, skipping")
+                    self.vlm_processor = None
             except Exception as e:
-                logger.warning(f"Failed to load VLM processor: {e}. VLM image processing will be disabled.")
+                import traceback
+                logger.debug(f"AutoProcessor failed: {e}")
+            if not processor_loaded:
+                try:
+                    # Must import torch first to avoid flex_attention import errors in transformers
+                    import torch
+                    from transformers import Qwen2VLProcessor
+                    self.vlm_processor = Qwen2VLProcessor.from_pretrained(
+                        processor_path,
+                        trust_remote_code=True
+                    )
+                    logger.info(f"Loaded VLM processor (Qwen2VLProcessor) for {self.model_type}")
+                    processor_loaded = True
+                except Exception as e:
+                    logger.debug(f"Qwen2VLProcessor failed: {e}")
+            
+            if not processor_loaded:
+                logger.warning("VLM image processing will be disabled - no processor could be loaded.")
 
         # TODO: Duplicate code to BaseExecutor since num_shard_layers and dtype are needed for initializing kv cache
         self.num_shard_layers = end_layer - start_layer
