@@ -43,6 +43,7 @@ from parallax.server.request import (
 )
 from parallax.server.sampling.sampling_params import SamplingParams
 from parallax.server.scheduler import Scheduler
+from parallax.utils.config_utils import ModelConfigAccessor
 from parallax.utils.shared_state import SharedState
 from parallax.utils.utils import get_current_device, get_device_dtype, get_zmq_socket
 from parallax_utils.logging_config import get_logger
@@ -113,19 +114,12 @@ class BaseExecutor:
         # Pipe communication
         self.conn = conn
 
-        def _config_get(key, default=None):
-            if isinstance(self.config, dict):
-                return self.config.get(key, default)
-            return getattr(self.config, key, default)
+        # Use VLM-aware config accessor for unified config access
+        self._config_accessor = ModelConfigAccessor(self.config)
+        self.is_vlm = self._config_accessor.is_vlm
 
-        num_hidden_layers = _config_get("num_hidden_layers")
-        text_config = _config_get("text_config")
-        if num_hidden_layers is None and isinstance(text_config, dict):
-            num_hidden_layers = text_config.get("num_hidden_layers")
-        if num_hidden_layers is None:
-            num_hidden_layers = _config_get("n_layer") or _config_get("num_layers")
-            if isinstance(text_config, dict):
-                num_hidden_layers = text_config.get("num_hidden_layers")
+        # Get num_hidden_layers using unified config accessor
+        num_hidden_layers = self._config_accessor.get_num_hidden_layers()
 
         self.is_first_peer = start_layer == 0
         self.is_last_peer = end_layer == num_hidden_layers
@@ -158,25 +152,10 @@ class BaseExecutor:
         else:
             self.pad_token_id = self.tokenizer.pad_token_id
 
-        self.eos_token_id = _config_get("eos_token_id")
-        if self.eos_token_id is None and isinstance(text_config, dict):
-            self.eos_token_id = text_config.get("eos_token_id")
+        self.eos_token_id = self._config_accessor.get_eos_token_id()
 
-        vision_config = _config_get("vision_config", {})
-        if not isinstance(vision_config, dict):
-            vision_config = {
-                "spatial_merge_size": getattr(vision_config, "spatial_merge_size", None),
-                "tokens_per_second": getattr(vision_config, "tokens_per_second", None),
-            }
-        self.mm_config = {
-            "model_type": _config_get("model_type"),
-            "image_token_id": _config_get("image_token_id"),
-            "vision_start_token_id": _config_get("vision_start_token_id"),
-            "vision_end_token_id": _config_get("vision_end_token_id"),
-            "video_token_id": _config_get("video_token_id"),
-            "audio_token_id": _config_get("audio_token_id"),
-            "vision_config": vision_config,
-        }
+        # Build multimodal config (only meaningful for VLM models)
+        self.mm_config = self._config_accessor.build_mm_config()
 
         # Scheduler: derive final max_batch_size with KV constraints
         # Remove this for now as it's not working on gpu devices
@@ -240,7 +219,8 @@ class BaseExecutor:
             f"(layers [{self.start_layer}, {self.end_layer}), "
             f"tp_rank={self.tp_rank}/{self.tp_size}, "
             f"device={self.device}, "
-            f"num_shard_layers={self.num_shard_layers})"
+            f"num_shard_layers={self.num_shard_layers}, "
+            f"is_vlm={self.is_vlm})"
         )
 
     @abstractmethod
