@@ -58,11 +58,11 @@ def _get_vlm_classes(
 ) -> Tuple[Optional[Type[nn.Module]], Optional[Type[nn.Module]], Optional[Dict[str, Any]]]:
     """
     Get VLM-specific classes for a given model type.
-    
+
     Args:
         model_type: The model type from config.json
         config: Full model configuration
-    
+
     Returns:
         Tuple of (vision_tower_class, projector_class, vision_config)
         Returns (None, None, None) if not a VLM model
@@ -70,13 +70,13 @@ def _get_vlm_classes(
     vision_config = config.get("vision_config")
     if vision_config is None:
         return None, None, None
-    
+
     try:
         # Default: load VisionModel from mlx_vlm.models.{model_type}
         vision_module_path = f"mlx_vlm.models.{model_type}"
         vision_module = importlib.import_module(vision_module_path)
         vision_tower_class = getattr(vision_module, "VisionModel")
-        
+
         # Check if this model needs a separate projector
         projector_class = None
         if model_type in VLM_SPECIAL_PROJECTOR_MAP:
@@ -86,9 +86,9 @@ def _get_vlm_classes(
             logger.info(f"Loaded VLM classes for {model_type}: VisionModel + {proj_class_name}")
         else:
             logger.info(f"Loaded VLM classes for {model_type}: VisionModel (projector integrated)")
-        
+
         return vision_tower_class, projector_class, vision_config
-        
+
     except (ImportError, AttributeError) as e:
         logger.warning(f"Failed to load VLM classes for {model_type}: {e}")
         return None, None, None
@@ -156,7 +156,9 @@ class MLXModelLoader:
 
             except ImportError as e:
                 # Log more details for import errors (often missing dependencies)
-                logger.warning(f"Failed to import {model_file.name}: {e} (install required dependencies)")
+                logger.warning(
+                    f"Failed to import {model_file.name}: {e} (install required dependencies)"
+                )
             except Exception as e:
                 logger.warning(f"Failed to load model from {model_file}: {e}")
 
@@ -330,7 +332,7 @@ class MLXModelLoader:
         # For VLM models, use text_config for ModelArgs and map to base model type
         config_for_args = config
         model_class_type = model_type
-        
+
         if model_type in VLM_TEXT_CONFIG_MAP:
             # VLM models have text_config containing the language model config
             text_config = config.get("text_config", {})
@@ -341,8 +343,10 @@ class MLXModelLoader:
                 if "num_hidden_layers" not in config and "num_hidden_layers" in text_config:
                     config["num_hidden_layers"] = text_config["num_hidden_layers"]
             model_class_type = VLM_TEXT_CONFIG_MAP[model_type]
-            logger.info(f"VLM model {model_type} using {model_class_type} ModelArgs with text_config")
-        
+            logger.info(
+                f"VLM model {model_type} using {model_class_type} ModelArgs with text_config"
+            )
+
         num_hidden_layers = config.get("num_hidden_layers", 0)
         current_start_layer = self.start_layer if self.start_layer is not None else 0
         current_end_layer = self.end_layer if self.end_layer is not None else num_hidden_layers
@@ -358,7 +362,9 @@ class MLXModelLoader:
             model_args = model_args_class.from_dict(config_for_args)
 
         except (ImportError, AttributeError) as e:
-            raise ValueError(f"Failed to load architecture for model_type '{model_type}' (using {model_class}).") from e
+            raise ValueError(
+                f"Failed to load architecture for model_type '{model_type}' (using {model_class})."
+            ) from e
 
         dtype = getattr(mx, config.get("torch_dtype", "bfloat16"))
 
@@ -368,23 +374,23 @@ class MLXModelLoader:
             model_id = model_id.split("/")[-1]
         else:  # If it's already a clean name or a local path (take basename)
             model_id = pathlib.Path(model_id).name
-        
+
         # Check for VLM model and get vision classes
         vision_tower_class, projector_class, vision_config = _get_vlm_classes(model_type, config)
         is_vlm = vision_config is not None and vision_tower_class is not None
-        
+
         # Get VLM-specific config parameters
         image_token_index = config.get("image_token_index") or config.get("image_token_id")
         vision_feature_layer = config.get("vision_feature_layer", -2)
         vision_feature_select_strategy = config.get("vision_feature_select_strategy", "default")
-        
+
         if is_vlm:
             logger.info(
                 f"Detected VLM model: {model_type}, "
                 f"image_token_index={image_token_index}, "
                 f"vision_feature_layer={vision_feature_layer}"
             )
-        
+
         model_shard = ShardedModel(
             config=model_args,
             model_id=model_id,
@@ -430,7 +436,7 @@ class MLXModelLoader:
         # Instead of loading all weights, we iterate through files and keys,
         # loading only what we need.
         shard_weights = {}
-        
+
         # Layer key prefixes to check (in order of priority)
         # Different model formats use different key prefixes:
         # - language_model.model.layers.X (mlx-vlm converted format)
@@ -439,18 +445,18 @@ class MLXModelLoader:
         layer_key_prefixes = [
             ("language_model.model.layers.", 3),  # mlx-vlm style: parts[3] is layer index
             ("model.language_model.layers.", 3),  # HF VLM style: parts[3] is layer index
-            ("model.layers.", 2),                  # Standard style: parts[2] is layer index
+            ("model.layers.", 2),  # Standard style: parts[2] is layer index
         ]
-        
+
         # VLM weight prefixes to load on first shard
         vlm_weight_prefixes = [
             "vision_tower.",
             "vision_model.",
-            "visual.",      # Qwen-VL style
+            "visual.",  # Qwen-VL style
             "multi_modal_projector.",
             "mm_projector.",
         ]
-        
+
         # Get tie_word_embeddings config (check both root and text_config for VLM)
         tie_word_embeddings = _get_config_value(config, "tie_word_embeddings", False)
 
@@ -484,7 +490,7 @@ class MLXModelLoader:
                     if model_shard.is_last_shard and tie_word_embeddings:
                         lm_head_key = remapped_key.replace("embed_tokens", "lm_head")
                         shard_weights[lm_head_key] = f[key]
-                        
+
                 elif model_shard.is_last_shard:
                     # Final norm: Various formats
                     # - language_model.model.norm.* (mlx-vlm converted)
@@ -492,9 +498,9 @@ class MLXModelLoader:
                     # - model.norm.* (standard)
                     if ".norm." in key or key.endswith(".norm.weight"):
                         is_final_norm = (
-                            "language_model.model.norm" in key or
-                            "language_model.norm" in key or
-                            (key.startswith("model.norm") and "layers" not in key)
+                            "language_model.model.norm" in key
+                            or "language_model.norm" in key
+                            or (key.startswith("model.norm") and "layers" not in key)
                         )
                         if is_final_norm:
                             is_needed = True
@@ -514,12 +520,18 @@ class MLXModelLoader:
                     elif tie_word_embeddings and "embed_tokens" in key:
                         is_needed = True
                         if "language_model.model.embed_tokens" in key:
-                            remapped_key = key.replace("language_model.model.", "").replace("embed_tokens", "lm_head")
+                            remapped_key = key.replace("language_model.model.", "").replace(
+                                "embed_tokens", "lm_head"
+                            )
                         elif "language_model.embed_tokens" in key:
-                            remapped_key = key.split("language_model.")[-1].replace("embed_tokens", "lm_head")
+                            remapped_key = key.split("language_model.")[-1].replace(
+                                "embed_tokens", "lm_head"
+                            )
                         else:
-                            remapped_key = key.replace("model.", "", 1).replace("embed_tokens", "lm_head")
-                
+                            remapped_key = key.replace("model.", "", 1).replace(
+                                "embed_tokens", "lm_head"
+                            )
+
                 # VLM: Load vision tower and projector weights on first shard
                 if model_shard.is_first_shard and is_vlm:
                     for prefix in vlm_weight_prefixes:
@@ -533,7 +545,7 @@ class MLXModelLoader:
                             # Keep as vision_tower.* or visual.* (remove model. prefix)
                             remapped_key = key.replace("model.", "", 1)
                             break
-                
+
                 # Check layer keys with multiple prefix patterns
                 if not is_needed:
                     for layer_prefix, layer_idx_pos in layer_key_prefixes:
@@ -545,8 +557,10 @@ class MLXModelLoader:
                                     is_needed = True
                                     local_layer_idx = layer_idx - current_start_layer
                                     # Remap to layers.{local_idx}.{rest}
-                                    rest_parts = parts[layer_idx_pos + 1:]
-                                    remapped_key = f"layers.{local_layer_idx}.{'.'.join(rest_parts)}"
+                                    rest_parts = parts[layer_idx_pos + 1 :]
+                                    remapped_key = (
+                                        f"layers.{local_layer_idx}.{'.'.join(rest_parts)}"
+                                    )
                                 break
                             except (ValueError, IndexError):
                                 continue
@@ -598,8 +612,10 @@ class MLXModelLoader:
             )
 
         # Log weight keys before loading
-        logger.info(f"Loading {len(shard_weights)} weights. Sample keys: {list(shard_weights.keys())[:20]}")
-        
+        logger.info(
+            f"Loading {len(shard_weights)} weights. Sample keys: {list(shard_weights.keys())[:20]}"
+        )
+
         # Try strict mode first to catch any mismatch, then fall back to non-strict
         try:
             model_shard.load_weights(list(shard_weights.items()), strict=True)
@@ -610,10 +626,22 @@ class MLXModelLoader:
 
         # Log VLM-specific weight loading info
         if is_vlm and model_shard.is_first_shard:
-            vlm_weight_count = sum(1 for k in shard_weights.keys() 
-                                   if any(k.startswith(p) for p in ["vision_tower", "vision_model", "visual", "multi_modal_projector", "mm_projector"]))
+            vlm_weight_count = sum(
+                1
+                for k in shard_weights.keys()
+                if any(
+                    k.startswith(p)
+                    for p in [
+                        "vision_tower",
+                        "vision_model",
+                        "visual",
+                        "multi_modal_projector",
+                        "mm_projector",
+                    ]
+                )
+            )
             logger.info(f"Loaded {vlm_weight_count} VLM weights (vision_tower + projector)")
-        
+
         logger.info(f"Total weights loaded: {len(shard_weights)}")
 
         shard_weights.clear()
@@ -622,7 +650,7 @@ class MLXModelLoader:
         # Synchronize processes to avoid timeout
         mx.eval(mx.distributed.all_sum(mx.array(1.0)))
         model_shard.eval()
-        
+
         vlm_info = f", VLM={is_vlm}" if is_vlm else ""
         logger.info(
             "Successfully loaded model shard (layers [%d-%d)%s), memory usage: %.3f GB",

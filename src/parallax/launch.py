@@ -121,7 +121,7 @@ if __name__ == "__main__":
 
             config = fetch_model_from_hf(args.model_path, local_files_only=args.use_hfcache)
             num_layers = config.get("num_hidden_layers")
-            
+
             # If not found in top level, check text_config (common in multimodal models)
             if num_layers is None and "text_config" in config:
                 text_config = config["text_config"]

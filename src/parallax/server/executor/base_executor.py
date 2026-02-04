@@ -45,7 +45,6 @@ from parallax.server.sampling.sampling_params import SamplingParams
 from parallax.server.scheduler import Scheduler
 from parallax.utils.shared_state import SharedState
 from parallax.utils.utils import get_current_device, get_device_dtype, get_zmq_socket
-from parallax.utils.vlm_utils import create_vlm_inputs_from_request
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -53,6 +52,7 @@ logger = get_logger(__name__)
 
 class BaseExecutor:
     """High-level executor for managing model shards, scheduler, and cache pool on each Peer."""
+
     def __init__(
         self,
         # Model Configs
@@ -126,7 +126,7 @@ class BaseExecutor:
             num_hidden_layers = _config_get("n_layer") or _config_get("num_layers")
             if isinstance(text_config, dict):
                 num_hidden_layers = text_config.get("num_hidden_layers")
-        
+
         self.is_first_peer = start_layer == 0
         self.is_last_peer = end_layer == num_hidden_layers
         self.tp_size = tp_size
@@ -671,21 +671,21 @@ class BaseExecutor:
         else:
             prompt = convert_chat(messages, raw_request.get("role_mapping"))
             prompt = self.tokenizer.encode(prompt)
-        
+
         return prompt
-    
+
     def _process_vlm_request(self, rid: str, messages: list, image_urls: list):
         """
         Process a VLM (multimodal) request using the VLM processor.
-        
+
         The processor handles both text formatting and image preprocessing together,
         ensuring proper image token insertion and expansion.
-        
+
         Returns:
             Tuple of (input_ids, VLMInputs)
         """
         from parallax.utils.vlm_utils import load_image
-        
+
         try:
             # Load images
             images = []
@@ -695,17 +695,19 @@ class BaseExecutor:
                     images.append(img)
                 except Exception as e:
                     logger.warning(f"Failed to load image {url}: {e}")
-            
+
             if not images:
-                logger.warning(f"No images loaded for VLM request {rid}, falling back to text processing")
+                logger.warning(
+                    f"No images loaded for VLM request {rid}, falling back to text processing"
+                )
                 return self._process_text_request(rid, messages, {}), None
-            
+
             # Format messages for processor
             # Most VLM processors expect a specific format with image placeholders
             formatted_messages = self._format_messages_for_vlm(messages)
-            
+
             # Apply chat template to get the text prompt
-            if hasattr(self.vlm_processor, 'apply_chat_template'):
+            if hasattr(self.vlm_processor, "apply_chat_template"):
                 # Some processors have their own chat template
                 text_prompt = self.vlm_processor.apply_chat_template(
                     formatted_messages,
@@ -725,7 +727,7 @@ class BaseExecutor:
                     f"{msg.get('role', 'user')}: {self._extract_text_from_content(msg.get('content', ''))}"
                     for msg in formatted_messages
                 )
-            
+
             # Use processor to handle text + images together
             # Note: Qwen processors only support return_tensors="pt"
             # We keep PyTorch tensors directly - mx.array() can convert them later
@@ -734,23 +736,23 @@ class BaseExecutor:
                 images=images,
                 return_tensors="pt",
             )
-            
+
             # Extract input_ids
             input_ids = processor_inputs.get("input_ids")
             if input_ids is None:
                 raise ValueError("Processor did not return input_ids")
-            
+
             # Convert to list for token IDs (need CPU for this)
             if hasattr(input_ids, "tolist"):
                 prompt = input_ids.flatten().tolist()
             else:
                 prompt = input_ids.flatten().tolist()
-            
+
             # Extract pixel_values and image_grid_thw - keep as PyTorch tensors
             # mx.array() can convert PyTorch tensors directly
             pixel_values = processor_inputs.get("pixel_values")
             image_grid_thw = processor_inputs.get("image_grid_thw")
-            
+
             # Create VLMInputs
             vlm_inputs = VLMInputs(
                 pixel_values=pixel_values,
@@ -758,20 +760,20 @@ class BaseExecutor:
                 image_sizes=[(img.height, img.width) for img in images],
                 images_processed=False,
             )
-            
+
             logger.debug(
                 f"VLM request {rid}: {len(images)} images, "
                 f"input_ids length={len(prompt)}, "
                 f"pixel_values shape={pixel_values.shape if pixel_values is not None else None}"
             )
-            
+
             return prompt, vlm_inputs
-            
+
         except Exception as e:
             logger.error(f"Failed to process VLM request {rid}: {e}")
             # Fall back to text-only processing
             return self._process_text_request(rid, messages, {}), None
-    
+
     def _format_messages_for_vlm(self, messages: list) -> list:
         """
         Format messages for VLM processing.
@@ -794,14 +796,16 @@ class BaseExecutor:
                             new_content.append({"type": "image"})
                     elif isinstance(part, str):
                         new_content.append({"type": "text", "text": part})
-                formatted.append({
-                    "role": msg.get("role", "user"),
-                    "content": new_content,
-                })
+                formatted.append(
+                    {
+                        "role": msg.get("role", "user"),
+                        "content": new_content,
+                    }
+                )
             else:
                 formatted.append(msg)
         return formatted
-    
+
     def _extract_text_from_content(self, content) -> str:
         """Extract text from message content (handles both string and list formats)."""
         if isinstance(content, str):
@@ -821,7 +825,7 @@ class BaseExecutor:
 
         rid = raw_request["rid"]
         messages = raw_request["messages"]
-        
+
         # Extract image URLs first to determine if this is a multimodal request
         multimodal_params = None
         image_urls = []
@@ -839,11 +843,11 @@ class BaseExecutor:
                             image_urls.append(image_url.get("url", image_url))
                         else:
                             image_urls.append(image_url)
-        
+
         # Process multimodal request with VLM processor
         vlm_inputs = None
-        has_vlm_processor = hasattr(self, 'vlm_processor') and self.vlm_processor is not None
-        
+        has_vlm_processor = hasattr(self, "vlm_processor") and self.vlm_processor is not None
+
         if image_urls and has_vlm_processor:
             # Use VLM processor to handle both text and images together
             prompt, vlm_inputs = self._process_vlm_request(rid, messages, image_urls)

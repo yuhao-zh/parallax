@@ -33,7 +33,7 @@ def should_include_weight_key(
     # Handles: model.embed_tokens, model.language_model.embed_tokens, language_model.model.embed_tokens
     if is_first_shard and "embed_tokens" in key:
         return True
-    
+
     # VLM: Include vision components on first shard
     # Handles various naming conventions:
     # - vision_tower.*, model.vision_tower.*
@@ -41,8 +41,11 @@ def should_include_weight_key(
     # - multi_modal_projector.*, mm_projector.*
     if is_first_shard and is_vlm:
         vlm_prefixes = [
-            "vision_tower", "vision_model", "visual",
-            "multi_modal_projector", "mm_projector",
+            "vision_tower",
+            "vision_model",
+            "visual",
+            "multi_modal_projector",
+            "mm_projector",
         ]
         for prefix in vlm_prefixes:
             if key.startswith(prefix) or key.startswith(f"model.{prefix}"):
@@ -53,8 +56,7 @@ def should_include_weight_key(
     if is_last_shard:
         # Check for final norm (not layer norms)
         if ("lm_head" in key) or (
-            (".norm." in key or key.endswith(".norm.weight")) and 
-            "layers" not in key
+            (".norm." in key or key.endswith(".norm.weight")) and "layers" not in key
         ):
             return True
         if tie_word_embeddings and "embed_tokens" in key:
@@ -148,7 +150,7 @@ def filter_weight_files_by_layer_range_for_load(
         f"Filtered weight files from {len(weight_files)} to {len(filtered_files)} "
         f"for layers [{start_layer}, {end_layer})"
     )
-    
+
     # If filtering resulted in no files but we had input files,
     # fall back to original files (file naming may differ from index)
     if not filtered_files and weight_files:

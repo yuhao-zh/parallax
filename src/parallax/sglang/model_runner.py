@@ -307,6 +307,7 @@ def initialize_sgl_model_runner(
     processor = None
     try:
         from transformers import AutoProcessor
+
         processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         logger.info(f"Loaded processor for model {model_path}")
     except Exception as e:

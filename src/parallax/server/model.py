@@ -3,10 +3,9 @@ Defines the ShardedModel class for distributing MLX models across multiple devic
 """
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Type
 
 import mlx.core as mx
-import numpy as np
 from mlx import nn
 from mlx_lm.models.base import BaseModelArgs
 
@@ -18,22 +17,22 @@ logger = get_logger(__name__)
 
 class VisionConfig:
     """Dynamic configuration for vision models in VLM.
-    
+
     This class dynamically accepts all parameters from config.json's vision_config,
     making it compatible with different VLM architectures (Qwen-VL, LLaVA, etc.).
     """
-    
+
     def __init__(self, **kwargs):
         # Set all provided parameters as attributes
         for key, value in kwargs.items():
             setattr(self, key, value)
-        
+
         # Set common defaults if not provided
-        if not hasattr(self, 'model_type'):
+        if not hasattr(self, "model_type"):
             self.model_type = "clip_vision_model"
-        if not hasattr(self, 'hidden_size'):
+        if not hasattr(self, "hidden_size"):
             self.hidden_size = 1024
-    
+
     @classmethod
     def from_dict(cls, params: Dict[str, Any]) -> "VisionConfig":
         """Create VisionConfig from a dictionary, accepting all parameters."""
@@ -42,12 +41,13 @@ class VisionConfig:
         return cls(**params)
 
 
-@dataclass 
+@dataclass
 class InputEmbeddingsOutput:
     """Output from get_input_embeddings method."""
+
     inputs_embeds: mx.array
     attention_mask: Optional[mx.array] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "inputs_embeds": self.inputs_embeds,
@@ -61,7 +61,7 @@ class ShardedModel(nn.Module):
     Assumes self.layers are composed of modules (e.g., TransformerBlocks)
     that internally use ParallaxAttention and their __call__ method returns
     (hidden_state, new_k_for_layer, new_v_for_layer).
-    
+
     Supports VLM (Vision Language Models) by optionally loading vision_tower
     and multi_modal_projector on the first shard.
     """
@@ -99,7 +99,7 @@ class ShardedModel(nn.Module):
         self.is_first_shard = start_layer == 0
         self.is_last_shard = end_layer == config.num_hidden_layers
         self.n_layers_in_shard = end_layer - start_layer
-        
+
         # VLM configuration
         self.is_vlm = vision_config is not None and vision_tower_class is not None
         self.vision_config = VisionConfig.from_dict(vision_config) if vision_config else None
@@ -111,10 +111,12 @@ class ShardedModel(nn.Module):
             self.embed_tokens = nn.Embedding(self.vocab_size, self.hidden_size)
             if has_norm_in:
                 self.norm_in = nn.RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
-            
+
             # Initialize vision components for VLM on first shard
             if self.is_vlm:
-                logger.info(f"Initializing VLM components: vision_tower ({self.vision_config.model_type})")
+                logger.info(
+                    f"Initializing VLM components: vision_tower ({self.vision_config.model_type})"
+                )
                 self.vision_tower = vision_tower_class(self.vision_config)
                 # Some VLMs (e.g., Qwen2-VL, Qwen3-VL) have the projector/merger built into VisionModel
                 # In these cases, multi_modal_projector_class can be None
@@ -122,7 +124,9 @@ class ShardedModel(nn.Module):
                     self.multi_modal_projector = multi_modal_projector_class(config)
                 else:
                     self.multi_modal_projector = None
-                    logger.info("No separate projector class - projector is integrated into VisionModel")
+                    logger.info(
+                        "No separate projector class - projector is integrated into VisionModel"
+                    )
             else:
                 self.vision_tower = None
                 self.multi_modal_projector = None
@@ -143,7 +147,7 @@ class ShardedModel(nn.Module):
         else:
             self.norm = None
             self.lm_head = None
-    
+
     def shard_layers(self):
         group = mx.distributed.init()
         tp_size = group.size()
@@ -156,7 +160,7 @@ class ShardedModel(nn.Module):
                         f"Model {layer.__class__.__name__} does not have a shard method, does not support tensor parallelism"
                     )
                     exit(1)
-    
+
     def get_input_embeddings(
         self,
         input_ids: mx.array,
@@ -164,39 +168,39 @@ class ShardedModel(nn.Module):
         **kwargs,
     ) -> InputEmbeddingsOutput:
         """Get input embeddings, optionally with vision features merged in.
-        
+
         This method handles:
         1. Text-only inputs: Simply embed tokens
         2. VLM inputs: Embed tokens, encode images, and merge vision features
-        
+
         Args:
             input_ids: (batch, seq_len) Token IDs
             pixel_values: (batch, C, H, W) or (num_patches, C, H, W) Image pixel values
             **kwargs: Additional arguments (e.g., image_grid_thw for Qwen2-VL)
-        
+
         Returns:
             InputEmbeddingsOutput with merged embeddings
         """
         if not self.is_first_shard:
             raise ValueError("get_input_embeddings should only be called on the first shard")
-        
+
         # Get text embeddings
         inputs_embeds = self.embed_tokens(input_ids)
-        
+
         # If no images or not a VLM, return text embeddings directly
         if pixel_values is None or not self.is_vlm:
             return InputEmbeddingsOutput(inputs_embeds=inputs_embeds)
-        
+
         # Process vision features
         image_features = self._encode_images(pixel_values, **kwargs)
-        
+
         # Merge image features with text embeddings
         final_embeds = self._merge_input_ids_with_image_features(
             image_features, inputs_embeds, input_ids
         )
-        
+
         return InputEmbeddingsOutput(inputs_embeds=final_embeds)
-    
+
     def _encode_images(
         self,
         pixel_values: mx.array,
@@ -204,29 +208,31 @@ class ShardedModel(nn.Module):
         **kwargs,
     ) -> mx.array:
         """Encode images through vision tower and projector.
-        
+
         Args:
             pixel_values: Image tensor, typically (batch, C, H, W) or (num_patches, C, H, W)
             image_grid_thw: Grid size (T, H, W) for Qwen-VL models
             **kwargs: Additional model-specific arguments
-        
+
         Returns:
             Projected image features ready to be merged with text embeddings
         """
         if self.vision_tower is None:
             raise ValueError("Vision tower not initialized for this model")
-        
+
         # Check if this is a Qwen-VL style model (needs grid_thw)
-        model_type = getattr(self.vision_config, 'model_type', '') if self.vision_config else ''
-        is_qwen_vl = 'qwen' in model_type.lower() and 'vl' in model_type.lower()
-        
+        model_type = getattr(self.vision_config, "model_type", "") if self.vision_config else ""
+        is_qwen_vl = "qwen" in model_type.lower() and "vl" in model_type.lower()
+
         # Ensure correct dtype
-        if hasattr(self.vision_tower, 'patch_embed') and hasattr(self.vision_tower.patch_embed, 'proj'):
+        if hasattr(self.vision_tower, "patch_embed") and hasattr(
+            self.vision_tower.patch_embed, "proj"
+        ):
             target_dtype = self.vision_tower.patch_embed.proj.weight.dtype
             pixel_values = pixel_values.astype(target_dtype)
         else:
             pixel_values = pixel_values.astype(self.dtype)
-        
+
         # Get vision features from vision tower
         if is_qwen_vl and image_grid_thw is not None:
             # Qwen-VL style: VisionModel(pixel_values, grid_thw) -> (hidden_states, deepstack_features)
@@ -243,9 +249,9 @@ class ShardedModel(nn.Module):
             if pixel_values.ndim == 4 and pixel_values.shape[1] in [1, 3, 4]:
                 # NCHW -> NHWC
                 pixel_values = pixel_values.transpose(0, 2, 3, 1)
-            
+
             vision_outputs = self.vision_tower(pixel_values, output_hidden_states=True)
-            
+
             # Handle different output formats
             if isinstance(vision_outputs, tuple):
                 # CLIP/SigLIP style: (pooler_output, last_hidden_state, hidden_states)
@@ -270,7 +276,7 @@ class ShardedModel(nn.Module):
             else:
                 # Direct hidden state output
                 selected_features = vision_outputs
-        
+
         # Project to language model dimension if projector exists
         # Qwen-VL models have projection built into VisionModel's merger
         if self.multi_modal_projector is not None:
@@ -278,9 +284,9 @@ class ShardedModel(nn.Module):
         else:
             # VisionModel already outputs projected features
             image_features = selected_features
-        
+
         return image_features
-    
+
     def _merge_input_ids_with_image_features(
         self,
         image_features: mx.array,
@@ -288,69 +294,71 @@ class ShardedModel(nn.Module):
         input_ids: mx.array,
     ) -> mx.array:
         """Merge image features into input embeddings at image token positions.
-        
+
         This replaces <image> placeholder tokens with actual image feature embeddings.
-        
+
         Args:
             image_features: (num_images, num_patches, hidden_dim) or (total_patches, hidden_dim)
             inputs_embeds: (batch, seq_len, hidden_dim) Text embeddings
             input_ids: (batch, seq_len) Token IDs for finding image positions
-        
+
         Returns:
             Merged embeddings with image features inserted at image token positions
         """
         if self.image_token_index is None:
             logger.warning("image_token_index not set, cannot merge image features")
             return inputs_embeds
-        
+
         batch_size, seq_len, hidden_dim = inputs_embeds.shape
-        
+
         # Find positions of image tokens
-        image_positions = (input_ids == self.image_token_index)
-        
+        image_positions = input_ids == self.image_token_index
+
         # Flatten image features if needed
         if image_features.ndim == 3:
             # (num_images, num_patches, dim) -> (total_patches, dim)
             image_features = image_features.reshape(-1, image_features.shape[-1])
-        
+
         # Cast image features to match embedding dtype
         image_features = image_features.astype(inputs_embeds.dtype)
-        
+
         # Process each batch item
         batch_outputs = []
         feature_start_idx = 0
-        
+
         for batch_idx in range(batch_size):
             batch_mask = image_positions[batch_idx]
             num_positions = int(mx.sum(batch_mask).item())
-            
+
             if num_positions > 0:
                 # Extract features for this batch
-                batch_features = image_features[feature_start_idx:feature_start_idx + num_positions]
-                
+                batch_features = image_features[
+                    feature_start_idx : feature_start_idx + num_positions
+                ]
+
                 if batch_features.shape[0] != num_positions:
                     raise ValueError(
                         f"Number of image token positions ({num_positions}) does not match "
                         f"number of image features ({batch_features.shape[0]}) for batch {batch_idx}"
                     )
-                
+
                 # Create indices for gathering
                 cumsum = mx.cumsum(batch_mask.astype(mx.int32))
                 feature_indices = mx.where(batch_mask, cumsum - 1, 0)
-                
+
                 # Gather features and create merged output
                 gathered_features = batch_features[feature_indices]
                 batch_mask_expanded = mx.expand_dims(batch_mask, axis=-1)
                 batch_output = mx.where(
                     batch_mask_expanded, gathered_features, inputs_embeds[batch_idx]
                 )
-                
+
                 feature_start_idx += num_positions
             else:
                 batch_output = inputs_embeds[batch_idx]
-            
+
             batch_outputs.append(batch_output)
-        
+
         return mx.stack(batch_outputs, axis=0)
 
     def logits_to_tokens(
@@ -405,7 +413,7 @@ class ShardedModel(nn.Module):
     ) -> mx.array:
         """
         Forward pass through the sharded model.
-        
+
         Args:
             h_or_tokens:
                 (batch, target_len_padded, D) or (batch, target_len_padded) for prefill,
@@ -421,7 +429,7 @@ class ShardedModel(nn.Module):
             inputs_embeds: (batch, seq_len, hidden_dim) Pre-computed embeddings.
                           If provided, skips embedding and vision processing.
             **kwargs: Additional model-specific arguments (e.g., image_grid_thw).
-        
+
         Returns:
             For last shard: logits (batch, seq_len, vocab_size)
             For other shards: hidden states (batch, seq_len, hidden_dim)
@@ -436,7 +444,7 @@ class ShardedModel(nn.Module):
             else:
                 if self.embed_tokens is None:
                     raise ValueError("embed_tokens is None for the first shard.")
-                
+
                 # Check if we need to process vision inputs
                 if pixel_values is not None and self.is_vlm:
                     # Use get_input_embeddings for VLM processing
@@ -445,7 +453,7 @@ class ShardedModel(nn.Module):
                 else:
                     # Standard text embedding
                     h = self.embed_tokens(h)
-            
+
             if self.has_norm_in and self.norm_in:
                 h = self.norm_in(h)
 

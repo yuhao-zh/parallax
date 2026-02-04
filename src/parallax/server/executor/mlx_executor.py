@@ -132,50 +132,57 @@ class MLXExecutor(BaseExecutor):
         logger.debug(
             f"MLX sharded model loaded in {(time.time() - t0) * 1000:.1f} ms; num_layers={_get_config_value(self.config, 'num_hidden_layers')}"
         )
-        
+
         # Load VLM processor if this is a VLM model (first peer only)
         self.vlm_processor = None
         self.model_type = self.config.get("model_type")
-        if hasattr(self.model_shard, 'is_vlm') and self.model_shard.is_vlm and start_layer == 0:
+        if hasattr(self.model_shard, "is_vlm") and self.model_shard.is_vlm and start_layer == 0:
             processor_path = self.shard_loader.model_path_str
             logger.debug(f"Trying to load VLM processor from: {processor_path}")
-            
+
             processor_loaded = False
-            
 
             try:
                 from transformers import AutoProcessor
+
                 self.vlm_processor = AutoProcessor.from_pretrained(
-                    processor_path, 
+                    processor_path,
                     trust_remote_code=True,
                 )
                 processor_type = type(self.vlm_processor).__name__
                 # Verify it has image processing capability
-                if hasattr(self.vlm_processor, 'image_processor') and self.vlm_processor.image_processor is not None:
-                    logger.info(f"Loaded VLM processor (AutoProcessor -> {processor_type}) for {self.model_type}")
+                if (
+                    hasattr(self.vlm_processor, "image_processor")
+                    and self.vlm_processor.image_processor is not None
+                ):
+                    logger.info(
+                        f"Loaded VLM processor (AutoProcessor -> {processor_type}) for {self.model_type}"
+                    )
                     processor_loaded = True
                 else:
-                    logger.warning(f"AutoProcessor loaded {processor_type} but it doesn't have image_processor, skipping")
+                    logger.warning(
+                        f"AutoProcessor loaded {processor_type} but it doesn't have image_processor, skipping"
+                    )
                     self.vlm_processor = None
             except Exception as e:
-                import traceback
                 logger.debug(f"AutoProcessor failed: {e}")
             if not processor_loaded:
                 try:
                     # Must import torch first to avoid flex_attention import errors in transformers
-                    import torch
                     from transformers import Qwen2VLProcessor
+
                     self.vlm_processor = Qwen2VLProcessor.from_pretrained(
-                        processor_path,
-                        trust_remote_code=True
+                        processor_path, trust_remote_code=True
                     )
                     logger.info(f"Loaded VLM processor (Qwen2VLProcessor) for {self.model_type}")
                     processor_loaded = True
                 except Exception as e:
                     logger.debug(f"Qwen2VLProcessor failed: {e}")
-            
+
             if not processor_loaded:
-                logger.warning("VLM image processing will be disabled - no processor could be loaded.")
+                logger.warning(
+                    "VLM image processing will be disabled - no processor could be loaded."
+                )
 
         # TODO: Duplicate code to BaseExecutor since num_shard_layers and dtype are needed for initializing kv cache
         self.num_shard_layers = end_layer - start_layer
@@ -194,7 +201,9 @@ class MLXExecutor(BaseExecutor):
             if hidden_size and num_attention_heads:
                 head_dim = hidden_size // num_attention_heads
             else:
-                raise ValueError(f"Cannot determine head_dim: hidden_size={hidden_size}, num_attention_heads={num_attention_heads}")
+                raise ValueError(
+                    f"Cannot determine head_dim: hidden_size={hidden_size}, num_attention_heads={num_attention_heads}"
+                )
         qk_nope_head_dim = self.config.get("qk_nope_head_dim", None)
         qk_rope_head_dim = self.config.get("qk_rope_head_dim", None)
         if qk_nope_head_dim is not None and qk_rope_head_dim is not None:
@@ -719,13 +728,13 @@ class MLXExecutor(BaseExecutor):
             "prefix_lens": prefix_lens_tensor,  # For RoPE offset calculation
             "actual_processed_lengths": actual_processed_lengths_tensor,  # For correct logit selection
         }
-        
+
         # VLM support: collect pixel_values and image metadata for first peer
-        if self.is_first_peer and hasattr(self.model_shard, 'is_vlm') and self.model_shard.is_vlm:
+        if self.is_first_peer and hasattr(self.model_shard, "is_vlm") and self.model_shard.is_vlm:
             pixel_values_list = []
             image_grid_thw_list = []
             has_vlm_inputs = False
-            
+
             for req in batched_requests:
                 if req.vlm_inputs is not None and req.vlm_inputs.has_images():
                     has_vlm_inputs = True
@@ -734,7 +743,7 @@ class MLXExecutor(BaseExecutor):
                         image_grid_thw_list.append(req.vlm_inputs.image_grid_thw)
                 else:
                     pixel_values_list.append(None)
-            
+
             if has_vlm_inputs:
                 # For now, we only support single-image batching where all requests
                 # in the batch either have images or don't have images
@@ -750,7 +759,7 @@ class MLXExecutor(BaseExecutor):
                             [mx.array(g) for g in image_grid_thw_list], axis=0
                         )
                     logger.debug(f"VLM batch: pixel_values shape={ret['pixel_values'].shape}")
-        
+
         logger.debug(f"Prepared MLX prefill batch (size={batch_size})")
         return ret
 

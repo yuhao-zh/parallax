@@ -3,10 +3,10 @@ Store information about a SGLang batch.
 """
 
 from types import SimpleNamespace
-from typing import List, Optional, Any
+from typing import Any, List, Optional
 
 import torch
-from sglang.srt.managers.schedule_batch import Req, ScheduleBatch, MultimodalInputs
+from sglang.srt.managers.schedule_batch import MultimodalInputs, Req, ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.sampling.sampling_batch_info import (
@@ -54,7 +54,7 @@ def transform_requests_to_sglang(
 ) -> List[Req]:
     reqs = []
     mm_config = hf_config or {}
-    
+
     for old_req in old_requests:
         sampling_params = transform_sampling_params_to_sglang(old_req.sampling_params)
         req = Req(
@@ -64,12 +64,12 @@ def transform_requests_to_sglang(
             sampling_params=sampling_params,
             lora_id=old_req.lora_id,
         )
-        
+
         if old_req.multimodal_params is not None:
             try:
                 if "mm_items" in old_req.multimodal_params:
                     req.multimodal_inputs = MultimodalInputs.from_dict(old_req.multimodal_params)
-                    
+
                 elif "images" in old_req.multimodal_params and processor is not None:
                     image_urls = old_req.multimodal_params["images"]
                     multimodal_inputs, padded_input_ids = process_multimodal_request(
@@ -82,7 +82,7 @@ def transform_requests_to_sglang(
                     if multimodal_inputs is not None:
                         req.multimodal_inputs = multimodal_inputs
                         req.origin_input_ids = padded_input_ids
-                
+
                 else:
                     logger.warning(
                         f"Assigning raw multimodal_params to req.multimodal_inputs. "

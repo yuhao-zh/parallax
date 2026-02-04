@@ -10,25 +10,21 @@ from typing import Any, List, Optional
 import mlx.core as mx
 from mlx import nn
 
+# Import from mlx-vlm
+from mlx_vlm.models.qwen3_vl.language import MLP
+from mlx_vlm.models.qwen3_vl.language import Attention as MLXQwen3VLAttention
+from mlx_vlm.models.qwen3_vl.language import apply_multimodal_rotary_pos_emb
+
 from parallax.server.cache.base import BaseCache
 from parallax_extensions.ops import paged_attention_v1, reshape_and_cache
 from parallax_utils.logging_config import get_logger
-
-# Import from mlx-vlm
-from mlx_vlm.models.qwen3_vl.language import (
-    Attention as MLXQwen3VLAttention,
-    MLP,
-    Qwen3VLDecoderLayer as MLXQwen3VLDecoderLayer,
-    Qwen3VLRotaryEmbedding,
-    apply_multimodal_rotary_pos_emb,
-)
 
 logger = get_logger(__name__)
 
 
 class ParallaxQwen3VLAttention(MLXQwen3VLAttention):
     """Qwen3VL Attention with PagedAttention support for Parallax."""
-    
+
     def __call__(
         self,
         x: mx.array,
@@ -42,20 +38,18 @@ class ParallaxQwen3VLAttention(MLXQwen3VLAttention):
         **kwargs,
     ) -> mx.array:
         B, L, D = x.shape
-        
+
         queries, keys, values = self.q_proj(x), self.k_proj(x), self.v_proj(x)
-        
-        queries = self.q_norm(
-            queries.reshape(B, L, self.n_heads, self.head_dim)
-        ).transpose(0, 2, 1, 3)
-        keys = self.k_norm(
-            keys.reshape(B, L, self.n_kv_heads, self.head_dim)
-        ).transpose(0, 2, 1, 3)
+
+        queries = self.q_norm(queries.reshape(B, L, self.n_heads, self.head_dim)).transpose(
+            0, 2, 1, 3
+        )
+        keys = self.k_norm(keys.reshape(B, L, self.n_kv_heads, self.head_dim)).transpose(0, 2, 1, 3)
         values = values.reshape(B, L, self.n_kv_heads, self.head_dim)
-        
+
         # Get KV cache
         key_cache_global, value_cache_global = cache.get_cache()
-        
+
         # Compute RoPE position
         if L == 1:
             # Decode phase: use context_lengths - 1 as offset
@@ -74,10 +68,10 @@ class ParallaxQwen3VLAttention(MLXQwen3VLAttention):
             pos_ids = mx.arange(L)[None, :]
             pos_ids = mx.broadcast_to(pos_ids, (B, L))
             pos_ids = mx.broadcast_to(pos_ids[None, :, :], (3, B, L))
-        
+
         cos, sin = self.rotary_emb(values, pos_ids)
         queries, keys = apply_multimodal_rotary_pos_emb(queries, keys, cos, sin)
-        
+
         # Ensure dtype consistency with cache (RoPE may output float32)
         cache_dtype = key_cache_global.dtype
         if keys.dtype != cache_dtype:
@@ -86,7 +80,7 @@ class ParallaxQwen3VLAttention(MLXQwen3VLAttention):
             values = values.astype(cache_dtype)
         if queries.dtype != cache_dtype:
             queries = queries.astype(cache_dtype)
-        
+
         # Cache update with PagedAttention
         block_size = key_cache_global.shape[3]
         reshape_and_cache(
@@ -99,7 +93,7 @@ class ParallaxQwen3VLAttention(MLXQwen3VLAttention):
             block_size,
             slot_mapping=slot_mapping,
         )
-        
+
         # Compute attention
         if L == 1:
             # Decode: use PagedAttention
@@ -117,6 +111,7 @@ class ParallaxQwen3VLAttention(MLXQwen3VLAttention):
         else:
             # Prefill: standard attention
             from mlx_lm.models.base import scaled_dot_product_attention
+
             output = scaled_dot_product_attention(
                 queries,
                 keys,
@@ -126,13 +121,13 @@ class ParallaxQwen3VLAttention(MLXQwen3VLAttention):
                 cache=None,
             )
             output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        
+
         return self.o_proj(output)
 
 
 class ParallaxQwen3VLBlock(nn.Module):
     """Qwen3VL Transformer block with PagedAttention support."""
-    
+
     def __init__(self, args, layer_idx: int, local_layer_idx: int):
         super().__init__()
         self.hidden_size = args.hidden_size
@@ -142,7 +137,7 @@ class ParallaxQwen3VLBlock(nn.Module):
         self.post_attention_layernorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.layer_idx = layer_idx
         self.local_layer_idx = local_layer_idx
-    
+
     def __call__(
         self,
         x: mx.array,
@@ -166,7 +161,7 @@ class ParallaxQwen3VLBlock(nn.Module):
         r = self.mlp(self.post_attention_layernorm(h))
         out = h + r
         return out
-    
+
     @classmethod
     def get_architecture(cls):
         """Get the architecture name for the block."""

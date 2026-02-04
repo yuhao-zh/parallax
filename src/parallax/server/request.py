@@ -59,11 +59,9 @@ TODO:
 """
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
-
-import numpy as np
+from typing import Any, Dict, List, Optional
 
 from parallax.server.sampling.sampling_params import SamplingParams
 from parallax_utils.logging_config import get_logger
@@ -74,38 +72,39 @@ logger = get_logger(__name__)
 @dataclass
 class VLMInputs:
     """Container for Vision Language Model inputs.
-    
+
     This is used to pass image/video data through the pipeline.
     Only the first peer needs to process pixel_values; subsequent peers
     receive pre-computed image embeddings merged into hidden_states.
     """
+
     # Preprocessed image tensor, shape varies by model:
     #   - LLaVA: (num_images, C, H, W) or (num_patches, C, patch_H, patch_W)
     #   - Qwen-VL: (num_patches, C, patch_H, patch_W) with temporal dim for video
     # Can be numpy array or PyTorch tensor - mx.array() can convert both
     pixel_values: Optional[Any] = None
-    
+
     # For models with dynamic resolution (e.g., Qwen2-VL):
     # Tuple of (temporal, height, width) grid sizes for each image
     # Shape: (num_images, 3) where each row is (t, h, w)
     # Can be numpy array or PyTorch tensor
     image_grid_thw: Optional[Any] = None
-    
+
     # Number of image tokens per image (for variable-length image tokens)
     image_token_counts: Optional[List[int]] = None
-    
+
     # Original image sizes before preprocessing (height, width)
     # Useful for models that need aspect ratio information
     image_sizes: Optional[List[tuple]] = None
-    
+
     # Whether images have been processed into embeddings
     # (set to True after first peer processes images)
     images_processed: bool = False
-    
+
     def has_images(self) -> bool:
         """Check if this request contains image inputs."""
         return self.pixel_values is not None and len(self.pixel_values) > 0
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -115,7 +114,7 @@ class VLMInputs:
             "image_sizes": self.image_sizes,
             "images_processed": self.images_processed,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional["VLMInputs"]:
         """Create from dictionary."""
@@ -174,10 +173,10 @@ class Request:
         self.lora_id: Optional[str] = None
         self.lora_path = lora_path
         self.multimodal_params = multimodal_params
-        
+
         # VLM support: structured container for vision inputs
         self.vlm_inputs = vlm_inputs
-    
+
     @property
     def has_images(self) -> bool:
         """Check if this request contains image inputs."""
