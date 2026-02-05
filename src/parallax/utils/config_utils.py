@@ -157,9 +157,15 @@ class ModelConfigAccessor:
                 "tokens_per_second": getattr(vision_config_raw, "tokens_per_second", None),
             }
 
+        # Get image_token_id with fallbacks for different models
+        # Kimi K2.5 uses 'media_placeholder_token_id' instead of 'image_token_id'
+        image_token_id = self._raw_get("image_token_id")
+        if image_token_id is None:
+            image_token_id = self._raw_get("media_placeholder_token_id")
+
         return {
             "model_type": self._raw_get("model_type"),
-            "image_token_id": self._raw_get("image_token_id"),
+            "image_token_id": image_token_id,
             "vision_start_token_id": self._raw_get("vision_start_token_id"),
             "vision_end_token_id": self._raw_get("vision_end_token_id"),
             "video_token_id": self._raw_get("video_token_id"),

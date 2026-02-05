@@ -64,7 +64,15 @@ def process_images(
         return [], None, []
 
     try:
-        inputs = processor(text=input_text, images=images, return_tensors="pt")
+        # Check if this is a Kimi K2.5 processor (has different interface)
+        processor_class_name = processor.__class__.__name__
+        if processor_class_name == "KimiK25Processor":
+            # Kimi K2.5 requires 'medias' parameter with specific format
+            medias = [{"type": "image", "image": img} for img in images]
+            inputs = processor(medias=medias, text=input_text, return_tensors="pt")
+        else:
+            # Standard HuggingFace processor interface
+            inputs = processor(text=input_text, images=images, return_tensors="pt")
 
         if inputs is None:
             logger.error("Processor returned None")
@@ -83,7 +91,8 @@ def process_images(
 
         logger.debug(f"Processor expanded input_ids length: {len(expanded_input_ids)}")
 
-        image_grid_thw = inputs.get("image_grid_thw")
+        # Handle different field names: Kimi K2.5 uses 'grid_thws', others use 'image_grid_thw'
+        image_grid_thw = inputs.get("image_grid_thw") or inputs.get("grid_thws")
         image_sizes = inputs.get("image_sizes")
 
         model_specific_data = {}

@@ -85,15 +85,17 @@ def transform_requests_to_sglang(
 
                 else:
                     logger.warning(
-                        f"Assigning raw multimodal_params to req.multimodal_inputs. "
-                        f"SGLang might expect MultimodalInputs object with Tensors. "
+                        f"Cannot process multimodal_params: no 'mm_items' or 'images' key, "
+                        f"or processor not available. "
                         f"Params keys: {old_req.multimodal_params.keys()}, Processor: {processor is not None}"
                     )
-                    req.multimodal_inputs = old_req.multimodal_params
+                    # Don't assign raw dict - SGLang expects MultimodalInputs object
+                    req.multimodal_inputs = None
 
             except Exception as e:
                 logger.exception(f"Failed to construct MultimodalInputs: {e}")
-                req.multimodal_inputs = old_req.multimodal_params
+                # Don't assign raw dict - SGLang expects MultimodalInputs object
+                req.multimodal_inputs = None
 
         # Debug: Log before cache lookup
         if page_tree_cache is not None:
