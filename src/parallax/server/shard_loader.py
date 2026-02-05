@@ -19,6 +19,7 @@ from mlx_lm.tuner.lora import LoRAEmbedding, LoRALinear, LoRASwitchLinear
 from mlx_lm.utils import _download, load_config
 
 from parallax.server.model import ShardedModel
+from parallax.utils.config_utils import get_config_value
 from parallax.utils.tokenizer_utils import load_tokenizer
 from parallax_utils.logging_config import get_logger
 
@@ -43,14 +44,6 @@ VLM_SPECIAL_PROJECTOR_MAP = {
     "llava": ("mlx_vlm.models.llava.llava", "LlavaMultiModalProjector"),
     "llava_next": ("mlx_vlm.models.llava_next.llava_next", "LlavaMultiModalProjector"),
 }
-
-
-def _get_config_value(config: Dict[str, Any], key: str, default: Any = None) -> Any:
-    """Get config value, falling back to text_config for VLM models."""
-    if key in config:
-        return config[key]
-    text_config = config.get("text_config", {})
-    return text_config.get(key, default)
 
 
 def _get_vlm_classes(
@@ -458,7 +451,7 @@ class MLXModelLoader:
         ]
 
         # Get tie_word_embeddings config (check both root and text_config for VLM)
-        tie_word_embeddings = _get_config_value(config, "tie_word_embeddings", False)
+        tie_word_embeddings = get_config_value(config, "tie_word_embeddings", False)
 
         for file_idx, wf in enumerate(weight_files):
             logger.debug(

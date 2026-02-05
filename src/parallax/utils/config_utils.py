@@ -166,3 +166,68 @@ class ModelConfigAccessor:
             "audio_token_id": self._raw_get("audio_token_id"),
             "vision_config": vision_config,
         }
+
+
+# ============================================================================
+# Convenience functions for simple use cases
+# ============================================================================
+
+
+def is_vlm_model(config: Any) -> bool:
+    """
+    Check if the config represents a VLM (Vision-Language Model).
+
+    VLM models have both text_config and vision_config.
+
+    Args:
+        config: Model configuration (dict or object)
+
+    Returns:
+        True if the model is a VLM
+    """
+    if isinstance(config, dict):
+        text_config = config.get("text_config")
+        vision_config = config.get("vision_config")
+    else:
+        text_config = getattr(config, "text_config", None)
+        vision_config = getattr(config, "vision_config", None)
+
+    return text_config is not None and vision_config is not None
+
+
+def get_config_value(config: Any, key: str, default: Any = None) -> Any:
+    """
+    Get config value with text_config fallback for VLM models.
+
+    This is a simple function interface for cases where you don't need
+    the full ModelConfigAccessor functionality.
+
+    Args:
+        config: Model configuration (dict or object)
+        key: Configuration key to look up
+        default: Default value if not found
+
+    Returns:
+        Configuration value or default
+    """
+    # Try root level first
+    if isinstance(config, dict):
+        value = config.get(key)
+    else:
+        value = getattr(config, key, None)
+
+    if value is not None:
+        return value
+
+    # Fallback to text_config (for VLM models)
+    if isinstance(config, dict):
+        text_config = config.get("text_config", {})
+    else:
+        text_config = getattr(config, "text_config", {})
+
+    if isinstance(text_config, dict):
+        return text_config.get(key, default)
+    elif text_config is not None:
+        return getattr(text_config, key, default)
+
+    return default

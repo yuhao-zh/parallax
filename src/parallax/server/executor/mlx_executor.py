@@ -20,6 +20,7 @@ from parallax.server.request import (
 )
 from parallax.server.sampling.sampler import SamplingBatchInfo
 from parallax.server.shard_loader import MLXModelLoader
+from parallax.utils.config_utils import get_config_value
 from parallax.utils.utils import (
     combine_padding_and_causal_masks,
     create_causal_mask,
@@ -30,14 +31,6 @@ from parallax.utils.utils import (
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
-
-
-def _get_config_value(config: Dict[str, Any], key: str, default: Any = None) -> Any:
-    """Get config value, falling back to text_config for VLM models."""
-    if key in config and config[key] is not None:
-        return config[key]
-    text_config = config.get("text_config", {})
-    return text_config.get(key, default)
 
 
 class MLXExecutor(BaseExecutor):
@@ -130,7 +123,7 @@ class MLXExecutor(BaseExecutor):
             self.model_shard = self.shard_loader.load_lora(self.model_shard, adapters)
 
         logger.debug(
-            f"MLX sharded model loaded in {(time.time() - t0) * 1000:.1f} ms; num_layers={_get_config_value(self.config, 'num_hidden_layers')}"
+            f"MLX sharded model loaded in {(time.time() - t0) * 1000:.1f} ms; num_layers={get_config_value(self.config, 'num_hidden_layers')}"
         )
 
         # Load VLM processor if this is a VLM model (first peer only)
@@ -193,11 +186,11 @@ class MLXExecutor(BaseExecutor):
 
         # Calculate feature dimensions for kv cache
         # Use helper to handle VLM models where these are in text_config
-        num_key_value_heads = _get_config_value(self.config, "num_key_value_heads")
-        head_dim = _get_config_value(self.config, "head_dim")
+        num_key_value_heads = get_config_value(self.config, "num_key_value_heads")
+        head_dim = get_config_value(self.config, "head_dim")
         if head_dim is None:
-            hidden_size = _get_config_value(self.config, "hidden_size")
-            num_attention_heads = _get_config_value(self.config, "num_attention_heads")
+            hidden_size = get_config_value(self.config, "hidden_size")
+            num_attention_heads = get_config_value(self.config, "num_attention_heads")
             if hidden_size and num_attention_heads:
                 head_dim = hidden_size // num_attention_heads
             else:
@@ -310,6 +303,139 @@ class MLXExecutor(BaseExecutor):
         logger.debug(
             f"mlx_executor initialized; wired_limit set; prefix_cache={'on' if self.enable_prefix_cache else 'off'}, total memory usage: {mx.get_active_memory() / 1024**3 :.3f} GB"
         )
+
+    # ========== VLM Processing Methods ==========
+
+    def _process_request_prompt(
+        self, rid: str, messages: list, image_urls: list, raw_request: Dict
+    ) -> Tuple[list, Optional[Any]]:
+        """
+        Override base class method to handle VLM requests for MLX.
+
+        If VLM processor is available and images are present, use VLM processing.
+        Otherwise, fall back to text-only processing.
+        """
+        if image_urls and self.vlm_processor is not None:
+            return self._process_vlm_request(rid, messages, image_urls)
+        else:
+            prompt = self._process_text_request(rid, messages, raw_request)
+            return prompt, None
+
+    def _process_vlm_request(self, rid: str, messages: list, image_urls: list):
+        """Process a VLM (multimodal) request using the VLM processor."""
+        from parallax.server.request import VLMInputs
+        from parallax.utils.vlm_utils import load_image
+
+        try:
+            images = []
+            for url in image_urls:
+                try:
+                    img = load_image(url)
+                    images.append(img)
+                except Exception as e:
+                    logger.warning(f"Failed to load image {url}: {e}")
+
+            if not images:
+                logger.warning(
+                    f"No images loaded for VLM request {rid}, falling back to text processing"
+                )
+                return self._process_text_request(rid, messages, {}), None
+
+            formatted_messages = self._format_messages_for_vlm(messages)
+
+            if hasattr(self.vlm_processor, "apply_chat_template"):
+                text_prompt = self.vlm_processor.apply_chat_template(
+                    formatted_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            elif self.tokenizer.chat_template:
+                text_prompt = self.tokenizer.apply_chat_template(
+                    formatted_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            else:
+                text_prompt = "\n".join(
+                    f"{msg.get('role', 'user')}: {self._extract_text_from_content(msg.get('content', ''))}"
+                    for msg in formatted_messages
+                )
+
+            processor_inputs = self.vlm_processor(
+                text=text_prompt,
+                images=images,
+                return_tensors="pt",
+            )
+            input_ids = processor_inputs.get("input_ids")
+            if input_ids is None:
+                raise ValueError("Processor did not return input_ids")
+            prompt = input_ids.flatten().tolist()
+
+            pixel_values = processor_inputs.get("pixel_values")
+            image_grid_thw = processor_inputs.get("image_grid_thw")
+
+            vlm_inputs = VLMInputs(
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                image_sizes=[(img.height, img.width) for img in images],
+                images_processed=False,
+            )
+
+            logger.debug(
+                f"VLM request {rid}: {len(images)} images, "
+                f"input_ids length={len(prompt)}, "
+                f"pixel_values shape={pixel_values.shape if pixel_values is not None else None}"
+            )
+
+            return prompt, vlm_inputs
+
+        except Exception as e:
+            logger.error(f"Failed to process VLM request {rid}: {e}")
+            return self._process_text_request(rid, messages, {}), None
+
+    def _format_messages_for_vlm(self, messages: list) -> list:
+        """
+        Format messages for VLM processing.
+        Keep the original structure so chat template can handle image placeholders correctly.
+        """
+        formatted = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                new_content = []
+                for part in content:
+                    if isinstance(part, dict):
+                        if part.get("type") == "text":
+                            new_content.append({"type": "text", "text": part.get("text", "")})
+                        elif part.get("type") == "image_url":
+                            new_content.append({"type": "image"})
+                    elif isinstance(part, str):
+                        new_content.append({"type": "text", "text": part})
+                formatted.append(
+                    {
+                        "role": msg.get("role", "user"),
+                        "content": new_content,
+                    }
+                )
+            else:
+                formatted.append(msg)
+        return formatted
+
+    def _extract_text_from_content(self, content) -> str:
+        """Extract text from message content (handles both string and list formats)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            texts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    texts.append(part.get("text", ""))
+                elif isinstance(part, str):
+                    texts.append(part)
+            return " ".join(texts)
+        return str(content)
+
+    # ========== End VLM Processing Methods ==========
 
     def _tensor_parallel_broadcast_pyobj(self, broadcast_obj):
         """Wrapper for broadcast pyobject in TP group using send/recv with explicit sync"""

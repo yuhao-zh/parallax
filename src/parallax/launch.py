@@ -26,6 +26,7 @@ from parallax.p2p.server import ServerState, launch_p2p_server_process, stop_p2p
 from parallax.server.executor.factory import run_executor_process, stop_executor_process
 from parallax.server.http_server import launch_http_server, stop_http_server
 from parallax.server.server_args import parse_args
+from parallax.utils.config_utils import get_config_value
 from parallax.utils.shared_state import SharedState
 from parallax.utils.utils import fetch_model_from_hf, initialize_nccl_port
 from parallax_utils.ascii_anime import display_parallax_join
@@ -120,13 +121,7 @@ if __name__ == "__main__":
             check_latest_release()
 
             config = fetch_model_from_hf(args.model_path, local_files_only=args.use_hfcache)
-            num_layers = config.get("num_hidden_layers")
-
-            # If not found in top level, check text_config (common in multimodal models)
-            if num_layers is None and "text_config" in config:
-                text_config = config["text_config"]
-                if isinstance(text_config, dict):
-                    num_layers = text_config.get("num_hidden_layers")
+            num_layers = get_config_value(config, "num_hidden_layers")
 
             if args.start_layer is None:
                 args.start_layer = 0

@@ -654,118 +654,27 @@ class BaseExecutor:
 
         return prompt
 
-    def _process_vlm_request(self, rid: str, messages: list, image_urls: list):
-        """Process a VLM (multimodal) request using the VLM processor."""
-        from parallax.utils.vlm_utils import load_image
-
-        try:
-            images = []
-            for url in image_urls:
-                try:
-                    img = load_image(url)
-                    images.append(img)
-                except Exception as e:
-                    logger.warning(f"Failed to load image {url}: {e}")
-
-            if not images:
-                logger.warning(
-                    f"No images loaded for VLM request {rid}, falling back to text processing"
-                )
-                return self._process_text_request(rid, messages, {}), None
-            formatted_messages = self._format_messages_for_vlm(messages)
-
-            if hasattr(self.vlm_processor, "apply_chat_template"):
-                text_prompt = self.vlm_processor.apply_chat_template(
-                    formatted_messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-            elif self.tokenizer.chat_template:
-                text_prompt = self.tokenizer.apply_chat_template(
-                    formatted_messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-            else:
-                text_prompt = "\n".join(
-                    f"{msg.get('role', 'user')}: {self._extract_text_from_content(msg.get('content', ''))}"
-                    for msg in formatted_messages
-                )
-
-            processor_inputs = self.vlm_processor(
-                text=text_prompt,
-                images=images,
-                return_tensors="pt",
-            )
-            input_ids = processor_inputs.get("input_ids")
-            if input_ids is None:
-                raise ValueError("Processor did not return input_ids")
-            prompt = input_ids.flatten().tolist()
-
-            pixel_values = processor_inputs.get("pixel_values")
-            image_grid_thw = processor_inputs.get("image_grid_thw")
-
-            vlm_inputs = VLMInputs(
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-                image_sizes=[(img.height, img.width) for img in images],
-                images_processed=False,
-            )
-
-            logger.debug(
-                f"VLM request {rid}: {len(images)} images, "
-                f"input_ids length={len(prompt)}, "
-                f"pixel_values shape={pixel_values.shape if pixel_values is not None else None}"
-            )
-
-            return prompt, vlm_inputs
-
-        except Exception as e:
-            logger.error(f"Failed to process VLM request {rid}: {e}")
-            return self._process_text_request(rid, messages, {}), None
-
-    def _format_messages_for_vlm(self, messages: list) -> list:
+    def _process_request_prompt(
+        self, rid: str, messages: list, image_urls: list, raw_request: Dict
+    ) -> Tuple[list, Optional[VLMInputs]]:
         """
-        Format messages for VLM processing.
-        Keep the original structure so chat template can handle image placeholders correctly.
+        Process request messages and return (input_ids, vlm_inputs).
+
+        Subclasses can override this method to implement custom VLM processing.
+        Default implementation only handles text requests.
+
+        Args:
+            rid: Request ID
+            messages: List of message dicts
+            image_urls: List of image URLs extracted from messages
+            raw_request: Original raw request dict
+
+        Returns:
+            Tuple of (input_ids, vlm_inputs). vlm_inputs is None for text-only requests.
         """
-        formatted = []
-        for msg in messages:
-            content = msg.get("content")
-            if isinstance(content, list):
-                new_content = []
-                for part in content:
-                    if isinstance(part, dict):
-                        if part.get("type") == "text":
-                            new_content.append({"type": "text", "text": part.get("text", "")})
-                        elif part.get("type") == "image_url":
-
-                            new_content.append({"type": "image"})
-                    elif isinstance(part, str):
-                        new_content.append({"type": "text", "text": part})
-                formatted.append(
-                    {
-                        "role": msg.get("role", "user"),
-                        "content": new_content,
-                    }
-                )
-            else:
-                formatted.append(msg)
-        return formatted
-
-    def _extract_text_from_content(self, content) -> str:
-        """Extract text from message content (handles both string and list formats)."""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            texts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    texts.append(part.get("text", ""))
-                elif isinstance(part, str):
-                    texts.append(part)
-            return " ".join(texts)
-        return str(content)
+        # Default: text-only processing, subclasses override for VLM support
+        prompt = self._process_text_request(rid, messages, raw_request)
+        return prompt, None
 
     def _handle_raw_request(self, raw_request: Dict):
         assert "messages" in raw_request, "Request did not contain messages"
@@ -791,16 +700,8 @@ class BaseExecutor:
                         else:
                             image_urls.append(image_url)
 
-        # Process multimodal request with VLM processor
-        vlm_inputs = None
-        has_vlm_processor = hasattr(self, "vlm_processor") and self.vlm_processor is not None
-
-        if image_urls and has_vlm_processor:
-            # Use VLM processor to handle both text and images together
-            prompt, vlm_inputs = self._process_vlm_request(rid, messages, image_urls)
-        else:
-            # Standard text-only processing
-            prompt = self._process_text_request(rid, messages, raw_request)
+        # Process request prompt (subclasses can override for VLM support)
+        prompt, vlm_inputs = self._process_request_prompt(rid, messages, image_urls, raw_request)
 
         max_seq_len = self.max_sequence_length if self.max_sequence_length is not None else 4096
         max_seq_len = max(max_seq_len, 4096)

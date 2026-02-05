@@ -3,21 +3,9 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from parallax.utils.config_utils import get_config_value, is_vlm_model
+
 logger = logging.getLogger(__name__)
-
-
-def _get_num_hidden_layers(config: Dict) -> int:
-    """Get num_hidden_layers from config, handling VLM models with text_config."""
-    if "num_hidden_layers" in config:
-        return config["num_hidden_layers"]
-    # VLM models store this in text_config
-    text_config = config.get("text_config", {})
-    return text_config.get("num_hidden_layers", 0)
-
-
-def _is_vlm_model(config: Dict) -> bool:
-    """Check if config represents a VLM model."""
-    return config.get("vision_config") is not None
 
 
 def should_include_weight_key(
@@ -103,20 +91,13 @@ def filter_weight_files_by_layer_range_for_load(
 
     tie_word_embeddings = False
     if config:
-        tie_word_embeddings = config.get("tie_word_embeddings", False)
-        # Also check text_config for VLM models
-        if not tie_word_embeddings:
-            text_config = config.get("text_config", {})
-            tie_word_embeddings = text_config.get("tie_word_embeddings", False)
+        tie_word_embeddings = get_config_value(config, "tie_word_embeddings", False)
     else:
         config_file = model_path / "config.json"
         if config_file.exists():
             with open(config_file, "r") as f:
                 cfg = json.load(f)
-                tie_word_embeddings = cfg.get("tie_word_embeddings", False)
-                if not tie_word_embeddings:
-                    text_config = cfg.get("text_config", {})
-                    tie_word_embeddings = text_config.get("tie_word_embeddings", False)
+                tie_word_embeddings = get_config_value(cfg, "tie_word_embeddings", False)
 
     needed_files: Set[str] = set()
 
@@ -172,19 +153,19 @@ def determine_needed_weight_files_for_download(
     is_first_shard = start_layer == 0
 
     is_last_shard = False
-    is_vlm = False
+    is_vlm_flag = False
     if config:
-        num_hidden_layers = _get_num_hidden_layers(config)
+        num_hidden_layers = get_config_value(config, "num_hidden_layers", 0)
         is_last_shard = end_layer >= num_hidden_layers
-        is_vlm = _is_vlm_model(config)
+        is_vlm_flag = is_vlm_model(config)
     else:
         config_file = model_path / "config.json"
         if config_file.exists():
             with open(config_file, "r") as f:
                 cfg = json.load(f)
-                num_hidden_layers = _get_num_hidden_layers(cfg)
+                num_hidden_layers = get_config_value(cfg, "num_hidden_layers", 0)
                 is_last_shard = end_layer >= num_hidden_layers
-                is_vlm = _is_vlm_model(cfg)
+                is_vlm_flag = is_vlm_model(cfg)
 
     index_file = model_path / "model.safetensors.index.json"
 
@@ -212,13 +193,7 @@ def determine_needed_weight_files_for_download(
         logger.debug("weight_map is empty in index file")
         return []
 
-    tie_word_embeddings = False
-    if config:
-        tie_word_embeddings = config.get("tie_word_embeddings", False)
-        # Also check text_config for VLM models
-        if not tie_word_embeddings:
-            text_config = config.get("text_config", {})
-            tie_word_embeddings = text_config.get("tie_word_embeddings", False)
+    tie_word_embeddings = get_config_value(config, "tie_word_embeddings", False) if config else False
 
     needed_files: Set[str] = set()
 
@@ -232,7 +207,7 @@ def determine_needed_weight_files_for_download(
             is_first_shard=is_first_shard,
             is_last_shard=is_last_shard,
             tie_word_embeddings=tie_word_embeddings,
-            is_vlm=is_vlm,
+            is_vlm=is_vlm_flag,
         ):
             needed_files.add(filename)
 
