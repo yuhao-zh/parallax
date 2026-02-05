@@ -129,7 +129,7 @@ def filter_weight_files_by_layer_range_for_load(
 
     logger.debug(
         f"Filtered weight files from {len(weight_files)} to {len(filtered_files)} "
-        f"for layers [{start_layer}, {end_layer})"
+        f"for layers [{start_layer}, {end_layer}), is_vlm={is_vlm}, is_first_shard={is_first_shard}"
     )
 
     # If filtering resulted in no files but we had input files,

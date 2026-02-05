@@ -34,6 +34,8 @@ def load_image(url: Any) -> Image.Image:
         return Image.open(image_data).convert("RGB")
     elif url.startswith("data:image"):
         header, encoded = url.split(",", 1)
+        # Strip whitespace from base64 encoded data (some clients add spaces after comma)
+        encoded = encoded.strip()
         image_data = BytesIO(base64.b64decode(encoded))
         return Image.open(image_data).convert("RGB")
     else:
@@ -56,6 +58,7 @@ def process_images(
         try:
             image = load_image(url)
             images.append(image)
+            logger.debug(f"Loaded image: size={image.size}, mode={image.mode}")
         except Exception as e:
             logger.exception(f"Failed to load image {url}: {e}")
             continue
@@ -103,10 +106,23 @@ def process_images(
             logger.error("Processor returned None")
             return [], None, []
 
+        # Debug: Log all keys returned by the processor
+        logger.debug(f"Processor output keys: {list(inputs.keys())}")
+        for key, value in inputs.items():
+            if hasattr(value, 'shape'):
+                logger.debug(f"  {key}: shape={value.shape}, dtype={value.dtype}")
+            elif hasattr(value, '__len__'):
+                logger.debug(f"  {key}: len={len(value)}, type={type(value)}")
+            else:
+                logger.debug(f"  {key}: {type(value)}")
+
         pixel_values = inputs.get("pixel_values")
         if pixel_values is None:
             logger.error("Processor output missing pixel_values")
             return [], None, []
+        
+        logger.debug(f"pixel_values shape: {pixel_values.shape}, dtype: {pixel_values.dtype}, device: {pixel_values.device}")
+        logger.debug(f"pixel_values stats: min={pixel_values.min().item():.4f}, max={pixel_values.max().item():.4f}, mean={pixel_values.mean().item():.4f}")
 
         expanded_input_ids = inputs.get("input_ids")
         if expanded_input_ids is not None:
@@ -120,6 +136,8 @@ def process_images(
         is_kimi_k25 = processor_class_name == "KimiK25Processor"
         image_grid_thw = inputs.get("image_grid_thw") or inputs.get("grid_thws")
         image_sizes = inputs.get("image_sizes")
+        
+        logger.debug(f"image_grid_thw: {image_grid_thw}, is_kimi_k25: {is_kimi_k25}")
 
         # Determine the correct field name for grid data
         # Kimi K2.5 expects 'grid_thws', others expect 'image_grid_thw'

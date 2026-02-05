@@ -75,10 +75,12 @@ class ParallaxModelRunner(SGLModelRunner):
         """Add pp_start_layer and pp_end_layer for decentralized model"""
         self.pp_start_layer = pp_start_layer
         self.pp_end_layer = pp_end_layer
-        num_hidden_layers = ModelConfigAccessor(model_config.hf_config).get_num_hidden_layers()
+        config_accessor = ModelConfigAccessor(model_config.hf_config)
+        num_hidden_layers = config_accessor.get_num_hidden_layers()
         if num_hidden_layers is None:
             raise ValueError("num_hidden_layers is required but not found in model config")
-        set_layer_range_for_filtering(pp_start_layer, pp_end_layer, num_hidden_layers)
+        is_vlm = config_accessor.is_vlm
+        set_layer_range_for_filtering(pp_start_layer, pp_end_layer, num_hidden_layers, is_vlm=is_vlm)
 
         super().__init__(
             model_config=model_config,
