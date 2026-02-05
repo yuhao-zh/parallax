@@ -53,7 +53,7 @@ mac = [
 ]
 
 gpu = [
-  "sglang[all]==0.5.7",
+  "sglang[all] @ git+https://github.com/sgl-project/sglang.git@9409c43593f2d6d64595981abf216a15752b0875#subdirectory=python",
   "mlx-lm==0.28.4",
   "mlx[cpu]==0.30.0",
 ]

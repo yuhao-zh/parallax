@@ -134,7 +134,7 @@ def form_sgl_batch_prefill(
         requests, page_tree_cache, processor, hf_config, tokenizer
     )
 
-    def dummy_evict(*args):
+    def dummy_function(*args):
         pass
 
     dummy_tree_cache = SimpleNamespace(
@@ -142,8 +142,12 @@ def form_sgl_batch_prefill(
         device=model_runner.device,
         token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
         evictable_size=0,
+        sliding_window_size=0,
     )
-    dummy_tree_cache.evict = dummy_evict
+    dummy_tree_cache.evict = dummy_function
+    dummy_tree_cache.supports_swa = dummy_function
+    dummy_tree_cache.is_chunk_cache = dummy_function
+    dummy_tree_cache.supports_mamba = dummy_function
     schedule_batch = ScheduleBatch.init_new(
         reqs=sgl_reqs,
         req_to_token_pool=model_runner.req_to_token_pool,
