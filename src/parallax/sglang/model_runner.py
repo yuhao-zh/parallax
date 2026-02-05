@@ -40,6 +40,7 @@ from parallax.sglang.monkey_patch import apply_parallax_sglang_monkey_patch
 from parallax.sglang.monkey_patch_utils.weight_loader_filter import (
     set_layer_range_for_filtering,
 )
+from parallax.utils.config_utils import ModelConfigAccessor
 from parallax.utils.tokenizer_utils import load_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,9 @@ class ParallaxModelRunner(SGLModelRunner):
         """Add pp_start_layer and pp_end_layer for decentralized model"""
         self.pp_start_layer = pp_start_layer
         self.pp_end_layer = pp_end_layer
-        num_hidden_layers = model_config.hf_config.num_hidden_layers
+        num_hidden_layers = ModelConfigAccessor(model_config.hf_config).get_num_hidden_layers()
+        if num_hidden_layers is None:
+            raise ValueError("num_hidden_layers is required but not found in model config")
         set_layer_range_for_filtering(pp_start_layer, pp_end_layer, num_hidden_layers)
 
         super().__init__(
