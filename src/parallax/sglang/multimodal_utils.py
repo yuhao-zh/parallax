@@ -67,6 +67,31 @@ def process_images(
         # Check if this is a Kimi K2.5 processor (has different interface)
         processor_class_name = processor.__class__.__name__
         if processor_class_name == "KimiK25Processor":
+            # Kimi K2.5 requires special handling:
+            # 1. Expand image tokens based on actual image size
+            # 2. Use 'medias' parameter instead of 'images'
+            
+            # The image token for Kimi K2.5 is <|media_pad|>
+            image_token = "<|media_pad|>"
+            
+            # Expand single image tokens to the correct number of tokens
+            if image_token in input_text and hasattr(processor, 'media_processor'):
+                parts = input_text.split(image_token)
+                result = [parts[0]]
+                for i, (image, part) in enumerate(zip(images, parts[1:])):
+                    try:
+                        # Calculate how many tokens this image needs
+                        num_tokens = processor.media_processor.media_tokens_calculator(
+                            {"type": "image", "image": image}
+                        )
+                        logger.debug(f"Kimi K2.5: Image {i} expanded to {num_tokens} tokens")
+                    except Exception as e:
+                        logger.warning(f"Failed to calculate media tokens for image {i}: {e}, using 1")
+                        num_tokens = 1
+                    result.append(image_token * num_tokens + part)
+                input_text = "".join(result)
+                logger.debug(f"Kimi K2.5: Expanded input_text length: {len(input_text)}")
+            
             # Kimi K2.5 requires 'medias' parameter with specific format
             medias = [{"type": "image", "image": img} for img in images]
             inputs = processor(medias=medias, text=input_text, return_tensors="pt")
@@ -92,12 +117,17 @@ def process_images(
         logger.debug(f"Processor expanded input_ids length: {len(expanded_input_ids)}")
 
         # Handle different field names: Kimi K2.5 uses 'grid_thws', others use 'image_grid_thw'
+        is_kimi_k25 = processor_class_name == "KimiK25Processor"
         image_grid_thw = inputs.get("image_grid_thw") or inputs.get("grid_thws")
         image_sizes = inputs.get("image_sizes")
 
+        # Determine the correct field name for grid data
+        # Kimi K2.5 expects 'grid_thws', others expect 'image_grid_thw'
+        grid_field_name = "grid_thws" if is_kimi_k25 else "image_grid_thw"
+
         model_specific_data = {}
         if image_grid_thw is not None:
-            model_specific_data["image_grid_thw"] = image_grid_thw
+            model_specific_data[grid_field_name] = image_grid_thw
         if image_sizes is not None:
             model_specific_data["image_sizes"] = image_sizes
 
@@ -123,7 +153,7 @@ def process_images(
                     modality=Modality.IMAGE,
                     feature=item_pixel_values,
                     model_specific_data={
-                        "image_grid_thw": item_grid_thw,
+                        grid_field_name: item_grid_thw,
                     },
                 )
                 mm_items.append(item)

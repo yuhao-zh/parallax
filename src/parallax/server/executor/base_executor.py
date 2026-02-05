@@ -46,7 +46,7 @@ from parallax.server.scheduler import Scheduler
 from parallax.utils.config_utils import ModelConfigAccessor
 from parallax.utils.shared_state import SharedState
 from parallax.utils.utils import get_current_device, get_device_dtype, get_zmq_socket
-from parallax_utils.logging_config import get_logger
+from parallax_utils.logging_config import get_logger, set_rank
 
 logger = get_logger(__name__)
 
@@ -127,6 +127,10 @@ class BaseExecutor:
         self.tp_rank = tp_rank
         self.dp_size = dp_size
         self.dp_rank = dp_rank
+
+        # Configure logging to only print on rank 0 when using multiple GPUs
+        if tp_size > 1:
+            set_rank(tp_rank, enable_filter=True)
 
         # Runtime weight refit for RL
         self.enable_weight_refit = enable_weight_refit
