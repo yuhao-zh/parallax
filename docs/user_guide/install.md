@@ -19,7 +19,7 @@ Note: If you are using DGX Spark, please refer to the Docker installation sectio
 ```sh
 git clone https://github.com/GradientHQ/parallax.git
 cd parallax
-pip install -e ".[gpu]"
+pip install -e ".[gpu]" && pip install mlx-lm==0.30.6 "mlx[cpu]==0.30.4" --no-deps
 ```
 
 #### For macOS (Apple silicon):
