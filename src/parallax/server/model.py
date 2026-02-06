@@ -121,7 +121,20 @@ class ShardedModel(nn.Module):
                 # Some VLMs (e.g., Qwen2-VL, Qwen3-VL) have the projector/merger built into VisionModel
                 # In these cases, multi_modal_projector_class can be None
                 if multi_modal_projector_class is not None:
-                    self.multi_modal_projector = multi_modal_projector_class(config)
+                    # Some projectors (e.g., KimiVL) need both vision_config and text_config
+                    # Create a combined config object if the projector expects it
+                    try:
+                        self.multi_modal_projector = multi_modal_projector_class(config)
+                    except (TypeError, AttributeError):
+                        # Projector expects a combined config with vision_config + text_config
+                        combined_config = type("CombinedConfig", (), {
+                            "vision_config": self.vision_config,
+                            "text_config": config,
+                        })()
+                        self.multi_modal_projector = multi_modal_projector_class(combined_config)
+                        logger.info(
+                            "Initialized projector with combined vision+text config"
+                        )
                 else:
                     self.multi_modal_projector = None
                     logger.info(
@@ -220,9 +233,11 @@ class ShardedModel(nn.Module):
         if self.vision_tower is None:
             raise ValueError("Vision tower not initialized for this model")
 
-        # Check if this is a Qwen-VL style model (needs grid_thw)
+        # Check if this is a model that uses grid_thw for vision encoding
         model_type = getattr(self.vision_config, "model_type", "") if self.vision_config else ""
         is_qwen_vl = "qwen" in model_type.lower() and "vl" in model_type.lower()
+        is_moonvit = model_type.lower() == "moonvit"
+        uses_grid_thw = is_qwen_vl or is_moonvit
 
         # Ensure correct dtype
         if hasattr(self.vision_tower, "patch_embed") and hasattr(
@@ -234,13 +249,26 @@ class ShardedModel(nn.Module):
             pixel_values = pixel_values.astype(self.dtype)
 
         # Get vision features from vision tower
-        if is_qwen_vl and image_grid_thw is not None:
-            # Qwen-VL style: VisionModel(pixel_values, grid_thw) -> (hidden_states, deepstack_features)
-            # No format conversion needed - Qwen-VL expects flat patches
-            vision_outputs = self.vision_tower(pixel_values, image_grid_thw)
+        if uses_grid_thw and image_grid_thw is not None:
+            if is_moonvit:
+                # KimiVL/MoonViT style: VisionModel expects NHWC input and grid_thw
+                # pixel_values may be NCHW from processor, convert to NHWC
+                if pixel_values.ndim == 4 and pixel_values.shape[1] in [1, 3, 4]:
+                    pixel_values = pixel_values.transpose(0, 2, 3, 1)
+                vision_outputs = self.vision_tower(
+                    pixel_values, grid_thw=image_grid_thw, output_hidden_states=True
+                )
+            else:
+                # Qwen-VL style: VisionModel(pixel_values, grid_thw) -> hidden_states
+                # No format conversion needed - Qwen-VL expects flat patches
+                vision_outputs = self.vision_tower(pixel_values, image_grid_thw)
+
             if isinstance(vision_outputs, tuple):
                 # First element is the merged hidden states (already projected by merger)
                 selected_features = vision_outputs[0]
+            elif isinstance(vision_outputs, list):
+                # KimiVL patch_merger returns a list of arrays
+                selected_features = vision_outputs
             else:
                 selected_features = vision_outputs
         else:

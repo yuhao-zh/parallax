@@ -54,6 +54,8 @@ mac = [
 
 gpu = [
   "sglang[all] @ git+https://github.com/sgl-project/sglang.git@9409c43593f2d6d64595981abf216a15752b0875#subdirectory=python",
+  # due to transformers version conflict, we need to install mlx-lm and mlx separately
+  # pip install mlx-lm==0.30.6 "mlx[cpu]==0.30.4" --no-deps
 ]
 
 vllm = [

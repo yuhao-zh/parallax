@@ -35,6 +35,7 @@ VLM_TEXT_CONFIG_MAP = {
     "qwen3_vl": "qwen3",
     "qwen2_vl": "qwen2",
     "qwen2_5_vl": "qwen2",
+    "kimi_vl": "deepseek_v3",
 }
 
 # VLM models that need special handling (have separate projector class)
@@ -43,6 +44,7 @@ VLM_TEXT_CONFIG_MAP = {
 VLM_SPECIAL_PROJECTOR_MAP = {
     "llava": ("mlx_vlm.models.llava.llava", "LlavaMultiModalProjector"),
     "llava_next": ("mlx_vlm.models.llava_next.llava_next", "LlavaMultiModalProjector"),
+    "kimi_vl": ("mlx_vlm.models.kimi_vl.kimi_vl", "KimiVLMultiModalProjector"),
 }
 
 
@@ -373,7 +375,11 @@ class MLXModelLoader:
         is_vlm = vision_config is not None and vision_tower_class is not None
 
         # Get VLM-specific config parameters
-        image_token_index = config.get("image_token_index") or config.get("image_token_id")
+        image_token_index = (
+            config.get("image_token_index")
+            or config.get("image_token_id")
+            or config.get("media_placeholder_token_id")  # KimiVL uses this name
+        )
         vision_feature_layer = config.get("vision_feature_layer", -2)
         vision_feature_select_strategy = config.get("vision_feature_select_strategy", "default")
 
