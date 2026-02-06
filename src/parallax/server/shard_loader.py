@@ -29,8 +29,7 @@ MODEL_CLASS_MAP = {
     "kimi_k2": "mlx_lm.models.deepseek_v3",
 }
 
-# VLM models that need to use text_config for ModelArgs
-# Format: model_type -> base_model_type (for loading ModelArgs from mlx_lm)
+
 VLM_TEXT_CONFIG_MAP = {
     "qwen3_vl": "qwen3",
     "qwen2_vl": "qwen2",
@@ -38,9 +37,6 @@ VLM_TEXT_CONFIG_MAP = {
     "kimi_vl": "deepseek_v3",
 }
 
-# VLM models that need special handling (have separate projector class)
-# Format: model_type -> (projector_module_path, projector_class_name)
-# Default: VisionModel from mlx_vlm.models.{model_type}, no separate projector
 VLM_SPECIAL_PROJECTOR_MAP = {
     "llava": ("mlx_vlm.models.llava.llava", "LlavaMultiModalProjector"),
     "llava_next": ("mlx_vlm.models.llava_next.llava_next", "LlavaMultiModalProjector"),
@@ -67,12 +63,10 @@ def _get_vlm_classes(
         return None, None, None
 
     try:
-        # Default: load VisionModel from mlx_vlm.models.{model_type}
         vision_module_path = f"mlx_vlm.models.{model_type}"
         vision_module = importlib.import_module(vision_module_path)
         vision_tower_class = getattr(vision_module, "VisionModel")
 
-        # Check if this model needs a separate projector
         projector_class = None
         if model_type in VLM_SPECIAL_PROJECTOR_MAP:
             proj_module_path, proj_class_name = VLM_SPECIAL_PROJECTOR_MAP[model_type]
@@ -324,17 +318,13 @@ class MLXModelLoader:
         if not model_type:
             raise ValueError("model_type not found in config.json")
 
-        # For VLM models, use text_config for ModelArgs and map to base model type
         config_for_args = config
         model_class_type = model_type
 
         if model_type in VLM_TEXT_CONFIG_MAP:
-            # VLM models have text_config containing the language model config
             text_config = config.get("text_config", {})
             if text_config:
-                # Merge text_config into a flat config for ModelArgs
                 config_for_args = {**config, **text_config}
-                # Also get num_hidden_layers from text_config if not in root
                 if "num_hidden_layers" not in config and "num_hidden_layers" in text_config:
                     config["num_hidden_layers"] = text_config["num_hidden_layers"]
             model_class_type = VLM_TEXT_CONFIG_MAP[model_type]
@@ -370,15 +360,13 @@ class MLXModelLoader:
         else:  # If it's already a clean name or a local path (take basename)
             model_id = pathlib.Path(model_id).name
 
-        # Check for VLM model and get vision classes
         vision_tower_class, projector_class, vision_config = _get_vlm_classes(model_type, config)
         is_vlm = vision_config is not None and vision_tower_class is not None
 
-        # Get VLM-specific config parameters
         image_token_index = (
             config.get("image_token_index")
             or config.get("image_token_id")
-            or config.get("media_placeholder_token_id")  # KimiVL uses this name
+            or config.get("media_placeholder_token_id")
         )
         vision_feature_layer = config.get("vision_feature_layer", -2)
         vision_feature_select_strategy = config.get("vision_feature_select_strategy", "default")
@@ -436,18 +424,12 @@ class MLXModelLoader:
         # loading only what we need.
         shard_weights = {}
 
-        # Layer key prefixes to check (in order of priority)
-        # Different model formats use different key prefixes:
-        # - language_model.model.layers.X (mlx-vlm converted format)
-        # - model.language_model.layers.X (HuggingFace VLM format)
-        # - model.layers.X (Standard LLM format)
         layer_key_prefixes = [
             ("language_model.model.layers.", 3),  # mlx-vlm style: parts[3] is layer index
             ("model.language_model.layers.", 3),  # HF VLM style: parts[3] is layer index
             ("model.layers.", 2),  # Standard style: parts[2] is layer index
         ]
 
-        # VLM weight prefixes to load on first shard
         vlm_weight_prefixes = [
             "vision_tower.",
             "vision_model.",
@@ -456,7 +438,6 @@ class MLXModelLoader:
             "mm_projector.",
         ]
 
-        # Get tie_word_embeddings config (check both root and text_config for VLM)
         tie_word_embeddings = get_config_value(config, "tie_word_embeddings", False)
 
         for file_idx, wf in enumerate(weight_files):
@@ -469,16 +450,9 @@ class MLXModelLoader:
                 is_needed = False
                 remapped_key = None
 
-                # Check if the key belongs to the shard and remap it
-                # Embeddings: Various formats:
-                # - language_model.model.embed_tokens.* (mlx-vlm converted)
-                # - model.language_model.embed_tokens.* (HF VLM)
-                # - model.embed_tokens.* (standard)
                 if model_shard.is_first_shard and "embed_tokens" in key:
                     is_needed = True
-                    # Remap to just embed_tokens.*
                     if "language_model.model.embed_tokens" in key:
-                        # mlx-vlm format: language_model.model.embed_tokens.weight -> embed_tokens.weight
                         remapped_key = key.replace("language_model.model.", "")
                     elif "language_model.embed_tokens" in key:
                         remapped_key = key.split("language_model.")[-1]
@@ -491,10 +465,6 @@ class MLXModelLoader:
                         shard_weights[lm_head_key] = f[key]
 
                 elif model_shard.is_last_shard:
-                    # Final norm: Various formats
-                    # - language_model.model.norm.* (mlx-vlm converted)
-                    # - model.language_model.norm.* (HF VLM)
-                    # - model.norm.* (standard)
                     if ".norm." in key or key.endswith(".norm.weight"):
                         is_final_norm = (
                             "language_model.model.norm" in key
@@ -511,7 +481,6 @@ class MLXModelLoader:
                                 remapped_key = key.replace("model.", "", 1)
                     if "lm_head" in key:
                         is_needed = True
-                        # Handle language_model.lm_head.* format
                         if key.startswith("language_model."):
                             remapped_key = key.replace("language_model.", "")
                         else:
@@ -538,14 +507,11 @@ class MLXModelLoader:
                             is_needed = True
                             remapped_key = key
                             break
-                        # Handle model.vision_tower.*, model.visual.* style keys
                         if key.startswith(f"model.{prefix}"):
                             is_needed = True
-                            # Keep as vision_tower.* or visual.* (remove model. prefix)
                             remapped_key = key.replace("model.", "", 1)
                             break
 
-                # Check layer keys with multiple prefix patterns
                 if not is_needed:
                     for layer_prefix, layer_idx_pos in layer_key_prefixes:
                         if layer_prefix in key:

@@ -73,12 +73,12 @@ def process_images(
             # Kimi K2.5 requires special handling:
             # 1. Expand image tokens based on actual image size
             # 2. Use 'medias' parameter instead of 'images'
-            
+
             # The image token for Kimi K2.5 is <|media_pad|>
             image_token = "<|media_pad|>"
-            
+
             # Expand single image tokens to the correct number of tokens
-            if image_token in input_text and hasattr(processor, 'media_processor'):
+            if image_token in input_text and hasattr(processor, "media_processor"):
                 parts = input_text.split(image_token)
                 result = [parts[0]]
                 for i, (image, part) in enumerate(zip(images, parts[1:])):
@@ -89,12 +89,14 @@ def process_images(
                         )
                         logger.debug(f"Kimi K2.5: Image {i} expanded to {num_tokens} tokens")
                     except Exception as e:
-                        logger.warning(f"Failed to calculate media tokens for image {i}: {e}, using 1")
+                        logger.warning(
+                            f"Failed to calculate media tokens for image {i}: {e}, using 1"
+                        )
                         num_tokens = 1
                     result.append(image_token * num_tokens + part)
                 input_text = "".join(result)
                 logger.debug(f"Kimi K2.5: Expanded input_text length: {len(input_text)}")
-            
+
             # Kimi K2.5 requires 'medias' parameter with specific format
             medias = [{"type": "image", "image": img} for img in images]
             inputs = processor(medias=medias, text=input_text, return_tensors="pt")
@@ -109,9 +111,9 @@ def process_images(
         # Debug: Log all keys returned by the processor
         logger.debug(f"Processor output keys: {list(inputs.keys())}")
         for key, value in inputs.items():
-            if hasattr(value, 'shape'):
+            if hasattr(value, "shape"):
                 logger.debug(f"  {key}: shape={value.shape}, dtype={value.dtype}")
-            elif hasattr(value, '__len__'):
+            elif hasattr(value, "__len__"):
                 logger.debug(f"  {key}: len={len(value)}, type={type(value)}")
             else:
                 logger.debug(f"  {key}: {type(value)}")
@@ -120,9 +122,13 @@ def process_images(
         if pixel_values is None:
             logger.error("Processor output missing pixel_values")
             return [], None, []
-        
-        logger.debug(f"pixel_values shape: {pixel_values.shape}, dtype: {pixel_values.dtype}, device: {pixel_values.device}")
-        logger.debug(f"pixel_values stats: min={pixel_values.min().item():.4f}, max={pixel_values.max().item():.4f}, mean={pixel_values.mean().item():.4f}")
+
+        logger.debug(
+            f"pixel_values shape: {pixel_values.shape}, dtype: {pixel_values.dtype}, device: {pixel_values.device}"
+        )
+        logger.debug(
+            f"pixel_values stats: min={pixel_values.min().item():.4f}, max={pixel_values.max().item():.4f}, mean={pixel_values.mean().item():.4f}"
+        )
 
         expanded_input_ids = inputs.get("input_ids")
         if expanded_input_ids is not None:
@@ -136,7 +142,7 @@ def process_images(
         is_kimi_k25 = processor_class_name == "KimiK25Processor"
         image_grid_thw = inputs.get("image_grid_thw") or inputs.get("grid_thws")
         image_sizes = inputs.get("image_sizes")
-        
+
         logger.debug(f"image_grid_thw: {image_grid_thw}, is_kimi_k25: {is_kimi_k25}")
 
         # Determine the correct field name for grid data

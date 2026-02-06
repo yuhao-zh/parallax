@@ -78,27 +78,10 @@ class VLMInputs:
     receive pre-computed image embeddings merged into hidden_states.
     """
 
-    # Preprocessed image tensor, shape varies by model:
-    #   - LLaVA: (num_images, C, H, W) or (num_patches, C, patch_H, patch_W)
-    #   - Qwen-VL: (num_patches, C, patch_H, patch_W) with temporal dim for video
-    # Can be numpy array or PyTorch tensor - mx.array() can convert both
     pixel_values: Optional[Any] = None
-
-    # For models with dynamic resolution (e.g., Qwen2-VL):
-    # Tuple of (temporal, height, width) grid sizes for each image
-    # Shape: (num_images, 3) where each row is (t, h, w)
-    # Can be numpy array or PyTorch tensor
     image_grid_thw: Optional[Any] = None
-
-    # Number of image tokens per image (for variable-length image tokens)
     image_token_counts: Optional[List[int]] = None
-
-    # Original image sizes before preprocessing (height, width)
-    # Useful for models that need aspect ratio information
     image_sizes: Optional[List[tuple]] = None
-
-    # Whether images have been processed into embeddings
-    # (set to True after first peer processes images)
     images_processed: bool = False
 
     def has_images(self) -> bool:
@@ -410,16 +393,14 @@ class IntermediateRequest(Request):
         else:
             next_token_id = initial_request.output_ids[-1]
 
-        # For VLM: after first peer processes images, mark as processed
-        # and don't pass pixel_values to subsequent peers (only metadata)
         vlm_inputs = None
         if initial_request.vlm_inputs is not None:
             vlm_inputs = VLMInputs(
-                pixel_values=None,  # Don't pass raw pixels to next peers
+                pixel_values=None,
                 image_grid_thw=initial_request.vlm_inputs.image_grid_thw,
                 image_token_counts=initial_request.vlm_inputs.image_token_counts,
                 image_sizes=initial_request.vlm_inputs.image_sizes,
-                images_processed=True,  # Mark as processed by first peer
+                images_processed=True,
             )
 
         return IntermediateRequest(

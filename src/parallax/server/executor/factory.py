@@ -111,20 +111,21 @@ def run_executor_process(args, shared_state=None, conn=None):
     """Run executor as a subprocess"""
     # Set rank to suppress logs on non-zero ranks
     # Must be called AFTER set_log_level to override the level
-    tp_rank = getattr(args, 'tp_rank', 0)
-    tp_size = getattr(args, 'tp_size', 1)
-    
+    tp_rank = getattr(args, "tp_rank", 0)
+    tp_size = getattr(args, "tp_size", 1)
+
     # For non-zero ranks, suppress logs before any imports
     if tp_size > 1 and tp_rank != 0:
         import logging
+
         logging.getLogger().setLevel(logging.CRITICAL + 1)
-    
+
     set_log_level(args.log_level)
-    
+
     # Now set rank properly (will re-suppress for non-zero ranks)
     if tp_size > 1:
         set_rank(tp_rank, enable_filter=True)
-    
+
     executor = None
     try:
         executor = create_from_args(args, shared_state, conn)

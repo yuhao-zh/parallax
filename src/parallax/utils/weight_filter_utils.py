@@ -22,11 +22,6 @@ def should_include_weight_key(
     if is_first_shard and "embed_tokens" in key:
         return True
 
-    # VLM: Include vision components on first shard
-    # Handles various naming conventions:
-    # - vision_tower.*, model.vision_tower.*
-    # - model.visual.*, visual.*  (Qwen-VL style)
-    # - multi_modal_projector.*, mm_projector.*
     if is_first_shard and is_vlm:
         vlm_prefixes = [
             "vision_tower",
@@ -39,10 +34,7 @@ def should_include_weight_key(
             if key.startswith(prefix) or key.startswith(f"model.{prefix}"):
                 return True
 
-    # Final norm and lm_head on last shard
-    # Handles: model.norm, model.language_model.norm, language_model.model.norm, lm_head
     if is_last_shard:
-        # Check for final norm (not layer norms)
         if ("lm_head" in key) or (
             (".norm." in key or key.endswith(".norm.weight")) and "layers" not in key
         ):
@@ -50,8 +42,6 @@ def should_include_weight_key(
         if tie_word_embeddings and "embed_tokens" in key:
             return True
 
-    # Transformer layers - check layer index
-    # Handles: model.layers.X, model.language_model.layers.X, language_model.model.layers.X
     if "layers." in key:
         parts = key.split(".")
         for i, part in enumerate(parts):
@@ -193,7 +183,9 @@ def determine_needed_weight_files_for_download(
         logger.debug("weight_map is empty in index file")
         return []
 
-    tie_word_embeddings = get_config_value(config, "tie_word_embeddings", False) if config else False
+    tie_word_embeddings = (
+        get_config_value(config, "tie_word_embeddings", False) if config else False
+    )
 
     needed_files: Set[str] = set()
 

@@ -80,7 +80,9 @@ class ParallaxModelRunner(SGLModelRunner):
         if num_hidden_layers is None:
             raise ValueError("num_hidden_layers is required but not found in model config")
         is_vlm = config_accessor.is_vlm
-        set_layer_range_for_filtering(pp_start_layer, pp_end_layer, num_hidden_layers, is_vlm=is_vlm)
+        set_layer_range_for_filtering(
+            pp_start_layer, pp_end_layer, num_hidden_layers, is_vlm=is_vlm
+        )
 
         super().__init__(
             model_config=model_config,

@@ -145,11 +145,11 @@ def use_parallax_log_handler(for_root: bool = True):
 def set_rank(rank: int, enable_filter: bool = True):
     """
     Set the current process rank for log filtering.
-    
+
     When rank filtering is enabled, only rank 0 will print logs.
     This is useful for multi-GPU (TP/DP) scenarios where you want
     to avoid duplicate log messages from all processes.
-    
+
     Args:
         rank: The rank of the current process (0 for master).
         enable_filter: If True, only rank 0 will print logs.
@@ -157,7 +157,7 @@ def set_rank(rank: int, enable_filter: bool = True):
     global _current_rank, _rank_filter_enabled
     _current_rank = rank
     _rank_filter_enabled = enable_filter
-    
+
     if enable_filter and rank != 0:
         # Disable logging for non-zero ranks by setting to a high level
         logging.getLogger().setLevel(logging.CRITICAL + 1)

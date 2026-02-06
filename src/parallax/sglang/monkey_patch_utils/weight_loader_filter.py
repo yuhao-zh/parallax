@@ -12,8 +12,8 @@ _layer_range_cache = {}
 
 
 def set_layer_range_for_filtering(
-    pp_start_layer: int, 
-    pp_end_layer: int, 
+    pp_start_layer: int,
+    pp_end_layer: int,
     num_hidden_layers: int,
     is_vlm: bool = False,
 ):

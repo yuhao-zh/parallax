@@ -409,6 +409,7 @@ def initialize_vllm_model_runner(
     # local weight file reads when loading a partial layer shard.
     try:
         from parallax.utils.config_utils import is_vlm_model
+
         is_vlm = is_vlm_model(config)
         set_layer_range_for_filtering(start_layer, end_layer, num_hidden_layers, is_vlm=is_vlm)
         apply_weight_loader_filter_patch()

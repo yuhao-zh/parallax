@@ -159,18 +159,6 @@ class MLXExecutor(BaseExecutor):
                     self.vlm_processor = None
             except Exception as e:
                 logger.debug(f"AutoProcessor failed: {e}")
-            if not processor_loaded:
-                try:
-                    # Must import torch first to avoid flex_attention import errors in transformers
-                    from transformers import Qwen2VLProcessor
-
-                    self.vlm_processor = Qwen2VLProcessor.from_pretrained(
-                        processor_path, trust_remote_code=True
-                    )
-                    logger.info(f"Loaded VLM processor (Qwen2VLProcessor) for {self.model_type}")
-                    processor_loaded = True
-                except Exception as e:
-                    logger.debug(f"Qwen2VLProcessor failed: {e}")
 
             if not processor_loaded:
                 logger.warning(

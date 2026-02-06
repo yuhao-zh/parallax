@@ -112,29 +112,25 @@ class ShardedModel(nn.Module):
             if has_norm_in:
                 self.norm_in = nn.RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
 
-            # Initialize vision components for VLM on first shard
             if self.is_vlm:
                 logger.info(
                     f"Initializing VLM components: vision_tower ({self.vision_config.model_type})"
                 )
                 self.vision_tower = vision_tower_class(self.vision_config)
-                # Some VLMs (e.g., Qwen2-VL, Qwen3-VL) have the projector/merger built into VisionModel
-                # In these cases, multi_modal_projector_class can be None
                 if multi_modal_projector_class is not None:
-                    # Some projectors (e.g., KimiVL) need both vision_config and text_config
-                    # Create a combined config object if the projector expects it
                     try:
                         self.multi_modal_projector = multi_modal_projector_class(config)
                     except (TypeError, AttributeError):
-                        # Projector expects a combined config with vision_config + text_config
-                        combined_config = type("CombinedConfig", (), {
-                            "vision_config": self.vision_config,
-                            "text_config": config,
-                        })()
+                        combined_config = type(
+                            "CombinedConfig",
+                            (),
+                            {
+                                "vision_config": self.vision_config,
+                                "text_config": config,
+                            },
+                        )()
                         self.multi_modal_projector = multi_modal_projector_class(combined_config)
-                        logger.info(
-                            "Initialized projector with combined vision+text config"
-                        )
+                        logger.info("Initialized projector with combined vision+text config")
                 else:
                     self.multi_modal_projector = None
                     logger.info(
@@ -197,17 +193,10 @@ class ShardedModel(nn.Module):
         if not self.is_first_shard:
             raise ValueError("get_input_embeddings should only be called on the first shard")
 
-        # Get text embeddings
         inputs_embeds = self.embed_tokens(input_ids)
-
-        # If no images or not a VLM, return text embeddings directly
         if pixel_values is None or not self.is_vlm:
             return InputEmbeddingsOutput(inputs_embeds=inputs_embeds)
-
-        # Process vision features
         image_features = self._encode_images(pixel_values, **kwargs)
-
-        # Merge image features with text embeddings
         final_embeds = self._merge_input_ids_with_image_features(
             image_features, inputs_embeds, input_ids
         )
@@ -220,20 +209,10 @@ class ShardedModel(nn.Module):
         image_grid_thw: Optional[mx.array] = None,
         **kwargs,
     ) -> mx.array:
-        """Encode images through vision tower and projector.
-
-        Args:
-            pixel_values: Image tensor, typically (batch, C, H, W) or (num_patches, C, H, W)
-            image_grid_thw: Grid size (T, H, W) for Qwen-VL models
-            **kwargs: Additional model-specific arguments
-
-        Returns:
-            Projected image features ready to be merged with text embeddings
-        """
+        """Encode images through vision tower and projector."""
         if self.vision_tower is None:
             raise ValueError("Vision tower not initialized for this model")
 
-        # Check if this is a model that uses grid_thw for vision encoding
         model_type = getattr(self.vision_config, "model_type", "") if self.vision_config else ""
         is_qwen_vl = "qwen" in model_type.lower() and "vl" in model_type.lower()
         is_moonvit = model_type.lower() == "moonvit"
@@ -243,74 +222,57 @@ class ShardedModel(nn.Module):
         if hasattr(self.vision_tower, "patch_embed") and hasattr(
             self.vision_tower.patch_embed, "proj"
         ):
-            target_dtype = self.vision_tower.patch_embed.proj.weight.dtype
-            pixel_values = pixel_values.astype(target_dtype)
+            pixel_values = pixel_values.astype(self.vision_tower.patch_embed.proj.weight.dtype)
         else:
             pixel_values = pixel_values.astype(self.dtype)
 
-        # Get vision features from vision tower
         if uses_grid_thw and image_grid_thw is not None:
             if is_moonvit:
-                # KimiVL/MoonViT style: VisionModel expects NHWC input and grid_thw
-                # pixel_values may be NCHW from processor, convert to NHWC
+                # MoonViT (KimiVL) expects NHWC input
                 if pixel_values.ndim == 4 and pixel_values.shape[1] in [1, 3, 4]:
                     pixel_values = pixel_values.transpose(0, 2, 3, 1)
                 vision_outputs = self.vision_tower(
                     pixel_values, grid_thw=image_grid_thw, output_hidden_states=True
                 )
             else:
-                # Qwen-VL style: VisionModel(pixel_values, grid_thw) -> hidden_states
-                # No format conversion needed - Qwen-VL expects flat patches
+                # Qwen-VL expects flat patches
                 vision_outputs = self.vision_tower(pixel_values, image_grid_thw)
 
             if isinstance(vision_outputs, tuple):
-                # First element is the merged hidden states (already projected by merger)
                 selected_features = vision_outputs[0]
             elif isinstance(vision_outputs, list):
-                # KimiVL patch_merger returns a list of arrays
                 selected_features = vision_outputs
             else:
                 selected_features = vision_outputs
         else:
-            # Standard CLIP/SigLIP style
-            # Convert to vision tower expected format (typically NHWC for MLX)
+            # CLIP/SigLIP style: NCHW -> NHWC
             if pixel_values.ndim == 4 and pixel_values.shape[1] in [1, 3, 4]:
-                # NCHW -> NHWC
                 pixel_values = pixel_values.transpose(0, 2, 3, 1)
 
             vision_outputs = self.vision_tower(pixel_values, output_hidden_states=True)
 
-            # Handle different output formats
             if isinstance(vision_outputs, tuple):
-                # CLIP/SigLIP style: (pooler_output, last_hidden_state, hidden_states)
                 if len(vision_outputs) >= 3:
-                    hidden_states = vision_outputs[2]  # All hidden states
+                    hidden_states = vision_outputs[2]
                     if isinstance(self.vision_feature_layer, int):
                         selected_features = hidden_states[self.vision_feature_layer]
                         if self.vision_feature_select_strategy == "default":
-                            # Remove CLS token
                             selected_features = selected_features[:, 1:]
                     else:
-                        # Multiple layers
                         hs_pool = [hidden_states[idx] for idx in self.vision_feature_layer]
                         if self.vision_feature_select_strategy == "default":
                             hs_pool = [hs[:, 1:] for hs in hs_pool]
                         selected_features = mx.concatenate(hs_pool, axis=-1)
                 else:
-                    # Simple (pooler, hidden_state) output
                     selected_features = vision_outputs[1]
                     if self.vision_feature_select_strategy == "default":
                         selected_features = selected_features[:, 1:]
             else:
-                # Direct hidden state output
                 selected_features = vision_outputs
 
-        # Project to language model dimension if projector exists
-        # Qwen-VL models have projection built into VisionModel's merger
         if self.multi_modal_projector is not None:
             image_features = self.multi_modal_projector(selected_features)
         else:
-            # VisionModel already outputs projected features
             image_features = selected_features
 
         return image_features
@@ -321,36 +283,19 @@ class ShardedModel(nn.Module):
         inputs_embeds: mx.array,
         input_ids: mx.array,
     ) -> mx.array:
-        """Merge image features into input embeddings at image token positions.
-
-        This replaces <image> placeholder tokens with actual image feature embeddings.
-
-        Args:
-            image_features: (num_images, num_patches, hidden_dim) or (total_patches, hidden_dim)
-            inputs_embeds: (batch, seq_len, hidden_dim) Text embeddings
-            input_ids: (batch, seq_len) Token IDs for finding image positions
-
-        Returns:
-            Merged embeddings with image features inserted at image token positions
-        """
+        """Replace <image> placeholder tokens with actual image feature embeddings."""
         if self.image_token_index is None:
             logger.warning("image_token_index not set, cannot merge image features")
             return inputs_embeds
 
         batch_size, seq_len, hidden_dim = inputs_embeds.shape
-
-        # Find positions of image tokens
         image_positions = input_ids == self.image_token_index
 
-        # Flatten image features if needed
         if image_features.ndim == 3:
-            # (num_images, num_patches, dim) -> (total_patches, dim)
             image_features = image_features.reshape(-1, image_features.shape[-1])
 
-        # Cast image features to match embedding dtype
         image_features = image_features.astype(inputs_embeds.dtype)
 
-        # Process each batch item
         batch_outputs = []
         feature_start_idx = 0
 
@@ -359,28 +304,23 @@ class ShardedModel(nn.Module):
             num_positions = int(mx.sum(batch_mask).item())
 
             if num_positions > 0:
-                # Extract features for this batch
                 batch_features = image_features[
                     feature_start_idx : feature_start_idx + num_positions
                 ]
 
                 if batch_features.shape[0] != num_positions:
                     raise ValueError(
-                        f"Number of image token positions ({num_positions}) does not match "
-                        f"number of image features ({batch_features.shape[0]}) for batch {batch_idx}"
+                        f"Image token positions ({num_positions}) does not match "
+                        f"image features ({batch_features.shape[0]}) for batch {batch_idx}"
                     )
 
-                # Create indices for gathering
                 cumsum = mx.cumsum(batch_mask.astype(mx.int32))
                 feature_indices = mx.where(batch_mask, cumsum - 1, 0)
-
-                # Gather features and create merged output
                 gathered_features = batch_features[feature_indices]
                 batch_mask_expanded = mx.expand_dims(batch_mask, axis=-1)
                 batch_output = mx.where(
                     batch_mask_expanded, gathered_features, inputs_embeds[batch_idx]
                 )
-
                 feature_start_idx += num_positions
             else:
                 batch_output = inputs_embeds[batch_idx]

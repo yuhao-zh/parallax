@@ -32,6 +32,7 @@ def make_tool_state(
 
 # ---- Parsers mimicking common model formats ----
 
+
 def json_tool_parser(tool_text: str, tools):
     """Parser for JSON-formatted tool calls (e.g. Qwen, GLM)."""
     parsed = json.loads(tool_text)
@@ -72,11 +73,13 @@ def multi_tool_parser(tool_text: str, tools):
         if not part.endswith("}"):
             part = part + "}"
         parsed = json.loads(part)
-        calls.append({
-            "id": parsed.get("id", "call_0"),
-            "name": parsed["name"],
-            "arguments": parsed["arguments"],
-        })
+        calls.append(
+            {
+                "id": parsed.get("id", "call_0"),
+                "name": parsed["name"],
+                "arguments": parsed["arguments"],
+            }
+        )
     return calls
 
 
@@ -170,7 +173,9 @@ class TestToolCallExtraction(unittest.TestCase):
             tools=SAMPLE_TOOLS,
         )
 
-        segment = '<tool_call>{"name": "get_weather", "arguments": {"location": "Beijing"}}</tool_call>'
+        segment = (
+            '<tool_call>{"name": "get_weather", "arguments": {"location": "Beijing"}}</tool_call>'
+        )
         text, tool_calls = state.extract_from_segment(segment)
 
         self.assertEqual(text, "")
@@ -193,12 +198,12 @@ class TestToolCallExtraction(unittest.TestCase):
         )
 
         segment = (
-            '<|tool_start|>'
+            "<|tool_start|>"
             '<invoke name="multiply">'
             '<parameter name="a">12345</parameter>'
             '<parameter name="b">67890</parameter>'
-            '</invoke>'
-            '<|tool_end|>'
+            "</invoke>"
+            "<|tool_end|>"
         )
         text, tool_calls = state.extract_from_segment(segment)
 
@@ -267,7 +272,9 @@ class TestToolCallExtraction(unittest.TestCase):
             stream=False,
         )
 
-        segment = '<tool_call>{"name": "get_weather", "arguments": {"location": "Beijing"}}</tool_call>'
+        segment = (
+            '<tool_call>{"name": "get_weather", "arguments": {"location": "Beijing"}}</tool_call>'
+        )
         text, tool_calls = state.extract_from_segment(segment)
 
         self.assertEqual(text, segment)
@@ -300,9 +307,7 @@ class TestToolCallStreaming(unittest.TestCase):
         )
 
         # First segment: start marker + partial content
-        text1, calls1 = state.extract_from_segment(
-            '<tool_call>{"name": "get_weather",'
-        )
+        text1, calls1 = state.extract_from_segment('<tool_call>{"name": "get_weather",')
         self.assertEqual(text1, "")
         self.assertEqual(calls1, [])
         self.assertTrue(state.in_tool_call)
@@ -366,7 +371,9 @@ class TestToolCallStreaming(unittest.TestCase):
         )
 
         # First tool call
-        segment1 = '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+        segment1 = (
+            '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+        )
         _, calls1 = state.extract_from_segment(segment1)
         self.assertEqual(calls1[0]["index"], 0)
 
@@ -446,7 +453,9 @@ class TestToolCallEdgeCases(unittest.TestCase):
 
         self.assertFalse(state.made_tool_call)
 
-        segment = '<tool_call>{"name": "get_weather", "arguments": {"location": "Beijing"}}</tool_call>'
+        segment = (
+            '<tool_call>{"name": "get_weather", "arguments": {"location": "Beijing"}}</tool_call>'
+        )
         state.extract_from_segment(segment)
 
         self.assertTrue(state.made_tool_call)
@@ -474,7 +483,9 @@ class TestToolCallEdgeCases(unittest.TestCase):
             tools=SAMPLE_TOOLS,
         )
 
-        segment = '<tool_call>{"name": "get_weather", "arguments": {"location": "北京"}}</tool_call>'
+        segment = (
+            '<tool_call>{"name": "get_weather", "arguments": {"location": "北京"}}</tool_call>'
+        )
         _, tool_calls = state.extract_from_segment(segment)
 
         # arguments should be a JSON string (not a dict) in the output
@@ -491,7 +502,9 @@ class TestToolCallEdgeCases(unittest.TestCase):
             tools=SAMPLE_TOOLS,
         )
 
-        segment = '<tool_call>{"name": "get_weather", "arguments": {"location": "東京"}}</tool_call>'
+        segment = (
+            '<tool_call>{"name": "get_weather", "arguments": {"location": "東京"}}</tool_call>'
+        )
         _, tool_calls = state.extract_from_segment(segment)
 
         args_str = tool_calls[0]["function"]["arguments"]

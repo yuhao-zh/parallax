@@ -9,13 +9,13 @@ for distributed inference.
 from typing import Any, List, Optional
 
 import mlx.core as mx
-from mlx import nn
 from mlx_lm.models.base import scaled_dot_product_attention
 
 # Import from mlx-vlm kimi_vl language module
 from mlx_vlm.models.kimi_vl.language import DeepseekV3Attention as MLXKimiVLAttention
-from mlx_vlm.models.kimi_vl.language import DeepseekV3DecoderLayer as MLXKimiVLDecoderLayer
-from mlx_vlm.models.kimi_vl.language import DeepseekV3MLP, DeepseekV3MoE
+from mlx_vlm.models.kimi_vl.language import (
+    DeepseekV3DecoderLayer as MLXKimiVLDecoderLayer,
+)
 
 from parallax.metal.paged_attention.kernel import paged_attention, reshape_and_cache
 from parallax.server.cache.base import BaseCache
