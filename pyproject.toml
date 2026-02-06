@@ -46,7 +46,7 @@ parallax = "parallax.cli:main"
 mac = [
   "nanobind==2.10.2",
   "torch==2.8.0",
-  "mlx-lm==0.30.5",
+  "mlx-lm==0.30.6",
   "mlx==0.30.4",
   "mlx-vlm==0.3.10",
   "torchvision==0.23.0"
@@ -54,8 +54,6 @@ mac = [
 
 gpu = [
   "sglang[all] @ git+https://github.com/sgl-project/sglang.git@9409c43593f2d6d64595981abf216a15752b0875#subdirectory=python",
-  "mlx-lm==0.28.4",
-  "mlx[cpu]==0.30.0",
 ]
 
 vllm = [
