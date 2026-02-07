@@ -158,6 +158,7 @@ class BaseExecutor:
 
         self.eos_token_id = self._config_accessor.get_eos_token_id()
 
+        self._augment_eos_with_im_end()
         # Build multimodal config (only meaningful for VLM models)
         self.mm_config = self._config_accessor.build_mm_config()
 
@@ -628,6 +629,37 @@ class BaseExecutor:
 
         logger.debug("Executor shutdown complete.")
 
+    def _augment_eos_with_im_end(self):
+        """Add ``<|im_end|>`` to the EOS token list when it is present in the
+        vocabulary but missing from the configured ``eos_token_id``.
+
+        Many chat models (Kimi-K2.5, Qwen, etc.) use ``<|im_end|>`` as the
+        turn-ending token, yet their ``config.json`` only lists ``[EOS]`` as
+        the EOS token.  Without this augmentation the scheduler will never
+        detect end-of-turn and generation will run until ``max_tokens``.
+        """
+        _get_vocab = getattr(self.tokenizer, "get_vocab", None)
+        vocab = _get_vocab() if _get_vocab else {}
+        im_end_id = vocab.get("<|im_end|>")
+        if im_end_id is None:
+            return
+
+        # Normalise eos_token_id to a list for easy comparison
+        if self.eos_token_id is None:
+            self.eos_token_id = [im_end_id]
+            logger.info(f"Set eos_token_id to [{im_end_id}] (<|im_end|>)")
+        elif isinstance(self.eos_token_id, list):
+            if im_end_id not in self.eos_token_id:
+                self.eos_token_id.append(im_end_id)
+                logger.info(f"Added <|im_end|> (id={im_end_id}) to eos_token_id list")
+        elif isinstance(self.eos_token_id, int):
+            if self.eos_token_id != im_end_id:
+                self.eos_token_id = [self.eos_token_id, im_end_id]
+                logger.info(
+                    f"Expanded eos_token_id to {self.eos_token_id} "
+                    f"(added <|im_end|> id={im_end_id})"
+                )
+
     def _process_text_request(self, rid: str, messages: list, raw_request: Dict) -> list:
         """Process a text-only request using the tokenizer."""
         if self.tokenizer.chat_template:
@@ -747,6 +779,29 @@ class BaseExecutor:
                 sampling_params.top_p = raw_sampling_params["top_p"]
             if "ignore_eos" in raw_sampling_params:
                 sampling_params.ignore_eos = raw_sampling_params["ignore_eos"]
+
+        # Also read OpenAI-style top-level sampling parameters as fallback
+        if "temperature" in raw_request and raw_sampling_params is None:
+            sampling_params.temperature = raw_request["temperature"]
+            if sampling_params.temperature == 0.0:
+                sampling_params.temperature = 1.0
+                sampling_params.top_k = 1
+        if "top_p" in raw_request and raw_sampling_params is None:
+            sampling_params.top_p = raw_request["top_p"]
+
+        # When tools are present, add tool-call-related stop token IDs so the
+        # scheduler halts generation at the tool-call boundary instead of
+        # running until max_tokens.
+        tools = raw_request.get("tools")
+        if tools and self.tokenizer is not None:
+            from parallax.utils.tokenizer_utils import get_tool_call_stop_token_ids
+
+            tool_stop_ids = get_tool_call_stop_token_ids(self.tokenizer)
+            if tool_stop_ids:
+                if sampling_params.stop_token_ids is None:
+                    sampling_params.stop_token_ids = set()
+                sampling_params.stop_token_ids.update(tool_stop_ids)
+                logger.debug(f"Added tool call stop token IDs for request {rid}: {tool_stop_ids}")
 
         req = InitialRequest(
             request_id=rid,
