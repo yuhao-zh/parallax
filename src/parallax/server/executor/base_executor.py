@@ -809,9 +809,7 @@ class BaseExecutor:
                 if sampling_params.stop_token_ids is None:
                     sampling_params.stop_token_ids = set()
                 sampling_params.stop_token_ids.update(tool_stop_ids)
-                logger.debug(
-                    f"Added tool call stop token IDs for request {rid}: {tool_stop_ids}"
-                )
+                logger.debug(f"Added tool call stop token IDs for request {rid}: {tool_stop_ids}")
 
         req = InitialRequest(
             request_id=rid,

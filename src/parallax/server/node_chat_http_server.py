@@ -13,9 +13,9 @@ from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import State
 
 from backend.server.rpc_connection_handler import RPCConnectionHandler
+from parallax.server.http_server import validate_kimi_k25_params
 from parallax_utils.file_util import get_project_root
 from parallax_utils.logging_config import get_logger
-from parallax.server.http_server import validate_kimi_k25_params
 
 logger = get_logger(__name__)
 
