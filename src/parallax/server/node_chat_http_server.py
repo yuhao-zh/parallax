@@ -15,6 +15,7 @@ from starlette.datastructures import State
 from backend.server.rpc_connection_handler import RPCConnectionHandler
 from parallax_utils.file_util import get_project_root
 from parallax_utils.logging_config import get_logger
+from parallax.server.http_server import validate_kimi_k25_params
 
 logger = get_logger(__name__)
 
@@ -43,6 +44,15 @@ async def get_cluster_status():
 async def openai_v1_chat_completions(raw_request: Request):
     """OpenAI v1/chat/complete post function"""
     request_data = await raw_request.json()
+
+    # Validate immutable parameter constraints (e.g. Kimi-K2.5)
+    param_error = validate_kimi_k25_params(request_data)
+    if param_error is not None:
+        return JSONResponse(
+            content={"error": {"message": param_error, "type": "BadRequestError", "code": 400}},
+            status_code=400,
+        )
+
     request_id = uuid.uuid4()
     received_ts = time.time()
     return await v1_chat_completions(request_data, request_id, received_ts)
