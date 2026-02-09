@@ -147,7 +147,7 @@ class HTTPRequestInfo:
     finish_reason: str = None
     object: str = "chat.completion"
     model: str = "default"
-    create_time: float = 0.0
+    create_time: int = 0
     update_time: float = 0.0
     logprobs: float = None
     matched_stop: int = None
@@ -216,7 +216,7 @@ class HTTPHandler:
         return_probs = request.get("return_probs", False)  # Check if probs requested
         chat_object = "chat.completion.chunk" if stream else "chat.completion"
         detokenizer = self.detokenizer_class(self.tokenizer, self.tokenmap)
-        create_time = time.time()
+        create_time = int(time.time())
         update_time = create_time
         request_info = HTTPRequestInfo(
             id=rid,
