@@ -140,7 +140,9 @@ def process_images(
 
         # Handle different field names: Kimi K2.5 uses 'grid_thws', others use 'image_grid_thw'
         is_kimi_k25 = processor_class_name == "KimiK25Processor"
-        image_grid_thw = inputs.get("image_grid_thw") or inputs.get("grid_thws")
+        image_grid_thw = inputs.get("image_grid_thw")
+        if image_grid_thw is None:
+            image_grid_thw = inputs.get("grid_thws")
         image_sizes = inputs.get("image_sizes")
 
         logger.debug(f"image_grid_thw: {image_grid_thw}, is_kimi_k25: {is_kimi_k25}")
