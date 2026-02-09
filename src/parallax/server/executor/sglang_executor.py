@@ -547,6 +547,15 @@ class SGLExecutor(BaseExecutor):
 
         # Pre-check: Verify KV cache has enough space for prefill
         total_tokens_needed = sum(req.total_length for req in batched_requests)
+        try:
+            available = self.model_runner.token_to_kv_pool_allocator.available_size()
+            logger.debug(
+                f"[KV Cache Prefill] available={available}, needed={total_tokens_needed}, "
+                f"batch_size={batch_size}, "
+                f"req_lengths=[{', '.join(str(r.total_length) for r in batched_requests)}]"
+            )
+        except Exception:
+            pass
         if not self._check_kv_cache_available(total_tokens_needed):
             self._abort_requests_due_to_kv_cache(
                 batched_requests,
@@ -629,6 +638,13 @@ class SGLExecutor(BaseExecutor):
 
         # Pre-check: Verify KV cache has enough space for decode (1 token per request)
         tokens_needed = batch_size
+        try:
+            available = self.model_runner.token_to_kv_pool_allocator.available_size()
+            logger.debug(
+                f"[KV Cache Decode] available={available}, needed={tokens_needed}, batch_size={batch_size}"
+            )
+        except Exception:
+            pass
         if not self._check_kv_cache_available(tokens_needed):
             self._abort_requests_due_to_kv_cache(
                 batched_requests,

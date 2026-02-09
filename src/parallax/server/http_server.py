@@ -492,7 +492,7 @@ class HTTPHandler:
             if is_finished:
                 if recv_dict.get("abort", False):
                     logger.warning(f"Request {rid} finished with abort")
-                    request_info.finish_reason = "abort"
+                    request_info.finish_reason = "stop"
                 elif recv_dict.get("length", False):
                     logger.debug(f"Request {rid} finished with length")
                     request_info.finish_reason = "length"
@@ -506,7 +506,7 @@ class HTTPHandler:
                     request_info.matched_stop = next_token_id
                 else:
                     logger.debug(f"Request {rid} finished with unknown reason")
-                    request_info.finish_reason = "unknown"
+                    request_info.finish_reason = "stop"
 
                 request_info.is_finish = True
                 if request_info.stream:
