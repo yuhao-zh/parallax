@@ -175,6 +175,9 @@ class MLXExecutor(BaseExecutor):
         # Calculate feature dimensions for kv cache
         # Use helper to handle VLM models where these are in text_config
         num_key_value_heads = get_config_value(self.config, "num_key_value_heads")
+        if num_key_value_heads is None:
+            # Step3.5 flash use num_attention_groups instead.
+            num_key_value_heads = get_config_value(self.config, "num_attention_groups")
         head_dim = get_config_value(self.config, "head_dim")
         if head_dim is None:
             hidden_size = get_config_value(self.config, "hidden_size")
