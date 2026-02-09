@@ -158,7 +158,12 @@ class BaseExecutor:
 
         self.eos_token_id = self._config_accessor.get_eos_token_id()
 
+        # Ensure <|im_end|> is in the EOS token list.  Some models (e.g.
+        # Kimi-K2.5) use <|im_end|> to end assistant turns but only list
+        # [EOS] in config.json.  Without this the scheduler will never
+        # detect end-of-turn and generation runs until max_tokens.
         self._augment_eos_with_im_end()
+
         # Build multimodal config (only meaningful for VLM models)
         self.mm_config = self._config_accessor.build_mm_config()
 
@@ -744,19 +749,22 @@ class BaseExecutor:
         max_new_tokens = raw_request.get("max_tokens", 2048)
         input_token_num = len(prompt)
         if input_token_num + max_new_tokens >= max_seq_len:
-            logger.warning(
-                f"Input token length {input_token_num} + max_new_tokens {max_new_tokens} exceeds max_sequence_length {max_seq_len}."
-            )
-            if max_new_tokens > 2048:
+            available_new_tokens = max_seq_len - input_token_num
+            if available_new_tokens <= 0:
                 logger.warning(
-                    f"max_new_tokens {max_new_tokens} is too large, reduce to 2048 tokens."
+                    f"Input token length {input_token_num} already exceeds "
+                    f"max_sequence_length {max_seq_len}. "
+                    f"Truncating input to keep last {max_seq_len - 1} tokens."
                 )
-                max_new_tokens = 2048
-            if input_token_num + max_new_tokens >= max_seq_len:
+                prompt = prompt[-(max_seq_len - 1) :]
+                max_new_tokens = 1
+            else:
                 logger.warning(
-                    f"Trunc input prompt, keep last {max_seq_len - max_new_tokens} tokens"
+                    f"Input token length {input_token_num} + max_new_tokens {max_new_tokens} "
+                    f"exceeds max_sequence_length {max_seq_len}. "
+                    f"Reducing max_new_tokens to {available_new_tokens}."
                 )
-                prompt = prompt[-(max_seq_len - max_new_tokens) :]
+                max_new_tokens = available_new_tokens
 
         max_total_length = len(prompt) + max_new_tokens
         logger.debug(f"Final max_new_tokens for request ID {rid}: {max_new_tokens}")
@@ -801,7 +809,9 @@ class BaseExecutor:
                 if sampling_params.stop_token_ids is None:
                     sampling_params.stop_token_ids = set()
                 sampling_params.stop_token_ids.update(tool_stop_ids)
-                logger.debug(f"Added tool call stop token IDs for request {rid}: {tool_stop_ids}")
+                logger.debug(
+                    f"Added tool call stop token IDs for request {rid}: {tool_stop_ids}"
+                )
 
         req = InitialRequest(
             request_id=rid,
