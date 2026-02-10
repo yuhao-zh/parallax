@@ -6,12 +6,8 @@ logger = get_logger(__name__)
 
 import mlx.core as mx
 from mlx_lm.models.base import scaled_dot_product_attention
-from mlx_lm.models.glm4_moe_lite import (
-    Glm4MoeLiteAttention as MLXGLM4MoeLiteAttention,
-)
-from mlx_lm.models.glm4_moe_lite import (
-    Glm4MoeLiteDecoderLayer as MLXGLM4MoeLiteBlock,
-)
+from mlx_lm.models.glm4_moe_lite import Glm4MoeLiteAttention as MLXGLM4MoeLiteAttention
+from mlx_lm.models.glm4_moe_lite import Glm4MoeLiteDecoderLayer as MLXGLM4MoeLiteBlock
 from mlx_lm.models.glm4_moe_lite import ModelArgs
 
 from parallax.metal.paged_attention.kernel import paged_attention, reshape_and_cache
@@ -64,16 +60,11 @@ class ParallaxGLM4MoeLiteAttention(MLXGLM4MoeLiteAttention):
         else:
             q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(x)))
 
-        q = q.reshape(batch, target_len, self.num_heads, self.q_head_dim).transpose(
-            0, 2, 1, 3
-        )
+        q = q.reshape(batch, target_len, self.num_heads, self.q_head_dim).transpose(0, 2, 1, 3)
         q_nope, q_pe = mx.split(q, [self.qk_nope_head_dim], axis=-1)
         compressed_kv = self.kv_a_proj_with_mqa(x)
         compressed_kv, k_pe = mx.split(compressed_kv, [self.kv_lora_rank], axis=-1)
-        k_pe = k_pe.reshape(batch, target_len, 1, self.qk_rope_head_dim).transpose(
-            0, 2, 1, 3
-        )
-
+        k_pe = k_pe.reshape(batch, target_len, 1, self.qk_rope_head_dim).transpose(0, 2, 1, 3)
 
         kv_latent = self.kv_a_layernorm(compressed_kv)
 
@@ -140,15 +131,11 @@ class ParallaxGLM4MoeLiteAttention(MLXGLM4MoeLiteAttention):
             output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
         else:
             # Prefill phase
-            has_prefix_cache = prefix_lens is not None and bool(
-                mx.any(prefix_lens > 0)
-            )
+            has_prefix_cache = prefix_lens is not None and bool(mx.any(prefix_lens > 0))
 
             if has_prefix_cache:
                 k_new = keys  # (batch, 1, target_len, key_head_dim)
-                v_new = values.transpose(
-                    0, 2, 1, 3
-                )  # (batch, 1, target_len, kv_lora_rank)
+                v_new = values.transpose(0, 2, 1, 3)  # (batch, 1, target_len, kv_lora_rank)
                 output = compute_attention_with_prefix_cache(
                     queries,
                     k_new,
@@ -165,9 +152,7 @@ class ParallaxGLM4MoeLiteAttention(MLXGLM4MoeLiteAttention):
                 # output: (batch, num_heads, target_len, kv_lora_rank)
                 output = self.unembed_out(output)
                 # output: (batch, num_heads, target_len, v_head_dim)
-                output = output.transpose(0, 2, 1, 3).reshape(
-                    batch, target_len, -1
-                )
+                output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
             else:
                 # No prefix cache, standard self-attention
                 if mask is not None:
@@ -184,9 +169,7 @@ class ParallaxGLM4MoeLiteAttention(MLXGLM4MoeLiteAttention):
                 # output: (batch, num_heads, target_len, kv_lora_rank)
                 output = self.unembed_out(output)
                 # output: (batch, num_heads, target_len, v_head_dim)
-                output = output.transpose(0, 2, 1, 3).reshape(
-                    batch, target_len, -1
-                )
+                output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
 
         return self.o_proj(output)
 
