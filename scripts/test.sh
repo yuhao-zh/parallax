@@ -32,9 +32,3 @@ curl --location 'http://localhost:3210/v1/chat/completions' \
     ],
     "stream": false
   }'
-
-
-
-
-
-
