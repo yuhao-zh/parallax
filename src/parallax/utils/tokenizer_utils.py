@@ -150,7 +150,7 @@ def get_tool_call_stop_token_ids(tokenizer) -> List[int]:
     # Markers whose token IDs should halt generation
     markers = [
         "<|tool_calls_section_end|>",  # Kimi K2 / K2.5
-        "<|im_end|>",                  # common chat turn-end token
+        "<|im_end|>",  # common chat turn-end token
     ]
 
     for marker in markers:
