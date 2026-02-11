@@ -460,8 +460,8 @@ class TestToolCallEdgeCases(unittest.TestCase):
 
         self.assertTrue(state.made_tool_call)
 
-    def test_made_tool_call_flag_set_even_on_parse_failure(self):
-        """made_tool_call should be True even if parsing fails (marker was still entered)."""
+    def test_made_tool_call_flag_not_set_on_parse_failure(self):
+        """made_tool_call should be False if parsing fails (no valid tool call was produced)."""
         state = make_tool_state(
             tool_call_start="<tool_call>",
             tool_call_end="</tool_call>",
@@ -472,7 +472,7 @@ class TestToolCallEdgeCases(unittest.TestCase):
         segment = "<tool_call>invalid</tool_call>"
         state.extract_from_segment(segment)
 
-        self.assertTrue(state.made_tool_call)
+        self.assertFalse(state.made_tool_call)
 
     def test_string_arguments_serialized_to_json(self):
         """Tool call arguments dict should be serialized to JSON string in output."""
